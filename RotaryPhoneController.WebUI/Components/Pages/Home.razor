@@ -1,0 +1,162 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject CallManager CallManager
+@inject IGpioService GpioService
+@implements IDisposable
+
+<PageTitle>Rotary Phone Controller</PageTitle>
+
+<h1>Rotary Phone Controller</h1>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h3>Current Status</h3>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <strong>Call State:</strong>
+                    <span class="badge @GetStateBadgeClass()">@CallManager.CurrentState</span>
+                </div>
+                <div class="mb-3">
+                    <strong>Dialed Number:</strong>
+                    <span class="display-number">@(string.IsNullOrEmpty(CallManager.DialedNumber) ? "(none)" : CallManager.DialedNumber)</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card mb-3">
+            <div class="card-header">
+                <h3>Mock Controls</h3>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <button class="btn btn-primary w-100 mb-2" @onclick="ToggleHookSwitch">
+                        <i class="bi bi-telephone"></i> Toggle Hook Switch (@(isOffHook ? "Hang Up" : "Pick Up"))
+                    </button>
+                </div>
+                <div class="mb-3">
+                    <button class="btn btn-warning w-100 mb-2" 
+                            @onclick="SimulateIncomingCall" 
+                            disabled="@(CallManager.CurrentState != CallState.Idle)">
+                        <i class="bi bi-phone-vibrate"></i> Simulate Incoming Call
+                    </button>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Simulate Dialing (when off-hook):</label>
+                    <div class="d-grid gap-2">
+                        @for (int i = 1; i <= 9; i++)
+                        {
+                            var digit = i;
+                            <button class="btn btn-outline-secondary btn-sm" 
+                                    @onclick="() => SimulateDialDigit(digit)"
+                                    disabled="@(CallManager.CurrentState != CallState.Dialing)">
+                                @digit
+                            </button>
+                        }
+                        <button class="btn btn-outline-secondary btn-sm" 
+                                @onclick="() => SimulateDialDigit(0)"
+                                disabled="@(CallManager.CurrentState != CallState.Dialing)">
+                            0
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h3>Instructions</h3>
+            </div>
+            <div class="card-body">
+                <ul>
+                    <li><strong>Pick Up:</strong> Click "Toggle Hook Switch" to simulate lifting the handset (transitions from Idle to Dialing)</li>
+                    <li><strong>Dial:</strong> While in Dialing state, click digit buttons to simulate rotary dial pulses</li>
+                    <li><strong>Incoming Call:</strong> Click "Simulate Incoming Call" to start the ringer (transitions to Ringing state)</li>
+                    <li><strong>Answer:</strong> While Ringing, click "Toggle Hook Switch" to answer (transitions to InCall)</li>
+                    <li><strong>Hang Up:</strong> Click "Toggle Hook Switch" to return to Idle state</li>
+                </ul>
+                <p class="text-muted">All state transitions and events are logged to the console and debug output via Serilog.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .display-number {
+        font-family: monospace;
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #0066cc;
+    }
+
+    .d-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+    }
+</style>
+
+@code {
+    private bool isOffHook = false;
+
+    protected override void OnInitialized()
+    {
+        CallManager.StateChanged += OnStateChanged;
+    }
+
+    private void OnStateChanged()
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void ToggleHookSwitch()
+    {
+        isOffHook = !isOffHook;
+        
+        if (GpioService is MockGpioService mockGpio)
+        {
+            mockGpio.SimulateHookChange(isOffHook);
+        }
+        
+        CallManager.HandleHookChange(isOffHook);
+    }
+
+    private void SimulateIncomingCall()
+    {
+        CallManager.SimulateIncomingCall();
+    }
+
+    private void SimulateDialDigit(int digit)
+    {
+        if (CallManager.CurrentState == CallState.Dialing && GpioService is MockGpioService mockGpio)
+        {
+            const int PULSE_PIN = 17;
+            Task.Run(() => mockGpio.SimulateDigit(digit, PULSE_PIN));
+        }
+    }
+
+    private string GetStateBadgeClass()
+    {
+        return CallManager.CurrentState switch
+        {
+            CallState.Idle => "bg-secondary",
+            CallState.Dialing => "bg-info",
+            CallState.Ringing => "bg-warning",
+            CallState.InCall => "bg-success",
+            _ => "bg-secondary"
+        };
+    }
+
+    public void Dispose()
+    {
+        CallManager.StateChanged -= OnStateChanged;
+    }
+}
+
