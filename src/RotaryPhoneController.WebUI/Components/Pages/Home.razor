@@ -1,0 +1,138 @@
+﻿@page "/"
+@using RotaryPhoneController.Core
+@inject CallManager CallManager
+@inject ISipAdapter SipAdapter
+@implements IDisposable
+
+<PageTitle>Rotary Phone Controller</PageTitle>
+
+<h1>Rotary Phone Controller</h1>
+
+<div class="container">
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h3>Current State</h3>
+                </div>
+                <div class="card-body">
+                    <h2 class="display-4">@CallManager.CurrentState</h2>
+                    @if (!string.IsNullOrEmpty(CallManager.DialedNumber))
+                    {
+                        <p><strong>Dialed Number:</strong> @CallManager.DialedNumber</p>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3>Mock Event Controls</h3>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <button class="btn btn-primary btn-lg" @onclick="SimulateIncomingCall">
+                            📞 Simulate Mobile Incoming Call
+                        </button>
+                    </div>
+
+                    <div class="mb-3">
+                        <button class="btn btn-success btn-lg me-2" @onclick="SimulateOffHook">
+                            🔓 Simulate Handset OFF-HOOK
+                        </button>
+                        <button class="btn btn-danger btn-lg" @onclick="SimulateOnHook">
+                            🔒 Simulate Handset ON-HOOK
+                        </button>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="input-group">
+                            <input type="text" class="form-control" placeholder="Enter number (e.g., 5551234567)" 
+                                   @bind="digitsInput" />
+                            <button class="btn btn-info" @onclick="SimulateDigitsReceived">
+                                🔢 Simulate Digits Received
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3>State Machine Flow</h3>
+                </div>
+                <div class="card-body">
+                    <ul>
+                        <li><strong>Idle</strong> → Incoming Call → <strong>Ringing</strong> → OFF-HOOK → <strong>InCall</strong> → ON-HOOK → <strong>Idle</strong></li>
+                        <li><strong>Idle</strong> → OFF-HOOK → <strong>Dialing</strong> → Enter Digits → <strong>InCall</strong> → ON-HOOK → <strong>Idle</strong></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private string digitsInput = string.Empty;
+
+    protected override void OnInitialized()
+    {
+        // Subscribe to state changes to trigger UI updates
+        CallManager.StateChanged += OnStateChanged;
+    }
+
+    private void OnStateChanged()
+    {
+        // Notify Blazor that the state has changed and UI should update
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void SimulateIncomingCall()
+    {
+        CallManager.SimulateIncomingCall();
+    }
+
+    private void SimulateOffHook()
+    {
+        if (SipAdapter is SIPSorceryAdapter adapter)
+        {
+            adapter.TriggerHookChange(true);
+        }
+    }
+
+    private void SimulateOnHook()
+    {
+        if (SipAdapter is SIPSorceryAdapter adapter)
+        {
+            adapter.TriggerHookChange(false);
+        }
+    }
+
+    private void SimulateDigitsReceived()
+    {
+        if (!string.IsNullOrEmpty(digitsInput))
+        {
+            if (SipAdapter is SIPSorceryAdapter adapter)
+            {
+                adapter.TriggerDigitsReceived(digitsInput);
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        // Unsubscribe from events
+        if (CallManager != null)
+        {
+            CallManager.StateChanged -= OnStateChanged;
+        }
+    }
+}
+
