@@ -62,7 +62,7 @@ public class MockGpioService : IGpioService
 
     public void SimulateDigit(int digit, int pulsePin)
     {
-        // Synchronous wrapper for backward compatibility
-        SimulateDigitAsync(digit, pulsePin).GetAwaiter().GetResult();
+        // Use Task.Run to avoid blocking the calling thread
+        _ = Task.Run(() => SimulateDigitAsync(digit, pulsePin));
     }
 }

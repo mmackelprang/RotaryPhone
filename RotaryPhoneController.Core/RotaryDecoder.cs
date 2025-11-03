@@ -2,12 +2,13 @@ using Serilog;
 
 namespace RotaryPhoneController.Core;
 
-public class RotaryDecoder
+public class RotaryDecoder : IDisposable
 {
     private const int INTER_DIGIT_TIMEOUT_MS = 500;
     private int _pulseCount = 0;
     private Timer? _digitTimer;
     private readonly object _lock = new();
+    private bool _disposed = false;
     
     public event Action<int>? DigitDecoded;
 
@@ -65,6 +66,27 @@ public class RotaryDecoder
             StopDigitTimer();
             _pulseCount = 0;
             Log.Debug("RotaryDecoder: Reset");
+        }
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!_disposed)
+        {
+            if (disposing)
+            {
+                lock (_lock)
+                {
+                    StopDigitTimer();
+                }
+            }
+            _disposed = true;
         }
     }
 }

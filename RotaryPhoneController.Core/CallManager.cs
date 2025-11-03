@@ -2,7 +2,7 @@ using Serilog;
 
 namespace RotaryPhoneController.Core;
 
-public class CallManager
+public class CallManager : IDisposable
 {
     private const int PULSE_PIN = 17; // Example GPIO pin number
     private const int RING_CONTROL_PIN = 27; // Example GPIO pin number
@@ -14,6 +14,7 @@ public class CallManager
     private readonly object _stateLock = new();
     private Task? _ringerTask;
     private CancellationTokenSource? _ringerCts;
+    private bool _disposed = false;
 
     public event Action? StateChanged;
 
@@ -206,5 +207,25 @@ public class CallManager
         _rotaryDecoder.Reset();
         
         Log.Information("CallManager: Returned to idle state");
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (!_disposed)
+        {
+            if (disposing)
+            {
+                StopRinger();
+                _rotaryDecoder.Dispose();
+                _ringerCts?.Dispose();
+            }
+            _disposed = true;
+        }
     }
 }
