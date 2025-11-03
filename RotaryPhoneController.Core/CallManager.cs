@@ -109,11 +109,8 @@ public class CallManager
             DialedNumber += digit.ToString();
             Log.Information("CallManager: Digit added: {Digit}, Current number: {DialedNumber}", digit, DialedNumber);
             
-            // Auto-dial after a complete number (this is simplified - in real scenarios you'd wait for completion)
-            if (DialedNumber.Length >= 10)
-            {
-                StartCall(DialedNumber);
-            }
+            // Note: In production, dialing completion would be determined by user action or timeout
+            // Auto-dial is disabled in this mock implementation to allow testing
         }
     }
 

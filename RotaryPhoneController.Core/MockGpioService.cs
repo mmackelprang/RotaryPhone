@@ -42,7 +42,7 @@ public class MockGpioService : IGpioService
         }
     }
 
-    public void SimulateDigit(int digit, int pulsePin)
+    public async Task SimulateDigitAsync(int digit, int pulsePin)
     {
         if (digit < 0 || digit > 9)
         {
@@ -56,7 +56,13 @@ public class MockGpioService : IGpioService
         for (int i = 0; i < pulseCount; i++)
         {
             SimulatePulse(pulsePin);
-            Thread.Sleep(60); // Simulate pulse spacing
+            await Task.Delay(60); // Simulate pulse spacing
         }
+    }
+
+    public void SimulateDigit(int digit, int pulsePin)
+    {
+        // Synchronous wrapper for backward compatibility
+        SimulateDigitAsync(digit, pulsePin).GetAwaiter().GetResult();
     }
 }
