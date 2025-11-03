@@ -63,6 +63,17 @@ public class MockGpioService : IGpioService
     public void SimulateDigit(int digit, int pulsePin)
     {
         // Use Task.Run to avoid blocking the calling thread
-        _ = Task.Run(() => SimulateDigitAsync(digit, pulsePin));
+        // Fire-and-forget is acceptable here as this is a mock service for testing
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SimulateDigitAsync(digit, pulsePin);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "MockGpioService: Error simulating digit {Digit}", digit);
+            }
+        });
     }
 }
