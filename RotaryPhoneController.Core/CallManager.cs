@@ -134,47 +134,62 @@ public class CallManager : IDisposable
     {
         Log.Information("CallManager: Activating ringer");
         
-        _ringerCts = new CancellationTokenSource();
-        var token = _ringerCts.Token;
+        // Stop any existing ringer task before starting a new one
+        StopRinger();
         
-        _ringerTask = Task.Run(async () =>
+        lock (_stateLock)
         {
-            try
+            _ringerCts = new CancellationTokenSource();
+            var token = _ringerCts.Token;
+            
+            _ringerTask = Task.Run(async () =>
             {
-                while (CurrentState == CallState.Ringing && !token.IsCancellationRequested)
+                try
                 {
-                    Log.Debug("CallManager: Ring cycle - ON");
-                    _gpioService.SetRingControl(true);
-                    await Task.Delay(1500, token); // 1.5s on
-                    
-                    if (CurrentState != CallState.Ringing || token.IsCancellationRequested)
-                        break;
-                    
-                    Log.Debug("CallManager: Ring cycle - OFF");
-                    _gpioService.SetRingControl(false);
-                    await Task.Delay(3000, token); // 3s off
+                    while (CurrentState == CallState.Ringing && !token.IsCancellationRequested)
+                    {
+                        Log.Debug("CallManager: Ring cycle - ON");
+                        _gpioService.SetRingControl(true);
+                        await Task.Delay(1500, token); // 1.5s on
+                        
+                        if (CurrentState != CallState.Ringing || token.IsCancellationRequested)
+                            break;
+                        
+                        Log.Debug("CallManager: Ring cycle - OFF");
+                        _gpioService.SetRingControl(false);
+                        await Task.Delay(3000, token); // 3s off
+                    }
                 }
-            }
-            catch (TaskCanceledException)
-            {
-                Log.Debug("CallManager: Ringer task cancelled");
-            }
-            finally
-            {
-                _gpioService.SetRingControl(false);
-                Log.Information("CallManager: Ringer deactivated");
-            }
-        }, token);
+                catch (TaskCanceledException)
+                {
+                    Log.Debug("CallManager: Ringer task cancelled");
+                }
+                finally
+                {
+                    _gpioService.SetRingControl(false);
+                    Log.Information("CallManager: Ringer deactivated");
+                }
+            }, token);
+        }
     }
 
     private void StopRinger()
     {
-        if (_ringerCts != null)
+        lock (_stateLock)
         {
-            Log.Information("CallManager: Stopping ringer");
-            _ringerCts.Cancel();
-            _ringerCts.Dispose();
-            _ringerCts = null;
+            if (_ringerCts != null)
+            {
+                Log.Information("CallManager: Stopping ringer");
+                _ringerCts.Cancel();
+                _ringerCts.Dispose();
+                _ringerCts = null;
+            }
+            
+            if (_ringerTask != null)
+            {
+                // Don't wait for the task to complete to avoid blocking
+                _ringerTask = null;
+            }
         }
     }
 
