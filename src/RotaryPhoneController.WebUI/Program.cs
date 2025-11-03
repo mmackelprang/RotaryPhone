@@ -26,7 +26,7 @@ builder.Services.AddSingleton<ISipAdapter>(sp =>
         .MinimumLevel.Debug()
         .WriteTo.Console()
         .CreateLogger();
-    var adapter = new SIPSorceryAdapter(serilogLogger, "192.168.1.20", 5060);
+    var adapter = new SIPSorceryAdapter(serilogLogger, "0.0.0.0", 5060);
     adapter.StartListening();
     return adapter;
 });

@@ -19,7 +19,7 @@ public class SIPSorceryAdapter : ISipAdapter
     public event Action<string>? OnDigitsReceived;
     public event Action? OnIncomingCall;
 
-    public SIPSorceryAdapter(ILogger logger, string localIPAddress = "192.168.1.20", int localPort = 5060)
+    public SIPSorceryAdapter(ILogger logger, string localIPAddress = "0.0.0.0", int localPort = 5060)
     {
         _logger = logger;
         _localIPAddress = localIPAddress;

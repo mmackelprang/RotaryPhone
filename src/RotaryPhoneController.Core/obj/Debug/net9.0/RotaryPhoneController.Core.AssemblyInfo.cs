@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("RotaryPhoneController.Core")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+71f32126d74e4be1528a4f546a9a02bf1cce6d5f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+edfdd9bfc3aaa3c7ae2f210dfe91f7bae5a71e53")]
 [assembly: System.Reflection.AssemblyProductAttribute("RotaryPhoneController.Core")]
 [assembly: System.Reflection.AssemblyTitleAttribute("RotaryPhoneController.Core")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
