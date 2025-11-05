@@ -54,5 +54,4 @@ The Pi's role is purely software-driven network translation.
 5b. **If answered on cell phone:**
    - **User answers:** Call accepted on mobile device → **Bluetooth HFP Manager** detects answer event.
    - **Call Manager:** State transitions: RINGING → IN\_CALL (on mobile).
-   - **Audio Routing:** Audio automatically routes to cell phone without user intervention.
-   - **Requirement:** The HFP implementation must ensure that when a call is answered on the cell phone device, all audio is routed to the cell phone without any user intervention to select the cell phone as the microphone/speaker.
+   - **Audio Routing Requirement:** Audio automatically routes to cell phone without user intervention (the HFP implementation must ensure all audio is routed to the cell phone without any user action to select microphone/speaker).
