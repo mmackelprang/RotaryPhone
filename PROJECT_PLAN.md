@@ -74,14 +74,18 @@ To adapt a legacy rotary telephone into a functional audio and dialing interface
 * **Audio Routing:** Integrate ALSA/PulseAudio to route the HFP audio stream:  
   * **Incoming:** HFP Stream \-\> Pi Audio Out (DAC) \-\> Adapter \-\> Handset Speaker.  
   * **Outgoing:** Handset Mic \-\> Adapter \-\> Pi Audio In (ADC) \-\> HFP Stream.
+* **Audio Routing Requirement:** The HFP implementation must intelligently route audio based on where the call is answered:
+  * **If call answered on rotary phone (handset lifted):** Audio routes through the rotary phone (microphone and speaker).
+  * **If call answered on cell phone device:** All audio must automatically route to the cell phone without any user intervention to select the cell phone as the microphone/speaker.
 
 ### **3.4 Application Layer and Call Flow**
 
 * **State Machine Logic:** Implement the full call flow:  
   1. **Incoming Call:** Bluetooth event triggers RINGING state \-\> Activate Ring GPIO.  
-  2. **Answering:** Hook switch goes OFF\_HOOK during RINGING \-\> Deactivate Ring GPIO, start audio stream.  
-  3. **Dialing:** Hook switch goes OFF\_HOOK during IDLE \-\> Enter DIALING state, start dial tone (optional). Decode digits. Once a full number is dialed (via timeout), initiate Bluetooth call command.  
-  4. **Hanging Up:** Hook switch goes ON\_HOOK \-\> Terminate Bluetooth call, return to IDLE.
+  2. **Answering:** Hook switch goes OFF\_HOOK during RINGING \-\> Deactivate Ring GPIO, start audio stream through rotary phone.  
+  3. **Answering on Cell Phone:** Call answered on mobile device during RINGING \-\> Audio automatically routes to cell phone without user intervention.
+  4. **Dialing:** Hook switch goes OFF\_HOOK during IDLE \-\> Enter DIALING state, start dial tone (optional). Decode digits. Once a full number is dialed (via timeout), initiate Bluetooth call command.  
+  5. **Hanging Up:** Hook switch goes ON\_HOOK \-\> Terminate Bluetooth call, return to IDLE.
 
 ## **Phase 4: Integration, Testing, and Troubleshooting (3 Weeks)**
 
