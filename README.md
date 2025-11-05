@@ -150,9 +150,12 @@ Configure your Grandstream HT801 with the following settings:
 3. State: Idle → Ringing
 4. SIP INVITE sent to HT801
 5. Rotary phone rings
-6. User lifts handset (OFF-HOOK)
-7. State: Ringing → InCall
-8. Audio bridge established
+6. **If answered on rotary phone:** User lifts handset (OFF-HOOK)
+   - State: Ringing → InCall
+   - Audio bridge established through rotary phone
+7. **If answered on cell phone:** User accepts call on mobile device
+   - State: Ringing → InCall (on mobile)
+   - Audio automatically routes to cell phone without user intervention
 
 #### Outgoing Call (Rotary Phone → Mobile)
 1. User lifts handset (OFF-HOOK)
@@ -270,6 +273,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Future Enhancements
 
 - [ ] Actual Bluetooth HFP integration (currently mocked)
+  - **Audio Routing Requirement:** When HFP implementation is complete, the system must automatically route audio based on where the call is answered:
+    - If call is answered on the rotary phone (handset lifted), audio routes through the rotary phone
+    - If call is answered on the cell phone device, audio routes to the cell phone without any user intervention to select microphone/speaker
 - [ ] RTP audio stream bridging
 - [ ] Configuration file support
 - [ ] Multiple phone support

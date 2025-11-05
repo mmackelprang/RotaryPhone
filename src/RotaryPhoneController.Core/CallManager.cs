@@ -51,6 +51,10 @@ public class CallManager
         _sipAdapter.OnDigitsReceived += HandleDigitsReceived;
         _sipAdapter.OnIncomingCall += HandleIncomingCall;
         
+        // TODO: When HFP implementation is complete, subscribe to Bluetooth HFP events
+        // to detect when calls are answered on the cell phone device and automatically
+        // route audio to the cell phone without user intervention
+        
         _logger.LogInformation("CallManager initialized successfully");
     }
 
@@ -135,6 +139,11 @@ public class CallManager
 
         // Mock function - simulate audio bridge connection
         _logger.LogInformation("Simulating RTP/HFP Audio Bridge connection.");
+        
+        // TODO: When HFP implementation is complete, ensure audio routing is based on where call was answered:
+        // - If answered on rotary phone (handset lifted), route audio through rotary phone
+        // - If answered on cell phone device, automatically route all audio to cell phone
+        //   without any user intervention to select microphone/speaker
         
         CurrentState = CallState.InCall;
         _logger.LogInformation("Call answered successfully");

@@ -29,7 +29,7 @@ The Pi's role is purely software-driven network translation.
 | **SIP Adapter (C\#)** | Acts as a lightweight SIP user agent. Listens for SIP messages (INVITE, BYE, NOTIFY) from the HT801. | **Grandstream HT801** (Ethernet/SIP) |
 | **RTP Audio Handler (C\#)** | Decodes incoming RTP packets from the HT801 and encodes/packages audio data for the Bluetooth HFP stack. | **Grandstream HT801** (Ethernet/RTP) |
 | **Call Manager (Application Logic)** | State machine (Idle, Dialing, Ringing, In-Call). Triggers Bluetooth commands based on SIP events. | **SIP Adapter, Bluetooth Manager** |
-| **Bluetooth HFP Manager** | C\# code responsible for controlling the Pi's native Bluetooth stack (e.g., BlueZ) to manage mobile phone pairing, call initiation, and termination. | **Mobile Phone** (Bluetooth HFP) |
+| **Bluetooth HFP Manager** | C\# code responsible for controlling the Pi's native Bluetooth stack (e.g., BlueZ) to manage mobile phone pairing, call initiation, and termination. **Audio Routing Requirement:** Must automatically route audio based on where call is answered (rotary phone vs cell phone). | **Mobile Phone** (Bluetooth HFP) |
 | **OS Audio Bridge (Linux)** | Manages routing the RTP audio stream to the Bluetooth audio driver (e.g., using PulseAudio or ALSA configuration). | **RTP Handler, Bluetooth HFP** |
 
 ## **3\. Signal Flow Diagrams**
@@ -47,6 +47,11 @@ The Pi's role is purely software-driven network translation.
 2. **Call Manager:** State transitions: IDLE → RINGING.  
 3. **Call Manager:** Generates and sends a SIP INVITE to the HT801.  
 4. **HT801:** Receives SIP INVITE → Applies high AC voltage→ **Rotary Phone rings.**  
-5. **User answers:** Hook Switch → HT801 → Sends SIP 200 OK/ACK back to the Pi.  
-6. **SIP Adapter:** Receives SIP 200 OK → Passes event to Call Manager.  
-7. **Call Manager:** State transitions: RINGING → IN\_CALL. **RTP Audio Bridge** begins data transfer.
+5a. **If answered on rotary phone:**
+   - **User answers:** Hook Switch → HT801 → Sends SIP 200 OK/ACK back to the Pi.  
+   - **SIP Adapter:** Receives SIP 200 OK → Passes event to Call Manager.  
+   - **Call Manager:** State transitions: RINGING → IN\_CALL. **RTP Audio Bridge** begins data transfer through rotary phone.
+5b. **If answered on cell phone:**
+   - **User answers:** Call accepted on mobile device → **Bluetooth HFP Manager** detects answer event.
+   - **Call Manager:** State transitions: RINGING → IN\_CALL (on mobile).
+   - **Audio Routing Requirement:** Audio automatically routes to cell phone without user intervention (the HFP implementation must ensure all audio is routed to the cell phone without any user action to select microphone/speaker).
