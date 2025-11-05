@@ -1,13 +1,21 @@
 using Microsoft.Extensions.Logging;
+using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.CallHistory;
+using RotaryPhoneController.Core.Configuration;
 
 namespace RotaryPhoneController.Core;
 
 public class CallManager
 {
     private readonly ISipAdapter _sipAdapter;
+    private readonly IBluetoothHfpAdapter _bluetoothAdapter;
+    private readonly IRtpAudioBridge _rtpBridge;
+    private readonly ICallHistoryService? _callHistoryService;
     private readonly ILogger<CallManager> _logger;
+    private readonly RotaryPhoneConfig _phoneConfig;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
+    private CallHistoryEntry? _currentCallHistory;
 
     public event Action? StateChanged;
 
@@ -35,25 +43,38 @@ public class CallManager
         }
     }
 
-    public CallManager(ISipAdapter sipAdapter, ILogger<CallManager> logger)
+    public CallManager(
+        ISipAdapter sipAdapter, 
+        IBluetoothHfpAdapter bluetoothAdapter,
+        IRtpAudioBridge rtpBridge,
+        ILogger<CallManager> logger,
+        RotaryPhoneConfig phoneConfig,
+        ICallHistoryService? callHistoryService = null)
     {
         _sipAdapter = sipAdapter;
+        _bluetoothAdapter = bluetoothAdapter;
+        _rtpBridge = rtpBridge;
         _logger = logger;
+        _phoneConfig = phoneConfig;
+        _callHistoryService = callHistoryService;
         _currentState = CallState.Idle;
     }
 
     public void Initialize()
     {
-        _logger.LogInformation("Initializing CallManager");
+        _logger.LogInformation("Initializing CallManager for phone: {PhoneId} ({PhoneName})", 
+            _phoneConfig.Id, _phoneConfig.Name);
         
         // Subscribe to SIP adapter events
         _sipAdapter.OnHookChange += HandleHookChange;
         _sipAdapter.OnDigitsReceived += HandleDigitsReceived;
         _sipAdapter.OnIncomingCall += HandleIncomingCall;
         
-        // TODO: When HFP implementation is complete, subscribe to Bluetooth HFP events
-        // to detect when calls are answered on the cell phone device and automatically
-        // route audio to the cell phone without user intervention
+        // Subscribe to Bluetooth HFP events
+        _bluetoothAdapter.OnIncomingCall += HandleBluetoothIncomingCall;
+        _bluetoothAdapter.OnCallAnsweredOnCellPhone += HandleCallAnsweredOnCellPhone;
+        _bluetoothAdapter.OnCallEnded += HandleBluetoothCallEnded;
+        _bluetoothAdapter.OnAudioRouteChanged += HandleAudioRouteChanged;
         
         _logger.LogInformation("CallManager initialized successfully");
     }
@@ -121,10 +142,92 @@ public class CallManager
         CurrentState = CallState.Ringing;
         
         // Send INVITE to HT801 to trigger ring
-        // Using default HT801 IP (192.168.1.10) and extension
-        _sipAdapter.SendInviteToHT801("1000", "192.168.1.10");
+        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+        
+        // Create call history entry for incoming call
+        _currentCallHistory = new CallHistoryEntry
+        {
+            PhoneNumber = "Unknown",
+            Direction = CallDirection.Incoming,
+            PhoneId = _phoneConfig.Id,
+            StartTime = DateTime.Now
+        };
+        _callHistoryService?.AddCallHistory(_currentCallHistory);
         
         _logger.LogInformation("Incoming call simulation initiated - HT801 should ring");
+    }
+    
+    private void HandleBluetoothIncomingCall(string phoneNumber)
+    {
+        _logger.LogInformation("Bluetooth incoming call from: {PhoneNumber}", phoneNumber);
+        
+        if (CurrentState != CallState.Idle)
+        {
+            _logger.LogWarning("Cannot handle incoming call - not in Idle state. Current state: {State}", CurrentState);
+            return;
+        }
+
+        CurrentState = CallState.Ringing;
+        
+        // Send INVITE to HT801 to trigger ring
+        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+        
+        // Create call history entry
+        _currentCallHistory = new CallHistoryEntry
+        {
+            PhoneNumber = phoneNumber,
+            Direction = CallDirection.Incoming,
+            PhoneId = _phoneConfig.Id,
+            StartTime = DateTime.Now
+        };
+        _callHistoryService?.AddCallHistory(_currentCallHistory);
+        
+        _logger.LogInformation("Incoming call - ringing rotary phone");
+    }
+    
+    private void HandleCallAnsweredOnCellPhone()
+    {
+        _logger.LogInformation("Call answered on cell phone device");
+        
+        if (CurrentState != CallState.Ringing)
+        {
+            _logger.LogWarning("Call answered on cell phone but not in Ringing state. Current state: {State}", CurrentState);
+            return;
+        }
+        
+        // Audio automatically routes to cell phone without user intervention
+        _logger.LogInformation("Automatically routing audio to cell phone");
+        
+        // Start RTP bridge with cell phone audio route
+        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_phoneConfig.HT801Extension}";
+        _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.CellPhone);
+        
+        // Update call history
+        if (_currentCallHistory != null)
+        {
+            _currentCallHistory.AnsweredOn = CallAnsweredOn.CellPhone;
+            _callHistoryService?.UpdateCallHistory(_currentCallHistory);
+        }
+        
+        CurrentState = CallState.InCall;
+        _logger.LogInformation("Call answered on cell phone - audio routed to cell phone");
+    }
+    
+    private void HandleBluetoothCallEnded()
+    {
+        _logger.LogInformation("Bluetooth call ended");
+        HangUp();
+    }
+    
+    private void HandleAudioRouteChanged(AudioRoute route)
+    {
+        _logger.LogInformation("Audio route changed to: {Route}", route);
+        
+        // Update RTP bridge routing if active
+        if (_rtpBridge.IsActive && CurrentState == CallState.InCall)
+        {
+            _ = _rtpBridge.ChangeAudioRouteAsync(route);
+        }
     }
 
     public void AnswerCall()
@@ -137,16 +240,25 @@ public class CallManager
             return;
         }
 
-        // Mock function - simulate audio bridge connection
-        _logger.LogInformation("Simulating RTP/HFP Audio Bridge connection.");
+        // Call answered on rotary phone (handset lifted) - route audio through rotary phone
+        _logger.LogInformation("Call answered on rotary phone - routing audio through rotary phone");
         
-        // TODO: When HFP implementation is complete, ensure audio routing is based on where call was answered:
-        // - If answered on rotary phone (handset lifted), route audio through rotary phone
-        // - If answered on cell phone device, automatically route all audio to cell phone
-        //   without any user intervention to select microphone/speaker
+        // Answer call via Bluetooth HFP with audio routed to rotary phone
+        _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
+        
+        // Start RTP audio bridge
+        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_phoneConfig.HT801Extension}";
+        _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
+        
+        // Update call history
+        if (_currentCallHistory != null)
+        {
+            _currentCallHistory.AnsweredOn = CallAnsweredOn.RotaryPhone;
+            _callHistoryService?.UpdateCallHistory(_currentCallHistory);
+        }
         
         CurrentState = CallState.InCall;
-        _logger.LogInformation("Call answered successfully");
+        _logger.LogInformation("Call answered successfully - audio routed through rotary phone");
     }
 
     public void StartCall(string number)
@@ -159,8 +271,19 @@ public class CallManager
             return;
         }
 
-        // Mock function - simulate Bluetooth HFP call initiation
-        _logger.LogInformation("Simulating Bluetooth HFP call initiation for: {Number}", number);
+        // Initiate call via Bluetooth HFP
+        _logger.LogInformation("Initiating call via Bluetooth HFP for: {Number}", number);
+        _ = _bluetoothAdapter.InitiateCallAsync(number);
+        
+        // Create call history entry
+        _currentCallHistory = new CallHistoryEntry
+        {
+            PhoneNumber = number,
+            Direction = CallDirection.Outgoing,
+            PhoneId = _phoneConfig.Id,
+            StartTime = DateTime.Now
+        };
+        _callHistoryService?.AddCallHistory(_currentCallHistory);
         
         CurrentState = CallState.InCall;
         DialedNumber = number;
@@ -172,6 +295,24 @@ public class CallManager
         _logger.LogInformation("Hanging up");
         
         var previousState = CurrentState;
+        
+        // Terminate Bluetooth call
+        _ = _bluetoothAdapter.TerminateCallAsync();
+        
+        // Stop RTP bridge
+        if (_rtpBridge.IsActive)
+        {
+            _ = _rtpBridge.StopBridgeAsync();
+        }
+        
+        // Update call history
+        if (_currentCallHistory != null)
+        {
+            _currentCallHistory.EndTime = DateTime.Now;
+            _callHistoryService?.UpdateCallHistory(_currentCallHistory);
+            _currentCallHistory = null;
+        }
+        
         CurrentState = CallState.Idle;
         DialedNumber = string.Empty;
         
