@@ -45,6 +45,16 @@ if (appConfig.EnableCallHistory)
     });
 }
 
+// Register phone manager service
+builder.Services.AddSingleton<PhoneManagerService>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<PhoneManagerService>>();
+    var callHistoryService = appConfig.EnableCallHistory 
+        ? sp.GetRequiredService<ICallHistoryService>() 
+        : null;
+    return new PhoneManagerService(logger, callHistoryService);
+});
+
 // Register audio components
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
@@ -71,22 +81,36 @@ builder.Services.AddSingleton<ISipAdapter>(sp =>
     return adapter;
 });
 
-// Register CallManager for the first phone (for now, single phone support)
-// Multi-phone support can be added by creating multiple CallManager instances
+// Register CallManager for the first phone (backward compatibility)
+// The PhoneManagerService can manage multiple phones
 builder.Services.AddSingleton<CallManager>(sp =>
 {
+    var phoneManager = sp.GetRequiredService<PhoneManagerService>();
     var sipAdapter = sp.GetRequiredService<ISipAdapter>();
     var bluetoothAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
     var rtpBridge = sp.GetRequiredService<IRtpAudioBridge>();
     var logger = sp.GetRequiredService<ILogger<CallManager>>();
-    var callHistoryService = appConfig.EnableCallHistory 
-        ? sp.GetRequiredService<ICallHistoryService>() 
-        : null;
     
-    var phoneConfig = appConfig.Phones[0]; // Use first phone for now
-    var callManager = new CallManager(sipAdapter, bluetoothAdapter, rtpBridge, logger, phoneConfig, callHistoryService);
-    callManager.Initialize();
-    return callManager;
+    // Register all configured phones
+    foreach (var phoneConfig in appConfig.Phones)
+    {
+        phoneManager.RegisterPhone(
+            phoneConfig.Id,
+            sipAdapter,
+            bluetoothAdapter,
+            rtpBridge,
+            logger,
+            phoneConfig);
+    }
+    
+    // Return the first phone's CallManager for backward compatibility with existing UI
+    var firstPhone = phoneManager.GetPhone(appConfig.Phones[0].Id);
+    if (firstPhone == null)
+    {
+        throw new InvalidOperationException("Failed to create CallManager for first phone");
+    }
+    
+    return firstPhone;
 });
 
 var app = builder.Build();

@@ -22,11 +22,38 @@ The system consists of two main components:
   - INVITE generation to trigger HT801 ringing
   - BYE message handling for call termination
   - G.711 PCMU codec SDP generation
+- **Bluetooth HFP Integration Framework**: Interfaces for Hands-Free Profile with:
+  - Call initiation and termination
+  - Automatic audio routing based on where call is answered
+  - Event-driven architecture for call state changes
+  - Mock implementation for testing (ready for actual HFP implementation)
+- **RTP Audio Bridge Framework**: Interfaces for audio stream bridging between:
+  - SIP/RTP audio from HT801
+  - Bluetooth HFP audio to/from mobile phone
+  - Automatic routing to rotary phone or cell phone
+  - Mock implementation for testing (ready for actual implementation)
+- **Configuration File Support**: JSON-based configuration via appsettings.json
+  - SIP server settings
+  - Multiple phone support
+  - Call history settings
+  - Individual phone configurations (HT801 IP, extension, Bluetooth MAC)
+- **Call History Logging**: Comprehensive call tracking with:
+  - Incoming/outgoing call direction
+  - Phone number and timestamp
+  - Call duration
+  - Where call was answered (rotary phone vs cell phone)
+  - Per-phone history with filtering
+- **Multiple Phone Support**: Architecture supports multiple rotary phone instances
 - **Event-Driven Architecture**: Clean interfaces with events for loose coupling
 - **Comprehensive Logging**: Serilog integration with detailed debug information
 
 ### Web UI
 - **Real-Time Monitoring**: Live state updates via Blazor Server/SignalR
+- **Call History Page**: View and manage call history
+  - Filter by phone
+  - See call duration and direction
+  - Track where calls were answered
+  - Clear history
 - **Mock Controls**: Testing interface for:
   - Simulating incoming calls
   - Simulating handset off-hook/on-hook events
@@ -56,21 +83,38 @@ cd RotaryPhone
 dotnet build
 ```
 
-### 3. Configure IP Addresses
+### 3. Configure Application Settings
 
-Edit `src/RotaryPhoneController.WebUI/Program.cs` to set your network configuration:
+Edit `src/RotaryPhoneController.WebUI/appsettings.json` to configure your setup:
 
-```csharp
-// Set your Raspberry Pi's IP address (or use 0.0.0.0 for all interfaces)
-var adapter = new SIPSorceryAdapter(serilogLogger, "0.0.0.0", 5060);
+```json
+{
+  "RotaryPhone": {
+    "SipListenAddress": "0.0.0.0",
+    "SipPort": 5060,
+    "RtpBasePort": 49000,
+    "EnableCallHistory": true,
+    "MaxCallHistoryEntries": 100,
+    "Phones": [
+      {
+        "Id": "default",
+        "Name": "Rotary Phone",
+        "HT801IpAddress": "192.168.1.10",
+        "HT801Extension": "1000",
+        "BluetoothMacAddress": null
+      }
+    ]
+  }
+}
 ```
 
-Edit `src/RotaryPhoneController.Core/CallManager.cs` in the `SimulateIncomingCall()` method:
-
-```csharp
-// Set your HT801's IP address
-_sipAdapter.SendInviteToHT801("1000", "192.168.1.10");
-```
+Key settings:
+- **SipListenAddress**: IP address for SIP listening (0.0.0.0 for all interfaces)
+- **SipPort**: SIP server port (default: 5060)
+- **HT801IpAddress**: IP address of your Grandstream HT801 ATA
+- **HT801Extension**: SIP extension to ring on the HT801
+- **EnableCallHistory**: Enable/disable call history logging
+- **Phones**: Array of phone configurations (supports multiple phones)
 
 ## Running the Application
 
@@ -187,22 +231,38 @@ The web interface provides mock controls for testing:
 ```
 RotaryPhone/
 ├── src/
-│   ├── RotaryPhoneController.Core/       # Core business logic
-│   │   ├── CallManager.cs                # State machine
-│   │   ├── CallState.cs                  # State enum
-│   │   ├── ISipAdapter.cs                # SIP interface
-│   │   └── SIPSorceryAdapter.cs          # SIP implementation
-│   └── RotaryPhoneController.WebUI/      # Web application
+│   ├── RotaryPhoneController.Core/           # Core business logic
+│   │   ├── Audio/                            # Audio components
+│   │   │   ├── IBluetoothHfpAdapter.cs       # Bluetooth HFP interface
+│   │   │   ├── IRtpAudioBridge.cs            # RTP bridge interface
+│   │   │   ├── MockBluetoothHfpAdapter.cs    # Mock HFP for testing
+│   │   │   └── MockRtpAudioBridge.cs         # Mock RTP for testing
+│   │   ├── CallHistory/                      # Call history tracking
+│   │   │   ├── CallHistoryEntry.cs           # Call history data model
+│   │   │   ├── CallHistoryService.cs         # History service impl
+│   │   │   └── ICallHistoryService.cs        # History service interface
+│   │   ├── Configuration/                    # Configuration models
+│   │   │   └── AppConfiguration.cs           # Config data models
+│   │   ├── CallManager.cs                    # State machine
+│   │   ├── CallState.cs                      # State enum
+│   │   ├── ISipAdapter.cs                    # SIP interface
+│   │   ├── PhoneManagerService.cs            # Multiple phone manager
+│   │   └── SIPSorceryAdapter.cs              # SIP implementation
+│   └── RotaryPhoneController.WebUI/          # Web application
 │       ├── Components/
+│       │   ├── Layout/
+│       │   │   └── NavMenu.razor             # Navigation menu
 │       │   └── Pages/
-│       │       └── Home.razor            # Main UI
-│       ├── Program.cs                    # Startup configuration
+│       │       ├── CallHistory.razor         # Call history UI
+│       │       └── Home.razor                # Main UI
+│       ├── appsettings.json                  # Configuration file
+│       ├── Program.cs                        # Startup configuration
 │       └── Properties/
-│           └── launchSettings.json       # Launch configuration
-├── RotaryPhoneController.sln             # Solution file
-├── ARCHITECTURE.md                       # Architecture documentation
-├── PROJECT_PLAN.md                       # Project plan
-└── README.md                             # This file
+│           └── launchSettings.json           # Launch configuration
+├── RotaryPhoneController.sln                 # Solution file
+├── ARCHITECTURE.md                           # Architecture documentation
+├── PROJECT_PLAN.md                           # Project plan
+└── README.md                                 # This file
 ```
 
 ### Adding Features
@@ -270,22 +330,43 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - **Blazor**: Microsoft's web UI framework
 - Grandstream for the HT801 ATA documentation
 
-## Future Enhancements
+## Implementation Status
 
-- [ ] Actual Bluetooth HFP integration (currently mocked)
-  - **Audio Routing Requirement:** When HFP implementation is complete, the system must automatically route audio based on where the call is answered:
-    - If call is answered on the rotary phone (handset lifted), audio routes through the rotary phone
-    - If call is answered on the cell phone device, audio routes to the cell phone without any user intervention to select microphone/speaker
-- [ ] RTP audio stream bridging
-- [ ] Configuration file support
-- [ ] Multiple phone support
-- [ ] Call history logging
+### Completed Features ✅
+- [x] **Configuration file support** - Full JSON-based configuration via appsettings.json
+- [x] **Call history logging** - Comprehensive call tracking with web UI
+- [x] **Multiple phone support** - Architecture and PhoneManagerService support multiple phones
+- [x] **Bluetooth HFP integration framework** - Interfaces defined with mock implementation
+  - Audio routing logic implemented
+  - Automatic routing based on where call is answered
+  - Ready for actual Bluetooth stack integration
+- [x] **RTP audio stream bridging framework** - Interfaces defined with mock implementation
+  - Ready for actual audio codec and streaming implementation
+
+### Future Enhancements
+
+#### High Priority
+- [ ] **Actual Bluetooth HFP implementation** (currently mocked)
+  - Recommended approach: Use BlueZ D-Bus API on Linux for HFP integration
+  - The Sidi.HandsFree library was evaluated but uses older .NET Framework patterns
+  - All interfaces are designed and ready for implementation
+  - Audio routing logic is complete - automatically routes based on where call is answered
+- [ ] **Actual RTP audio stream bridging implementation** (currently mocked)
+  - Needs audio codec integration (G.711 PCMU)
+  - Needs bidirectional audio streaming between HT801 and Bluetooth
+  - All interfaces are designed and ready for implementation
+
+#### Medium Priority
 - [ ] Contact list integration
 - [ ] Web-based HT801 configuration
+- [ ] Multiple phone UI support (backend supports it, UI shows first phone only)
 - [ ] Automated testing suite
 - [ ] Docker containerization
+
+#### Low Priority
 - [ ] HTTPS support for web UI
 - [ ] Mobile app for remote monitoring
+- [ ] Call recording capability
 
 ## Support
 

@@ -26,32 +26,98 @@ The Pi's role is purely software-driven network translation.
 
 | Software Layer | Function | Interactions |
 | :---- | :---- | :---- |
-| **SIP Adapter (C\#)** | Acts as a lightweight SIP user agent. Listens for SIP messages (INVITE, BYE, NOTIFY) from the HT801. | **Grandstream HT801** (Ethernet/SIP) |
-| **RTP Audio Handler (C\#)** | Decodes incoming RTP packets from the HT801 and encodes/packages audio data for the Bluetooth HFP stack. | **Grandstream HT801** (Ethernet/RTP) |
-| **Call Manager (Application Logic)** | State machine (Idle, Dialing, Ringing, In-Call). Triggers Bluetooth commands based on SIP events. | **SIP Adapter, Bluetooth Manager** |
-| **Bluetooth HFP Manager** | C\# code responsible for controlling the Pi's native Bluetooth stack (e.g., BlueZ) to manage mobile phone pairing, call initiation, and termination. **Audio Routing Requirement:** Must automatically route audio based on where call is answered (rotary phone vs cell phone). | **Mobile Phone** (Bluetooth HFP) |
-| **OS Audio Bridge (Linux)** | Manages routing the RTP audio stream to the Bluetooth audio driver (e.g., using PulseAudio or ALSA configuration). | **RTP Handler, Bluetooth HFP** |
+| **Configuration (appsettings.json)** | JSON-based configuration for SIP, phones, and features. Supports multiple phone instances. | **Application Startup** |
+| **SIP Adapter (ISipAdapter/SIPSorceryAdapter)** | Acts as a lightweight SIP user agent. Listens for SIP messages (INVITE, BYE, NOTIFY) from the HT801. | **Grandstream HT801** (Ethernet/SIP) |
+| **RTP Audio Bridge (IRtpAudioBridge)** | Decodes incoming RTP packets from the HT801 and encodes/packages audio data for the Bluetooth HFP stack. Routes audio based on call answer location. | **Grandstream HT801** (Ethernet/RTP), **Bluetooth HFP** |
+| **Call Manager** | State machine (Idle, Dialing, Ringing, In-Call). Triggers Bluetooth commands based on SIP events. Integrates call history logging. | **SIP Adapter, Bluetooth HFP Adapter, RTP Bridge, Call History** |
+| **Bluetooth HFP Adapter (IBluetoothHfpAdapter)** | Controls the Pi's native Bluetooth stack (e.g., BlueZ) to manage mobile phone pairing, call initiation, and termination. **Implements automatic audio routing** based on where call is answered (rotary phone vs cell phone). | **Mobile Phone** (Bluetooth HFP) |
+| **Call History Service (ICallHistoryService)** | Tracks all calls with direction, duration, phone number, and where answered. Provides web UI for viewing history. | **Call Manager** |
+| **Phone Manager Service** | Manages multiple rotary phone instances, each with their own CallManager. | **Call Managers** |
 
-## **3\. Signal Flow Diagrams**
+## **3\. Component Architecture**
+
+### **A. Audio Routing System**
+
+The system implements intelligent audio routing:
+
+- **AudioRoute Enum**: Defines two routing destinations:
+  - `RotaryPhone`: Audio flows through rotary phone handset
+  - `CellPhone`: Audio flows through mobile phone Bluetooth
+  
+- **Automatic Routing Logic**:
+  - When call answered on rotary phone (handset lifted): `AudioRoute.RotaryPhone`
+  - When call answered on cell phone: `AudioRoute.CellPhone`
+  - No user intervention required - system automatically routes audio
+
+- **RTP Bridge**: Handles bidirectional audio streaming:
+  - Rotary → RTP → Bluetooth → Mobile (outgoing audio)
+  - Mobile → Bluetooth → RTP → Rotary (incoming audio)
+
+### **B. Configuration System**
+
+Configuration is stored in `appsettings.json`:
+
+```json
+{
+  "RotaryPhone": {
+    "SipListenAddress": "0.0.0.0",
+    "SipPort": 5060,
+    "RtpBasePort": 49000,
+    "EnableCallHistory": true,
+    "MaxCallHistoryEntries": 100,
+    "Phones": [
+      {
+        "Id": "default",
+        "Name": "Rotary Phone",
+        "HT801IpAddress": "192.168.1.10",
+        "HT801Extension": "1000",
+        "BluetoothMacAddress": null
+      }
+    ]
+  }
+}
+```
+
+### **C. Multiple Phone Support**
+
+The system supports multiple rotary phones:
+- Each phone has its own `RotaryPhoneConfig`
+- `PhoneManagerService` manages multiple `CallManager` instances
+- Call history tracks which phone handled each call
+- UI currently displays first phone (extensible to show all)
+
+## **4\. Signal Flow Diagrams**
 
 ### **A. Outgoing Call Sequence (Dialing)**
 
 1. **User lifts handset/dials:** Rotary Phone → HT801.  
 2. **HT801:** Decodes pulse dialing → Sends SIP NOTIFY/INFO with the completed number string.  
 3. **SIP Adapter:** Receives NOTIFY → Passes number to Call Manager.  
-4. **Call Manager:** State transitions: DIALING → IN\_CALL → Triggers **Bluetooth HFP Manager** to initiate the call.
+4. **Call Manager:** Creates call history entry → State transitions: DIALING → IN\_CALL → Triggers **Bluetooth HFP Adapter** to initiate the call.
+5. **RTP Audio Bridge:** Starts bridging with `AudioRoute.RotaryPhone` (default for outgoing).
 
 ### **B. Incoming Call Sequence (Ringing)**
 
-1. **Mobile Phone:** Receives incoming call → **Bluetooth HFP Manager** detects event.  
-2. **Call Manager:** State transitions: IDLE → RINGING.  
+1. **Mobile Phone:** Receives incoming call → **Bluetooth HFP Adapter** detects event.  
+2. **Call Manager:** Creates call history entry → State transitions: IDLE → RINGING.  
 3. **Call Manager:** Generates and sends a SIP INVITE to the HT801.  
 4. **HT801:** Receives SIP INVITE → Applies high AC voltage→ **Rotary Phone rings.**  
 5a. **If answered on rotary phone:**
    - **User answers:** Hook Switch → HT801 → Sends SIP 200 OK/ACK back to the Pi.  
    - **SIP Adapter:** Receives SIP 200 OK → Passes event to Call Manager.  
-   - **Call Manager:** State transitions: RINGING → IN\_CALL. **RTP Audio Bridge** begins data transfer through rotary phone.
+   - **Call Manager:** Updates call history with `AnsweredOn.RotaryPhone` → State transitions: RINGING → IN\_CALL.
+   - **RTP Audio Bridge:** Starts with `AudioRoute.RotaryPhone` → Audio flows through rotary phone handset.
 5b. **If answered on cell phone:**
-   - **User answers:** Call accepted on mobile device → **Bluetooth HFP Manager** detects answer event.
-   - **Call Manager:** State transitions: RINGING → IN\_CALL (on mobile).
-   - **Audio Routing Requirement:** Audio automatically routes to cell phone without user intervention (the HFP implementation must ensure all audio is routed to the cell phone without any user action to select microphone/speaker).
+   - **User answers:** Call accepted on mobile device → **Bluetooth HFP Adapter** fires `OnCallAnsweredOnCellPhone` event.
+   - **Call Manager:** Updates call history with `AnsweredOn.CellPhone` → State transitions: RINGING → IN\_CALL (on mobile).
+   - **RTP Audio Bridge:** Starts with `AudioRoute.CellPhone` → Audio automatically routes to cell phone.
+   - **No user intervention required** - system automatically configures all audio routing to cell phone.
+
+### **C. Call Termination**
+
+1. **User hangs up:** Either handset on-hook or mobile phone ends call.
+2. **Call Manager:** Updates call history with end time and duration.
+3. **RTP Audio Bridge:** Stops bridging.
+4. **Bluetooth HFP Adapter:** Terminates call.
+5. **State:** Transitions to IDLE.
+
