@@ -100,14 +100,20 @@ builder.Services.AddSingleton<CallManager>(sp =>
             bluetoothAdapter,
             rtpBridge,
             logger,
-            phoneConfig);
+            phoneConfig,
+            appConfig.RtpBasePort);
     }
     
     // Return the first phone's CallManager for backward compatibility with existing UI
+    if (appConfig.Phones.Count == 0)
+    {
+        throw new InvalidOperationException("No phones configured in appsettings.json");
+    }
+    
     var firstPhone = phoneManager.GetPhone(appConfig.Phones[0].Id);
     if (firstPhone == null)
     {
-        throw new InvalidOperationException("Failed to create CallManager for first phone");
+        throw new InvalidOperationException($"Failed to create CallManager for phone: {appConfig.Phones[0].Id}");
     }
     
     return firstPhone;

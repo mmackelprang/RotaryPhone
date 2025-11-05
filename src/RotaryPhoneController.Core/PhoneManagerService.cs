@@ -30,7 +30,8 @@ public class PhoneManagerService
         IBluetoothHfpAdapter bluetoothAdapter,
         IRtpAudioBridge rtpBridge,
         ILogger<CallManager> callManagerLogger,
-        RotaryPhoneConfig phoneConfig)
+        RotaryPhoneConfig phoneConfig,
+        int rtpPort)
     {
         if (_phoneManagers.ContainsKey(phoneId))
         {
@@ -44,6 +45,7 @@ public class PhoneManagerService
             rtpBridge,
             callManagerLogger,
             phoneConfig,
+            rtpPort,
             _callHistoryService);
         
         callManager.Initialize();

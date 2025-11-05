@@ -13,6 +13,7 @@ public class CallManager
     private readonly ICallHistoryService? _callHistoryService;
     private readonly ILogger<CallManager> _logger;
     private readonly RotaryPhoneConfig _phoneConfig;
+    private readonly int _rtpPort;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
@@ -49,6 +50,7 @@ public class CallManager
         IRtpAudioBridge rtpBridge,
         ILogger<CallManager> logger,
         RotaryPhoneConfig phoneConfig,
+        int rtpPort = 49000,
         ICallHistoryService? callHistoryService = null)
     {
         _sipAdapter = sipAdapter;
@@ -56,6 +58,7 @@ public class CallManager
         _rtpBridge = rtpBridge;
         _logger = logger;
         _phoneConfig = phoneConfig;
+        _rtpPort = rtpPort;
         _callHistoryService = callHistoryService;
         _currentState = CallState.Idle;
     }
@@ -198,8 +201,8 @@ public class CallManager
         // Audio automatically routes to cell phone without user intervention
         _logger.LogInformation("Automatically routing audio to cell phone");
         
-        // Start RTP bridge with cell phone audio route
-        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_phoneConfig.HT801Extension}";
+        // Start RTP bridge with cell phone audio route (use actual RTP port, not SIP extension)
+        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
         _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.CellPhone);
         
         // Update call history
@@ -246,8 +249,8 @@ public class CallManager
         // Answer call via Bluetooth HFP with audio routed to rotary phone
         _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
         
-        // Start RTP audio bridge
-        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_phoneConfig.HT801Extension}";
+        // Start RTP audio bridge (use actual RTP port, not SIP extension)
+        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
         _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
         
         // Update call history
