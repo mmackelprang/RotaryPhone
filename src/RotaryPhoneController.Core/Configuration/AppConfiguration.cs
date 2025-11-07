@@ -77,6 +77,16 @@ public class AppConfiguration
     public bool UseActualRtpAudioBridge { get; set; } = false;
     
     /// <summary>
+    /// Enable contact list feature
+    /// </summary>
+    public bool EnableContacts { get; set; } = true;
+    
+    /// <summary>
+    /// Path to store contacts JSON file (relative to app directory)
+    /// </summary>
+    public string ContactsStoragePath { get; set; } = "data/contacts.json";
+    
+    /// <summary>
     /// List of configured rotary phones
     /// </summary>
     public List<RotaryPhoneConfig> Phones { get; set; } = new()

@@ -1,0 +1,316 @@
+@page "/ht801config"
+@using RotaryPhoneController.Core.HT801
+@using RotaryPhoneController.Core.Configuration
+@inject IHT801ConfigService HT801ConfigService
+@inject AppConfiguration AppConfig
+
+<PageTitle>HT801 Configuration</PageTitle>
+
+<h1>HT801 Configuration</h1>
+
+<div class="container">
+    <div class="alert alert-info mb-4">
+        <strong>📋 Configuration Helper</strong>
+        <p class="mb-0">
+            Use this page to manage HT801 settings for your rotary phones. 
+            Changes are saved locally and can be used as a reference when manually configuring your HT801 via its web interface.
+        </p>
+    </div>
+
+    @if (!AppConfig.Phones.Any())
+    {
+        <div class="alert alert-warning">
+            No phones configured. Please add phone configurations in appsettings.json.
+        </div>
+    }
+    else
+    {
+        <div class="row mb-3">
+            <div class="col-md-12">
+                <label class="form-label"><strong>Select Phone:</strong></label>
+                <select class="form-select" @bind="selectedPhoneId" @bind:after="OnPhoneChanged">
+                    @foreach (var phone in AppConfig.Phones)
+                    {
+                        <option value="@phone.Id">@phone.Name (@phone.Id)</option>
+                    }
+                </select>
+            </div>
+        </div>
+
+        @if (currentConfig != null)
+        {
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h4 class="mb-0">Network Settings</h4>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">HT801 IP Address *</label>
+                            <input type="text" class="form-control" @bind="currentConfig.IpAddress" 
+                                   placeholder="192.168.1.10" />
+                            <small class="form-text text-muted">IP address of your HT801 device</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Admin Username</label>
+                            <input type="text" class="form-control" @bind="currentConfig.AdminUsername" 
+                                   placeholder="admin" />
+                            <small class="form-text text-muted">Username for HT801 web interface</small>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Admin Password</label>
+                            <input type="password" class="form-control" @bind="currentConfig.AdminPassword" 
+                                   placeholder="Enter password" />
+                            <small class="form-text text-muted">Password for HT801 web interface</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <button class="btn btn-info mt-4" @onclick="TestConnection" disabled="@isTestingConnection">
+                                @if (isTestingConnection)
+                                {
+                                    <span class="spinner-border spinner-border-sm me-2"></span>
+                                    <text>Testing...</text>
+                                }
+                                else
+                                {
+                                    <text>🔌 Test Connection</text>
+                                }
+                            </button>
+                        </div>
+                    </div>
+                    
+                    @if (testResult != null)
+                    {
+                        <div class="alert @(testResult.Success ? "alert-success" : "alert-danger")">
+                            <strong>@(testResult.Success ? "✅ Success" : "❌ Failed")</strong>
+                            <p class="mb-0">@testResult.Message</p>
+                            @if (testResult.DeviceInfo != null)
+                            {
+                                <p class="mb-0"><small>Device: @testResult.DeviceInfo</small></p>
+                            }
+                            @if (testResult.FirmwareVersion != null)
+                            {
+                                <p class="mb-0"><small>Firmware: @testResult.FirmwareVersion</small></p>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header bg-success text-white">
+                    <h4 class="mb-0">SIP Settings</h4>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">SIP Server Address *</label>
+                            <input type="text" class="form-control" @bind="currentConfig.SipServerAddress" 
+                                   placeholder="192.168.1.100" />
+                            <small class="form-text text-muted">IP address of your Raspberry Pi</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">SIP Server Port *</label>
+                            <input type="number" class="form-control" @bind="currentConfig.SipServerPort" 
+                                   placeholder="5060" />
+                            <small class="form-text text-muted">SIP port (default: 5060)</small>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Extension *</label>
+                            <input type="text" class="form-control" @bind="currentConfig.Extension" 
+                                   placeholder="1000" />
+                            <small class="form-text text-muted">SIP extension number</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Preferred Codec</label>
+                            <select class="form-select" @bind="currentConfig.PreferredCodec">
+                                <option value="PCMU">PCMU (G.711 μ-law)</option>
+                                <option value="PCMA">PCMA (G.711 A-law)</option>
+                                <option value="G722">G.722</option>
+                            </select>
+                            <small class="form-text text-muted">Audio codec (PCMU recommended)</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mb-4">
+                <div class="card-header bg-warning text-dark">
+                    <h4 class="mb-0">Phone Settings</h4>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Pulse Dialing</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" @bind="currentConfig.PulseDialing" />
+                                <label class="form-check-label">Enable pulse dialing (required for rotary phones)</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Pulse Rate (PPS)</label>
+                            <input type="number" class="form-control" @bind="currentConfig.PulseRate" 
+                                   min="8" max="12" placeholder="10" />
+                            <small class="form-text text-muted">Pulses per second (typically 10)</small>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Hook Flash Timing (ms)</label>
+                            <input type="number" class="form-control" @bind="currentConfig.HookFlashTiming" 
+                                   min="100" max="1000" placeholder="300" />
+                            <small class="form-text text-muted">Milliseconds (default: 300)</small>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Ring Voltage Level</label>
+                            <select class="form-select" @bind="currentConfig.RingVoltage">
+                                <option value="1">1 - Very Low</option>
+                                <option value="2">2 - Low</option>
+                                <option value="3">3 - Medium</option>
+                                <option value="4">4 - High</option>
+                                <option value="5">5 - Very High</option>
+                            </select>
+                            <small class="form-text text-muted">Adjust if phone doesn't ring properly</small>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Call Waiting</label>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" @bind="currentConfig.CallWaiting" />
+                                <label class="form-check-label">Enable call waiting</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row mb-4">
+                <div class="col-md-12">
+                    <button class="btn btn-primary btn-lg me-2" @onclick="SaveConfig">
+                        💾 Save Configuration
+                    </button>
+                    <button class="btn btn-secondary btn-lg" @onclick="ResetConfig">
+                        🔄 Reset to Defaults
+                    </button>
+                </div>
+            </div>
+
+            @if (saveSuccess)
+            {
+                <div class="alert alert-success">
+                    ✅ Configuration saved successfully!
+                </div>
+            }
+
+            <div class="card">
+                <div class="card-header bg-info text-white">
+                    <h4 class="mb-0">📖 Manual Configuration Instructions</h4>
+                </div>
+                <div class="card-body">
+                    <p>To apply these settings to your HT801:</p>
+                    <ol>
+                        <li>Open a web browser and navigate to: <code>http://@currentConfig.IpAddress</code></li>
+                        <li>Log in with username: <code>@currentConfig.AdminUsername</code> and your password</li>
+                        <li>Navigate to <strong>FXS PORT</strong> section</li>
+                        <li>Configure the following settings:
+                            <ul>
+                                <li><strong>Primary SIP Server:</strong> @currentConfig.SipServerAddress</li>
+                                <li><strong>SIP User ID:</strong> @currentConfig.Extension</li>
+                                <li><strong>Preferred Vocoder:</strong> Choice 1: @currentConfig.PreferredCodec</li>
+                                <li><strong>Pulse Dial:</strong> @(currentConfig.PulseDialing ? "Yes" : "No")</li>
+                                <li><strong>Pulse Rate:</strong> @currentConfig.PulseRate pps</li>
+                                <li><strong>Hook Flash Timing:</strong> @currentConfig.HookFlashTiming ms</li>
+                                <li><strong>Call Waiting:</strong> @(currentConfig.CallWaiting ? "Yes" : "No")</li>
+                            </ul>
+                        </li>
+                        <li>Click <strong>Save and Apply</strong></li>
+                        <li>Wait for the device to reboot (if required)</li>
+                    </ol>
+                    <p class="mb-0">
+                        <small class="text-muted">
+                            Note: Automatic configuration via web API is not yet implemented. 
+                            Future versions may support direct configuration from this interface.
+                        </small>
+                    </p>
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private string selectedPhoneId = string.Empty;
+    private HT801Config? currentConfig = null;
+    private HT801ConnectionTestResult? testResult = null;
+    private bool isTestingConnection = false;
+    private bool saveSuccess = false;
+
+    protected override void OnInitialized()
+    {
+        if (AppConfig.Phones.Any())
+        {
+            selectedPhoneId = AppConfig.Phones[0].Id;
+            LoadConfig();
+        }
+    }
+
+    private void OnPhoneChanged()
+    {
+        LoadConfig();
+        testResult = null;
+        saveSuccess = false;
+    }
+
+    private void LoadConfig()
+    {
+        currentConfig = HT801ConfigService.GetConfig(selectedPhoneId);
+    }
+
+    private async Task TestConnection()
+    {
+        if (currentConfig == null || string.IsNullOrWhiteSpace(currentConfig.IpAddress))
+            return;
+
+        isTestingConnection = true;
+        testResult = null;
+        StateHasChanged();
+
+        try
+        {
+            testResult = await HT801ConfigService.TestConnectionAsync(currentConfig.IpAddress);
+        }
+        finally
+        {
+            isTestingConnection = false;
+            StateHasChanged();
+        }
+    }
+
+    private void SaveConfig()
+    {
+        if (currentConfig == null)
+            return;
+
+        HT801ConfigService.UpdateConfig(selectedPhoneId, currentConfig);
+        saveSuccess = true;
+        StateHasChanged();
+
+        // Hide success message after 3 seconds
+        _ = Task.Delay(3000).ContinueWith(_ =>
+        {
+            saveSuccess = false;
+            InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private void ResetConfig()
+    {
+        currentConfig = new HT801Config();
+        saveSuccess = false;
+        testResult = null;
+    }
+}

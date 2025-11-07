@@ -2,6 +2,8 @@ using RotaryPhoneController.WebUI.Components;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.CallHistory;
+using RotaryPhoneController.Core.Contacts;
+using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Configuration;
 using Serilog;
 
@@ -44,6 +46,25 @@ if (appConfig.EnableCallHistory)
         return new CallHistoryService(logger, appConfig.MaxCallHistoryEntries);
     });
 }
+
+// Register contact service if enabled
+if (appConfig.EnableContacts)
+{
+    builder.Services.AddSingleton<IContactService>(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<ContactService>>();
+        var storagePath = Path.Combine(AppContext.BaseDirectory, appConfig.ContactsStoragePath);
+        return new ContactService(logger, storagePath);
+    });
+}
+
+// Register HT801 configuration service
+builder.Services.AddSingleton<IHT801ConfigService>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<HT801ConfigService>>();
+    var storagePath = Path.Combine(AppContext.BaseDirectory, "data/ht801-config.json");
+    return new HT801ConfigService(logger, appConfig, storagePath);
+});
 
 // Register phone manager service
 builder.Services.AddSingleton<PhoneManagerService>(sp =>
