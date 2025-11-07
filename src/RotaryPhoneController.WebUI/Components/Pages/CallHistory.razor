@@ -1,8 +1,10 @@
 @page "/history"
 @using RotaryPhoneController.Core.CallHistory
 @using RotaryPhoneController.Core.Contacts
+@using RotaryPhoneController.Core.Configuration
 @inject ICallHistoryService? CallHistoryService
 @inject IContactService? ContactService
+@inject AppConfiguration AppConfig
 @implements IDisposable
 
 <PageTitle>Call History</PageTitle>
@@ -20,10 +22,23 @@ else
 {
     <div class="container">
         <div class="row mb-3">
-            <div class="col-md-12">
+            <div class="col-md-6">
                 <button class="btn btn-danger" @onclick="ClearHistory">Clear History</button>
                 <span class="ms-3">Total Calls: @callHistory.Count()</span>
             </div>
+            @if (AppConfig.Phones.Count > 1)
+            {
+                <div class="col-md-6">
+                    <label class="form-label">Filter by Phone:</label>
+                    <select class="form-select" @bind="selectedPhoneFilter" @bind:after="OnFilterChanged">
+                        <option value="">All Phones</option>
+                        @foreach (var phone in AppConfig.Phones)
+                        {
+                            <option value="@phone.Id">@phone.Name</option>
+                        }
+                    </select>
+                </div>
+            }
         </div>
 
         @if (!callHistory.Any())
@@ -43,7 +58,10 @@ else
                             <th>Contact/Number</th>
                             <th>Answered On</th>
                             <th>Duration</th>
-                            <th>Phone</th>
+                            @if (AppConfig.Phones.Count > 1)
+                            {
+                                <th>Phone</th>
+                            }
                         </tr>
                     </thead>
                     <tbody>
@@ -101,7 +119,15 @@ else
                                         <span class="text-muted">-</span>
                                     }
                                 </td>
-                                <td>@call.PhoneId</td>
+                                @if (AppConfig.Phones.Count > 1)
+                                {
+                                    <td>
+                                        @{
+                                            var phone = AppConfig.Phones.FirstOrDefault(p => p.Id == call.PhoneId);
+                                            @(phone?.Name ?? call.PhoneId)
+                                        }
+                                    </td>
+                                }
                             </tr>
                         }
                     </tbody>
@@ -113,6 +139,7 @@ else
 
 @code {
     private IEnumerable<CallHistoryEntry> callHistory = Enumerable.Empty<CallHistoryEntry>();
+    private string selectedPhoneFilter = string.Empty;
 
     protected override void OnInitialized()
     {
@@ -127,8 +154,23 @@ else
     {
         if (CallHistoryService != null)
         {
-            callHistory = CallHistoryService.GetCallHistory();
+            var allHistory = CallHistoryService.GetCallHistory();
+            
+            // Apply phone filter if selected
+            if (!string.IsNullOrEmpty(selectedPhoneFilter))
+            {
+                callHistory = allHistory.Where(c => c.PhoneId == selectedPhoneFilter);
+            }
+            else
+            {
+                callHistory = allHistory;
+            }
         }
+    }
+
+    private void OnFilterChanged()
+    {
+        LoadHistory();
     }
 
     private void OnCallHistoryAdded(CallHistoryEntry entry)
