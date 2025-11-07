@@ -2,6 +2,7 @@ using RotaryPhoneController.WebUI.Components;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.CallHistory;
+using RotaryPhoneController.Core.Contacts;
 using RotaryPhoneController.Core.Configuration;
 using Serilog;
 
@@ -42,6 +43,17 @@ if (appConfig.EnableCallHistory)
     {
         var logger = sp.GetRequiredService<ILogger<CallHistoryService>>();
         return new CallHistoryService(logger, appConfig.MaxCallHistoryEntries);
+    });
+}
+
+// Register contact service if enabled
+if (appConfig.EnableContacts)
+{
+    builder.Services.AddSingleton<IContactService>(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<ContactService>>();
+        var storagePath = Path.Combine(AppContext.BaseDirectory, appConfig.ContactsStoragePath);
+        return new ContactService(logger, storagePath);
     });
 }
 

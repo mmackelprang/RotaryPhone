@@ -82,3 +82,7 @@ ServiceFabricBackup/
 # Temporary files
 *.tmp
 *.temp
+
+# Application data
+data/
+contacts.json

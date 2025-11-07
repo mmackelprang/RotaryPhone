@@ -1,6 +1,8 @@
 @page "/history"
 @using RotaryPhoneController.Core.CallHistory
+@using RotaryPhoneController.Core.Contacts
 @inject ICallHistoryService? CallHistoryService
+@inject IContactService? ContactService
 @implements IDisposable
 
 <PageTitle>Call History</PageTitle>
@@ -38,7 +40,7 @@ else
                         <tr>
                             <th>Time</th>
                             <th>Direction</th>
-                            <th>Number</th>
+                            <th>Contact/Number</th>
                             <th>Answered On</th>
                             <th>Duration</th>
                             <th>Phone</th>
@@ -59,7 +61,22 @@ else
                                         <span class="badge bg-primary">📱 Outgoing</span>
                                     }
                                 </td>
-                                <td>@call.PhoneNumber</td>
+                                <td>
+                                    @{
+                                        var contact = ContactService?.FindByPhoneNumber(call.PhoneNumber);
+                                        @if (contact != null)
+                                        {
+                                            <div>
+                                                <strong>@contact.Name</strong><br/>
+                                                <small class="text-muted">@call.PhoneNumber</small>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            @call.PhoneNumber
+                                        }
+                                    }
+                                </td>
                                 <td>
                                     @switch (call.AnsweredOn)
                                     {

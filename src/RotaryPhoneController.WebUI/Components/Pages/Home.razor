@@ -1,7 +1,9 @@
 ﻿@page "/"
 @using RotaryPhoneController.Core
+@using RotaryPhoneController.Core.Contacts
 @inject CallManager CallManager
 @inject ISipAdapter SipAdapter
+@inject IContactService? ContactService
 @implements IDisposable
 
 <PageTitle>Rotary Phone Controller</PageTitle>
@@ -19,7 +21,16 @@
                     <h2 class="display-4">@CallManager.CurrentState</h2>
                     @if (!string.IsNullOrEmpty(CallManager.DialedNumber))
                     {
-                        <p><strong>Dialed Number:</strong> @CallManager.DialedNumber</p>
+                        var contact = ContactService?.FindByPhoneNumber(CallManager.DialedNumber);
+                        @if (contact != null)
+                        {
+                            <p><strong>Contact:</strong> @contact.Name</p>
+                            <p><strong>Number:</strong> @CallManager.DialedNumber</p>
+                        }
+                        else
+                        {
+                            <p><strong>Dialed Number:</strong> @CallManager.DialedNumber</p>
+                        }
                     }
                 </div>
             </div>
