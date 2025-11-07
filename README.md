@@ -49,11 +49,28 @@ The system consists of two main components:
 
 ### Web UI
 - **Real-Time Monitoring**: Live state updates via Blazor Server/SignalR
+- **Multiple Phone Support**: UI displays all configured phones
+  - Phone selector to switch between phones
+  - Status overview showing state of all phones
+  - Mock controls operate on selected phone
+- **Contact List Management**: Built-in contact management
+  - Add, edit, delete contacts
+  - Search contacts by name or number
+  - Contact names displayed in call history
+  - Contact names shown during calls
+  - JSON import/export functionality
 - **Call History Page**: View and manage call history
-  - Filter by phone
+  - Filter by phone (for multiple phone setups)
   - See call duration and direction
   - Track where calls were answered
+  - Display contact names instead of just numbers
   - Clear history
+- **HT801 Configuration Helper**: Web-based configuration assistant
+  - Manage HT801 settings for each phone
+  - Test connection to HT801 devices
+  - View and save configuration settings
+  - Step-by-step manual configuration instructions
+  - Network, SIP, and phone settings management
 - **Mock Controls**: Testing interface for:
   - Simulating incoming calls
   - Simulating handset off-hook/on-hook events
@@ -97,6 +114,8 @@ Edit `src/RotaryPhoneController.WebUI/appsettings.json` to configure your setup:
     "RtpBasePort": 49000,
     "EnableCallHistory": true,
     "MaxCallHistoryEntries": 100,
+    "EnableContacts": true,
+    "ContactsStoragePath": "data/contacts.json",
     "BluetoothDeviceName": "Rotary Phone",
     "UseActualBluetoothHfp": false,
     "UseActualRtpAudioBridge": false,
@@ -116,13 +135,19 @@ Edit `src/RotaryPhoneController.WebUI/appsettings.json` to configure your setup:
 Key settings:
 - **SipListenAddress**: IP address for SIP listening (0.0.0.0 for all interfaces)
 - **SipPort**: SIP server port (default: 5060)
-- **HT801IpAddress**: IP address of your Grandstream HT801 ATA
-- **HT801Extension**: SIP extension to ring on the HT801
 - **EnableCallHistory**: Enable/disable call history logging
+- **MaxCallHistoryEntries**: Maximum number of call history entries to keep
+- **EnableContacts**: Enable/disable contact list feature (default: true)
+- **ContactsStoragePath**: Path to store contacts JSON file
 - **BluetoothDeviceName**: Name shown to phones when pairing (default: "Rotary Phone")
 - **UseActualBluetoothHfp**: Enable actual BlueZ HFP implementation (default: false for mock)
 - **UseActualRtpAudioBridge**: Enable actual RTP audio bridge (default: false for mock)
 - **Phones**: Array of phone configurations (supports multiple phones)
+  - **Id**: Unique identifier for this phone
+  - **Name**: Friendly display name
+  - **HT801IpAddress**: IP address of your Grandstream HT801 ATA
+  - **HT801Extension**: SIP extension to ring on the HT801
+  - **BluetoothMacAddress**: Optional MAC address of paired mobile phone
 
 ## Running the Application
 
@@ -176,19 +201,39 @@ sudo systemctl status rotaryphone
 
 ## HT801 Configuration
 
+You can configure your Grandstream HT801 in two ways:
+
+### Option 1: Web-Based Configuration Helper (Recommended)
+
+1. Navigate to the **HT801 Config** page in the web UI
+2. Select the phone you want to configure
+3. Enter the HT801 device details:
+   - IP address
+   - Admin credentials
+4. Click **Test Connection** to verify connectivity
+5. Configure settings:
+   - SIP server settings (IP, port, extension)
+   - Audio codec preferences
+   - Pulse dialing settings
+   - Ring voltage and hook flash timing
+6. Click **Save Configuration**
+7. Follow the manual configuration instructions displayed on the page to apply settings to your HT801
+
+### Option 2: Manual Configuration via HT801 Web Interface
+
 Configure your Grandstream HT801 with the following settings:
 
-### FXS Port Settings
+#### FXS Port Settings
 1. **Primary SIP Server**: Your Raspberry Pi's IP address
 2. **SIP User ID**: Any identifier (e.g., "rotaryphone")
 3. **Account Active**: Yes
 
-### Audio Settings
+#### Audio Settings
 1. **Preferred Vocoder**: choice1: PCMU
 2. **Enable Call Waiting**: No (optional)
 
-### Port Settings
-1. **Hook Flash Timing**: Set according to your rotary phone
+#### Port Settings
+1. **Hook Flash Timing**: Set according to your rotary phone (typically 300ms)
 2. **Pulse Dial**: Enable
 3. **Pulse Rate**: 10 pps (typical for rotary phones)
 
@@ -225,12 +270,35 @@ Configure your Grandstream HT801 with the following settings:
 
 ### Web UI Controls
 
-The web interface provides mock controls for testing:
+The web interface provides several pages for managing your rotary phone:
 
-- **Simulate Mobile Incoming Call**: Triggers the ringing flow
-- **Simulate Handset OFF-HOOK**: Simulates lifting the handset
-- **Simulate Handset ON-HOOK**: Simulates placing handset down
-- **Simulate Digits Received**: Manually enter a phone number to simulate dial pulses
+#### Home Page
+- **Phone Selection** (multiple phones): Select which phone to monitor and control
+- **All Phones Status**: View the current state of all configured phones at once
+- **Mock Controls** for testing:
+  - **Simulate Mobile Incoming Call**: Triggers the ringing flow
+  - **Simulate Handset OFF-HOOK**: Simulates lifting the handset
+  - **Simulate Handset ON-HOOK**: Simulates placing handset down
+  - **Simulate Digits Received**: Manually enter a phone number to simulate dial pulses
+
+#### Call History Page
+- View all incoming and outgoing calls
+- See contact names (if saved in contacts)
+- Filter by phone (for multiple phone setups)
+- Track call duration and where calls were answered
+- Clear history
+
+#### Contacts Page
+- Add, edit, and delete contacts
+- Search contacts by name or phone number
+- Contacts automatically appear in call history and during active calls
+- Import/export contacts as JSON
+
+#### HT801 Configuration Page
+- Manage HT801 settings for each phone
+- Test connection to HT801 devices
+- Configure SIP, network, and phone settings
+- View step-by-step manual configuration instructions
 
 ## Development
 
@@ -244,11 +312,21 @@ RotaryPhone/
 │   │   │   ├── IBluetoothHfpAdapter.cs       # Bluetooth HFP interface
 │   │   │   ├── IRtpAudioBridge.cs            # RTP bridge interface
 │   │   │   ├── MockBluetoothHfpAdapter.cs    # Mock HFP for testing
-│   │   │   └── MockRtpAudioBridge.cs         # Mock RTP for testing
+│   │   │   ├── BlueZHfpAdapter.cs            # Actual HFP implementation
+│   │   │   ├── MockRtpAudioBridge.cs         # Mock RTP for testing
+│   │   │   └── RtpAudioBridge.cs             # Actual RTP implementation
 │   │   ├── CallHistory/                      # Call history tracking
 │   │   │   ├── CallHistoryEntry.cs           # Call history data model
 │   │   │   ├── CallHistoryService.cs         # History service impl
 │   │   │   └── ICallHistoryService.cs        # History service interface
+│   │   ├── Contacts/                         # Contact management
+│   │   │   ├── Contact.cs                    # Contact data model
+│   │   │   ├── ContactService.cs             # Contact service impl
+│   │   │   └── IContactService.cs            # Contact service interface
+│   │   ├── HT801/                            # HT801 configuration
+│   │   │   ├── HT801Config.cs                # HT801 config models
+│   │   │   ├── HT801ConfigService.cs         # Config service impl
+│   │   │   └── IHT801ConfigService.cs        # Config service interface
 │   │   ├── Configuration/                    # Configuration models
 │   │   │   └── AppConfiguration.cs           # Config data models
 │   │   ├── CallManager.cs                    # State machine
@@ -262,6 +340,8 @@ RotaryPhone/
 │       │   │   └── NavMenu.razor             # Navigation menu
 │       │   └── Pages/
 │       │       ├── CallHistory.razor         # Call history UI
+│       │       ├── Contacts.razor            # Contact management UI
+│       │       ├── HT801Configuration.razor  # HT801 config UI
 │       │       └── Home.razor                # Main UI
 │       ├── appsettings.json                  # Configuration file
 │       ├── Program.cs                        # Startup configuration
@@ -302,16 +382,18 @@ sudo lsof -i :5060
 Kill the conflicting process or change the port in Program.cs.
 
 ### HT801 Not Responding
-1. Verify network connectivity: `ping <HT801_IP>`
-2. Check HT801 SIP registration status in web interface
-3. Verify firewall allows UDP port 5060
-4. Check SIP logs in application output
+1. Use the **HT801 Config** page in the web UI to test connection
+2. Verify network connectivity: `ping <HT801_IP>`
+3. Check HT801 SIP registration status in web interface
+4. Verify firewall allows UDP port 5060
+5. Check SIP logs in application output
 
 ### Rotary Phone Not Ringing
 1. Verify INVITE is being sent (check logs)
-2. Check HT801 FXS port settings
-3. Verify rotary phone ringer coil is functional
-4. Check HT801 ring voltage settings
+2. Check HT801 FXS port settings using the HT801 Config page
+3. Adjust ring voltage level in the HT801 Config page
+4. Verify rotary phone ringer coil is functional
+5. Check HT801 ring voltage settings
 
 ### Audio Issues
 1. Verify G.711 codec is enabled on HT801
@@ -343,7 +425,22 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### Completed Features ✅
 - [x] **Configuration file support** - Full JSON-based configuration via appsettings.json
 - [x] **Call history logging** - Comprehensive call tracking with web UI
-- [x] **Multiple phone support** - Architecture and PhoneManagerService support multiple phones
+- [x] **Multiple phone support** - Full support for multiple phones
+  - ✅ Backend architecture with PhoneManagerService
+  - ✅ UI displays all phones with phone selector
+  - ✅ Call history filtering by phone
+  - ✅ Individual phone status monitoring
+- [x] **Contact list integration** - Built-in contact management
+  - ✅ Add, edit, delete contacts
+  - ✅ Search functionality
+  - ✅ JSON import/export
+  - ✅ Contact names in call history
+  - ✅ Contact names during active calls
+- [x] **Web-based HT801 configuration helper**
+  - ✅ Configuration UI for all HT801 settings
+  - ✅ Connection testing
+  - ✅ Per-phone configuration management
+  - ✅ Step-by-step manual configuration instructions
 - [x] **Bluetooth HFP integration framework** - Interfaces defined with mock implementation
   - Audio routing logic implemented
   - Automatic routing based on where call is answered
@@ -369,11 +466,10 @@ This project is licensed under the MIT License - see the LICENSE file for detail
   - ⚠️ Configuration flag `UseActualRtpAudioBridge` to enable (default: false for compatibility)
 
 #### Medium Priority
-- [ ] Contact list integration
-- [ ] Web-based HT801 configuration
-- [ ] Multiple phone UI support (backend supports it, UI shows first phone only)
 - [ ] Automated testing suite
 - [ ] Docker containerization
+- [ ] Full HT801 web API integration for automatic configuration push
+- [ ] Voice mail integration
 
 #### Low Priority
 - [ ] HTTPS support for web UI
