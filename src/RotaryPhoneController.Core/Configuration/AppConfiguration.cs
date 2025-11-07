@@ -62,6 +62,21 @@ public class AppConfiguration
     public int MaxCallHistoryEntries { get; set; } = 100;
     
     /// <summary>
+    /// Bluetooth device advertised name (shown to phones when pairing)
+    /// </summary>
+    public string BluetoothDeviceName { get; set; } = "Rotary Phone";
+    
+    /// <summary>
+    /// Enable actual Bluetooth HFP implementation (vs mock)
+    /// </summary>
+    public bool UseActualBluetoothHfp { get; set; } = false;
+    
+    /// <summary>
+    /// Enable actual RTP audio bridge implementation (vs mock)
+    /// </summary>
+    public bool UseActualRtpAudioBridge { get; set; } = false;
+    
+    /// <summary>
     /// List of configured rotary phones
     /// </summary>
     public List<RotaryPhoneConfig> Phones { get; set; } = new()

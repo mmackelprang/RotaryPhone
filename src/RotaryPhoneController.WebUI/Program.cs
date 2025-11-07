@@ -55,17 +55,36 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
     return new PhoneManagerService(logger, callHistoryService);
 });
 
-// Register audio components
+// Register audio components (based on configuration)
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
-    var logger = sp.GetRequiredService<ILogger<MockBluetoothHfpAdapter>>();
-    return new MockBluetoothHfpAdapter(logger);
+    if (appConfig.UseActualBluetoothHfp)
+    {
+        var logger = sp.GetRequiredService<ILogger<BlueZHfpAdapter>>();
+        var adapter = new BlueZHfpAdapter(logger, appConfig.BluetoothDeviceName);
+        // Initialize the adapter asynchronously
+        _ = adapter.InitializeAsync();
+        return adapter;
+    }
+    else
+    {
+        var logger = sp.GetRequiredService<ILogger<MockBluetoothHfpAdapter>>();
+        return new MockBluetoothHfpAdapter(logger);
+    }
 });
 
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 {
-    var logger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
-    return new MockRtpAudioBridge(logger);
+    if (appConfig.UseActualRtpAudioBridge)
+    {
+        var logger = sp.GetRequiredService<ILogger<RtpAudioBridge>>();
+        return new RtpAudioBridge(logger);
+    }
+    else
+    {
+        var logger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
+        return new MockRtpAudioBridge(logger);
+    }
 });
 
 // Register Core services as singletons

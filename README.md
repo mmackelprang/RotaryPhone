@@ -67,6 +67,8 @@ The system consists of two main components:
 - Linux environment (tested on Raspberry Pi)
 - Grandstream HT801 ATA configured for your network
 - Network connectivity between Pi and HT801
+- **For Bluetooth HFP**: BlueZ Bluetooth stack and bluetoothctl (included in most Linux distributions)
+- **For Audio**: NAudio library (included via NuGet)
 
 ## Installation
 
@@ -95,6 +97,9 @@ Edit `src/RotaryPhoneController.WebUI/appsettings.json` to configure your setup:
     "RtpBasePort": 49000,
     "EnableCallHistory": true,
     "MaxCallHistoryEntries": 100,
+    "BluetoothDeviceName": "Rotary Phone",
+    "UseActualBluetoothHfp": false,
+    "UseActualRtpAudioBridge": false,
     "Phones": [
       {
         "Id": "default",
@@ -114,6 +119,9 @@ Key settings:
 - **HT801IpAddress**: IP address of your Grandstream HT801 ATA
 - **HT801Extension**: SIP extension to ring on the HT801
 - **EnableCallHistory**: Enable/disable call history logging
+- **BluetoothDeviceName**: Name shown to phones when pairing (default: "Rotary Phone")
+- **UseActualBluetoothHfp**: Enable actual BlueZ HFP implementation (default: false for mock)
+- **UseActualRtpAudioBridge**: Enable actual RTP audio bridge (default: false for mock)
 - **Phones**: Array of phone configurations (supports multiple phones)
 
 ## Running the Application
@@ -346,15 +354,19 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### Future Enhancements
 
 #### High Priority
-- [ ] **Actual Bluetooth HFP implementation** (currently mocked)
-  - Recommended approach: Use BlueZ D-Bus API on Linux for HFP integration
-  - The Sidi.HandsFree library was evaluated but uses older .NET Framework patterns
-  - All interfaces are designed and ready for implementation
-  - Audio routing logic is complete - automatically routes based on where call is answered
-- [ ] **Actual RTP audio stream bridging implementation** (currently mocked)
-  - Needs audio codec integration (G.711 PCMU)
-  - Needs bidirectional audio streaming between HT801 and Bluetooth
-  - All interfaces are designed and ready for implementation
+- [x] **Actual Bluetooth HFP implementation** (✅ Completed)
+  - ✅ Implemented using BlueZ on Linux for HFP integration
+  - ✅ Bluetooth device name configurable as "Rotary Phone"
+  - ✅ Supports multiple device pairing (at least 2 phones)
+  - ✅ All interfaces are implemented with HFP call control
+  - ✅ Audio routing logic is complete - automatically routes based on where call is answered
+  - ⚠️ Note: Requires BlueZ and bluetoothctl to be installed on the system
+  - ⚠️ Configuration flag `UseActualBluetoothHfp` to enable (default: false for compatibility)
+- [x] **Actual RTP audio stream bridging implementation** (✅ Completed)
+  - ✅ Audio codec integration (G.711 PCMU) using NAudio
+  - ✅ Bidirectional audio streaming between HT801 and Bluetooth
+  - ✅ All interfaces are implemented with proper routing
+  - ⚠️ Configuration flag `UseActualRtpAudioBridge` to enable (default: false for compatibility)
 
 #### Medium Priority
 - [ ] Contact list integration
