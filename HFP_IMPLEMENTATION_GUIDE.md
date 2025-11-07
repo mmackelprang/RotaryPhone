@@ -2,11 +2,165 @@
 
 ## Current Status
 
-The system currently has **mock implementations** for Bluetooth HFP and RTP audio bridging. All interfaces are designed and ready for actual implementation.
+The system now has **actual implementations** for Bluetooth HFP and RTP audio bridging using BlueZ and NAudio. The implementations can be enabled via configuration flags.
 
-## Implementing Actual Bluetooth HFP
+## Implementation Complete ✅
 
-### Recommended Approach: BlueZ D-Bus API
+### BlueZ HFP Adapter
+**File:** `src/RotaryPhoneController.Core/Audio/BlueZHfpAdapter.cs`
+
+**Features:**
+- ✅ Bluetooth device advertised name: "Rotary Phone" (configurable)
+- ✅ Multi-device pairing support (at least 2 phones can pair)
+- ✅ BlueZ integration via bluetoothctl commands
+- ✅ HFP call control (initiate, answer, terminate)
+- ✅ Audio routing based on where call is answered
+- ✅ Device connection monitoring
+- ✅ AT command support for call control
+
+**Configuration:**
+```json
+{
+  "BluetoothDeviceName": "Rotary Phone",
+  "UseActualBluetoothHfp": true
+}
+```
+
+### RTP Audio Bridge
+**File:** `src/RotaryPhoneController.Core/Audio/RtpAudioBridge.cs`
+
+**Features:**
+- ✅ G.711 PCMU codec support (8kHz, 16-bit, mono)
+- ✅ Bidirectional audio streaming
+- ✅ RTP session management via SIPSorcery
+- ✅ Audio capture and playback via NAudio
+- ✅ Dynamic audio routing (rotary phone or cell phone)
+- ✅ Buffer management for smooth playback
+
+**Configuration:**
+```json
+{
+  "UseActualRtpAudioBridge": true
+}
+```
+
+## Using the Implementations
+
+## Using the Implementations
+
+### Step 1: Install Prerequisites
+
+```bash
+# Ensure BlueZ is installed (usually pre-installed on Raspberry Pi OS)
+sudo apt-get update
+sudo apt-get install bluez bluez-tools
+
+# Verify bluetoothctl is available
+which bluetoothctl
+```
+
+### Step 2: Enable Implementations
+
+Edit `appsettings.json`:
+
+```json
+{
+  "RotaryPhone": {
+    "BluetoothDeviceName": "Rotary Phone",
+    "UseActualBluetoothHfp": true,
+    "UseActualRtpAudioBridge": true,
+    ...
+  }
+}
+```
+
+### Step 3: Configure Bluetooth
+
+The BlueZHfpAdapter will automatically:
+- Set the Bluetooth device name to "Rotary Phone"
+- Enable discoverability (always discoverable)
+- Enable pairing (always pairable)
+- Support multiple paired devices (at least 2)
+
+To manually pair phones:
+```bash
+bluetoothctl
+power on
+agent on
+default-agent
+discoverable on
+pairable on
+# Then pair from your mobile phone
+```
+
+### Step 4: Run the Application
+
+```bash
+cd src/RotaryPhoneController.WebUI
+dotnet run
+```
+
+The Bluetooth device will advertise as "Rotary Phone" and can be paired with multiple phones.
+
+## Architecture Details
+
+### BlueZ Integration
+
+The `BlueZHfpAdapter` uses:
+1. **bluetoothctl** commands for adapter configuration
+2. **AT commands** for HFP call control (ATD, ATA, AT+CHUP)
+3. **System monitoring** for device connections
+4. **Event-driven architecture** for call state changes
+
+### Audio Flow
+
+```
+Mobile Phone (Bluetooth HFP)
+    ↕
+BlueZ Stack
+    ↕
+BlueZHfpAdapter (Call Control)
+    ↕
+RtpAudioBridge (Audio Processing)
+    ↕ G.711 PCMU
+RTP Session
+    ↕
+HT801 ATA
+    ↕
+Rotary Phone
+```
+
+### Audio Routing Logic
+
+**When call answered on rotary phone (handset lifted):**
+```csharp
+AudioRoute.RotaryPhone
+→ RTP audio flows to/from HT801 (rotary handset)
+→ Bluetooth captures audio for mobile network
+```
+
+**When call answered on cell phone:**
+```csharp
+AudioRoute.CellPhone  
+→ RTP audio captured and sent to Bluetooth
+→ Bluetooth audio routed to mobile device
+```
+
+## Multi-Device Pairing
+
+The BlueZ adapter supports multiple paired devices:
+- **Pairable**: Always enabled (timeout = 0)
+- **Discoverable**: Always enabled (timeout = 0)
+- **Connection Limit**: No artificial limit (BlueZ handles multiple connections)
+- **Device Name**: "Rotary Phone" (visible to all pairing devices)
+
+To pair a second or third phone:
+1. Keep the first phone paired
+2. Start pairing process on the second phone
+3. The device will appear as "Rotary Phone"
+4. Complete pairing - both phones can now connect
+
+## Recommended Approach: BlueZ D-Bus API (Future Enhancement)
 
 For Linux-based systems (Raspberry Pi), the recommended approach is to use the **BlueZ Bluetooth stack** via D-Bus API.
 
