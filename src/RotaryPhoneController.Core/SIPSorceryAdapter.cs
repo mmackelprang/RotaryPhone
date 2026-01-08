@@ -153,8 +153,52 @@ public class SIPSorceryAdapter : ISipAdapter
 
     private void HandleInvite(SIPRequest sipRequest)
     {
-        _logger.Information("Processing INVITE message - Incoming call detected");
-        OnIncomingCall?.Invoke();
+        _logger.Information("Processing INVITE from {Remote}", sipRequest.RemoteSIPEndPoint);
+        
+        // In this architecture, if the SIP Adapter (Server) receives an INVITE,
+        // it means the HT801 (Client) is trying to place an outgoing call.
+        // The dialed number is in the To header.
+        
+        try
+        {
+            var dialedNumber = sipRequest.Header.To.ToURI.User;
+            if (!string.IsNullOrEmpty(dialedNumber))
+            {
+                _logger.Information("User dialed: {Number}", dialedNumber);
+                
+                // Trigger digits received with the full number
+                OnDigitsReceived?.Invoke(dialedNumber);
+                
+                // Important: We must answer the INVITE to establish the SIP dialog
+                // and stop the HT801 from retransmitting.
+                var response = sipRequest.CreateResponse(SIPResponseStatusCodesEnum.Ok);
+                
+                // Add Contact header to response (required)
+                response.Header.Contact = new List<SIPContactHeader> 
+                { 
+                    new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip, 
+                        SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:{_localPort}"))) 
+                };
+                
+                // Add SDP to response (negotiate codec)
+                // Use the same RTP port we configured for the bridge
+                var localEndpoint = SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:49000");
+                response.Body = CreateBasicSDP(localEndpoint);
+                
+                _sipTransport?.SendResponseAsync(response);
+                
+                // Also trigger hook change to ensure we are in InCall state
+                OnHookChange?.Invoke(true);
+            }
+            else
+            {
+                _logger.Warning("Received INVITE without a user in To header");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Error processing INVITE");
+        }
     }
 
     private void HandleBye(SIPRequest sipRequest)

@@ -1,5 +1,9 @@
 # **Project Plan: Rotary Phone to Raspberry Pi Audio Interface**
 
+> **⚠️ DEPRECATED: 2026 UPDATE**
+> This plan was for the original Raspberry Pi implementation.
+> Please refer to **`2026_PROJECT_PLAN.md`** for the current Windows NUC & TypeScript UI roadmap.
+
 ## **Project Goal**
 
 To adapt a legacy rotary telephone into a functional audio and dialing interface for a modern mobile phone via a Raspberry Pi and Bluetooth connection.

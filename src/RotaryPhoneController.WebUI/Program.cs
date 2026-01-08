@@ -1,4 +1,6 @@
 using RotaryPhoneController.WebUI.Components;
+using RotaryPhoneController.WebUI.Hubs;
+using RotaryPhoneController.WebUI.Services;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.CallHistory;
@@ -12,6 +14,12 @@ Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Debug()
     .WriteTo.Console()
     .WriteTo.Debug()
+    .WriteTo.File(
+        path: "logs/rotary-.log",
+        rollingInterval: RollingInterval.Day,
+        retainedFileCountLimit: 31,
+        fileSizeLimitBytes: 10 * 1024 * 1024,
+        rollOnFileSizeLimit: true)
     .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
@@ -31,6 +39,24 @@ if (appConfig.Phones.Count == 0)
 }
 
 // Add services to the container.
+builder.Services.AddControllers();
+builder.Services.AddSignalR();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Add CORS policy for Vite development
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowViteDev", policy =>
+    {
+        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .AllowCredentials();
+    });
+});
+
+// Register existing Blazor components (temporary)
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
@@ -75,6 +101,9 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
         : null;
     return new PhoneManagerService(logger, callHistoryService);
 });
+
+// Register SignalR Notifier Service (Hosted Service)
+builder.Services.AddHostedService<SignalRNotifierService>();
 
 // Register audio components (based on configuration)
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
@@ -122,7 +151,6 @@ builder.Services.AddSingleton<ISipAdapter>(sp =>
 });
 
 // Register CallManager for the first phone (backward compatibility)
-// The PhoneManagerService can manage multiple phones
 builder.Services.AddSingleton<CallManager>(sp =>
 {
     var phoneManager = sp.GetRequiredService<PhoneManagerService>();
@@ -144,7 +172,7 @@ builder.Services.AddSingleton<CallManager>(sp =>
             appConfig.RtpBasePort);
     }
     
-    // Return the first phone's CallManager for backward compatibility with existing UI
+    // Return the first phone's CallManager
     if (appConfig.Phones.Count == 0)
     {
         throw new InvalidOperationException("No phones configured in appsettings.json");
@@ -165,18 +193,38 @@ var app = builder.Build();
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
-    // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
     app.UseHsts();
+}
+else
+{
+    // Enable Swagger in Development
+    app.UseSwagger();
+    app.UseSwaggerUI();
 }
 
 app.UseHttpsRedirection();
 
+// Enable CORS
+app.UseCors("AllowViteDev");
 
 app.UseAntiforgery();
 
+app.UseStaticFiles();
+
 app.MapStaticAssets();
+
+// Map Controllers
+app.MapControllers();
+
+// Map SignalR Hub
+app.MapHub<RotaryHub>("/hub");
+
+// Map Blazor Components (Legacy)
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
+
+// Fallback to React SPA
+app.MapFallbackToFile("index.html");
 
 app.Run();
 

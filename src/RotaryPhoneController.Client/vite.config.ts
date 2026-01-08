@@ -1,0 +1,38 @@
+/// <reference types="vitest" />
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    outDir: '../RotaryPhoneController.WebUI/wwwroot',
+    emptyOutDir: true,
+  },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5555',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/hub': {
+        target: 'http://localhost:5555',
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+      },
+    },
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './vitest.setup.ts',
+  }
+})

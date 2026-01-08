@@ -1,4 +1,10 @@
-# Bluetooth HFP Implementation Guide
+# Bluetooth HFP Implementation Guide (Linux/BlueZ)
+
+> **⚠️ PLATFORM NOTE: 2026 UPDATE**
+> This guide documents the Linux/BlueZ implementation used on Raspberry Pi.
+> The project is migrating to a **Windows NUC** architecture.
+> For the new Windows-based plan, please refer to `2026_PROJECT_PLAN.md`.
+> The information below is preserved for reference or for users still running on Linux.
 
 ## Current Status
 

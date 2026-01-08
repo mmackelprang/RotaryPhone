@@ -139,7 +139,7 @@ public class ContactService : IContactService
         {
             return _contacts.Values.Where(c =>
                 c.Name.ToLowerInvariant().Contains(lowerQuery) ||
-                c.PhoneNumber.Contains(digitsOnly) ||
+                (!string.IsNullOrEmpty(digitsOnly) && c.PhoneNumber.Contains(digitsOnly)) ||
                 (c.Email?.ToLowerInvariant().Contains(lowerQuery) ?? false)
             ).OrderBy(c => c.Name).ToList();
         }

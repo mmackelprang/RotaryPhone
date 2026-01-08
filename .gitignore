@@ -86,3 +86,12 @@ ServiceFabricBackup/
 # Application data
 data/
 contacts.json
+
+# Publish output
+publish/
+
+# Frontend build artifacts
+src/RotaryPhoneController.WebUI/wwwroot/assets/
+src/RotaryPhoneController.WebUI/wwwroot/index.html
+src/RotaryPhoneController.WebUI/wwwroot/vite.svg
+src/RotaryPhoneController.WebUI/wwwroot/*.styles.css
