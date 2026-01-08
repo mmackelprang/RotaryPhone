@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.CallHistory;
 
-namespace RotaryPhoneController.WebUI.Hubs;
+namespace RotaryPhoneController.Server.Hubs;
 
 public class RotaryHub : Hub
 {

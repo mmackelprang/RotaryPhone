@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Tmds.DBus.Protocol;
+using RotaryPhoneController.Core.Configuration;
 
 namespace RotaryPhoneController.Core.Audio;
 
@@ -17,13 +18,21 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     private bool _disposed;
     private CancellationTokenSource? _monitorCts;
 
+#pragma warning disable CS0067 // Events are part of interface but not yet triggered in this implementation
     public event Action<string>? OnIncomingCall;
     public event Action? OnCallAnsweredOnCellPhone;
+#pragma warning restore CS0067
+
     public event Action? OnCallEnded;
     public event Action<AudioRoute>? OnAudioRouteChanged;
 
     public bool IsConnected => _isConnected;
     public string? ConnectedDeviceAddress => _connectedDeviceAddress;
+
+    public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, AppConfiguration config)
+        : this(logger, config.BluetoothDeviceName)
+    {
+    }
 
     public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, string deviceName = "Rotary Phone")
     {

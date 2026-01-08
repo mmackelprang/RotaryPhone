@@ -19,11 +19,11 @@ finally {
 # 2. Build Backend
 Write-Host "Step 2: Publishing .NET Backend..." -ForegroundColor Cyan
 $publishDir = Join-Path $PWD "publish"
-dotnet publish src/RotaryPhoneController.WebUI/RotaryPhoneController.WebUI.csproj -c Release -o $publishDir
+dotnet publish src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj -c Release -o $publishDir
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
 Write-Host "----------------------------------------------------------------"
 Write-Host "Build Complete!" -ForegroundColor Green
 Write-Host "Artifacts are in: $publishDir"
-Write-Host "To run: cd publish; ./RotaryPhoneController.WebUI.exe"
+Write-Host "To run: cd publish; ./RotaryPhoneController.Server.exe"
 Write-Host "----------------------------------------------------------------"

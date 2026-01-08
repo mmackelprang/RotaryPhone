@@ -1,8 +1,8 @@
 using Microsoft.AspNetCore.SignalR;
 using RotaryPhoneController.Core;
-using RotaryPhoneController.WebUI.Hubs;
+using RotaryPhoneController.Server.Hubs;
 
-namespace RotaryPhoneController.WebUI.Services;
+namespace RotaryPhoneController.Server.Services;
 
 public class SignalRNotifierService : IHostedService
 {

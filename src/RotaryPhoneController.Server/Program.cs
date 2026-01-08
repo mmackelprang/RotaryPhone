@@ -1,6 +1,5 @@
-using RotaryPhoneController.WebUI.Components;
-using RotaryPhoneController.WebUI.Hubs;
-using RotaryPhoneController.WebUI.Services;
+using RotaryPhoneController.Server.Hubs;
+using RotaryPhoneController.Server.Services;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.CallHistory;
@@ -56,10 +55,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-// Register existing Blazor components (temporary)
-builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
-
 // Register configuration as singleton
 builder.Services.AddSingleton(appConfig);
 
@@ -99,7 +94,21 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
     var callHistoryService = appConfig.EnableCallHistory 
         ? sp.GetRequiredService<ICallHistoryService>() 
         : null;
-    return new PhoneManagerService(logger, callHistoryService);
+    
+    var sipAdapter = sp.GetRequiredService<ISipAdapter>();
+    var bluetoothAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
+    var rtpBridge = sp.GetRequiredService<IRtpAudioBridge>();
+    var callManagerLogger = sp.GetRequiredService<ILogger<CallManager>>();
+    var config = sp.GetRequiredService<AppConfiguration>();
+
+    return new PhoneManagerService(
+        logger, 
+        config,
+        sipAdapter,
+        bluetoothAdapter,
+        rtpBridge,
+        callManagerLogger,
+        callHistoryService);
 });
 
 // Register SignalR Notifier Service (Hosted Service)
@@ -108,10 +117,11 @@ builder.Services.AddHostedService<SignalRNotifierService>();
 // Register audio components (based on configuration)
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
-    if (appConfig.UseActualBluetoothHfp)
+    var config = sp.GetRequiredService<AppConfiguration>();
+    if (config.UseActualBluetoothHfp)
     {
         var logger = sp.GetRequiredService<ILogger<BlueZHfpAdapter>>();
-        var adapter = new BlueZHfpAdapter(logger, appConfig.BluetoothDeviceName);
+        var adapter = new BlueZHfpAdapter(logger, config);
         // Initialize the adapter asynchronously
         _ = adapter.InitializeAsync();
         return adapter;
@@ -125,7 +135,8 @@ builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 {
-    if (appConfig.UseActualRtpAudioBridge)
+    var config = sp.GetRequiredService<AppConfiguration>();
+    if (config.UseActualRtpAudioBridge)
     {
         var logger = sp.GetRequiredService<ILogger<RtpAudioBridge>>();
         return new RtpAudioBridge(logger);
@@ -141,11 +152,19 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 builder.Services.AddSingleton<ISipAdapter>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<SIPSorceryAdapter>>();
+    // We are using Microsoft.Extensions.Logging.ILogger<T> normally, but SIPSorceryAdapter currently asks for Serilog.ILogger
+    // However, we updated the ctor to take AppConfiguration.
+    // The previous implementation created a separate logger.
+    
+    // NOTE: In a real migration we should fix SIPSorceryAdapter to use ILogger<T>
+    // For now we will create the Serilog logger as before but pass config.
     var serilogLogger = new LoggerConfiguration()
         .MinimumLevel.Debug()
         .WriteTo.Console()
         .CreateLogger();
-    var adapter = new SIPSorceryAdapter(serilogLogger, appConfig.SipListenAddress, appConfig.SipPort);
+        
+    var config = sp.GetRequiredService<AppConfiguration>();
+    var adapter = new SIPSorceryAdapter(serilogLogger, config);
     adapter.StartListening();
     return adapter;
 });
@@ -154,34 +173,18 @@ builder.Services.AddSingleton<ISipAdapter>(sp =>
 builder.Services.AddSingleton<CallManager>(sp =>
 {
     var phoneManager = sp.GetRequiredService<PhoneManagerService>();
-    var sipAdapter = sp.GetRequiredService<ISipAdapter>();
-    var bluetoothAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
-    var rtpBridge = sp.GetRequiredService<IRtpAudioBridge>();
-    var logger = sp.GetRequiredService<ILogger<CallManager>>();
-    
-    // Register all configured phones
-    foreach (var phoneConfig in appConfig.Phones)
-    {
-        phoneManager.RegisterPhone(
-            phoneConfig.Id,
-            sipAdapter,
-            bluetoothAdapter,
-            rtpBridge,
-            logger,
-            phoneConfig,
-            appConfig.RtpBasePort);
-    }
+    var config = sp.GetRequiredService<AppConfiguration>();
     
     // Return the first phone's CallManager
-    if (appConfig.Phones.Count == 0)
+    if (config.Phones.Count == 0)
     {
         throw new InvalidOperationException("No phones configured in appsettings.json");
     }
     
-    var firstPhone = phoneManager.GetPhone(appConfig.Phones[0].Id);
+    var firstPhone = phoneManager.GetPhone(config.Phones[0].Id);
     if (firstPhone == null)
     {
-        throw new InvalidOperationException($"Failed to create CallManager for phone: {appConfig.Phones[0].Id}");
+        throw new InvalidOperationException($"Failed to create CallManager for phone: {config.Phones[0].Id}");
     }
     
     return firstPhone;
@@ -207,11 +210,8 @@ app.UseHttpsRedirection();
 // Enable CORS
 app.UseCors("AllowViteDev");
 
-app.UseAntiforgery();
-
+// Static Files - Defaults to wwwroot
 app.UseStaticFiles();
-
-app.MapStaticAssets();
 
 // Map Controllers
 app.MapControllers();
@@ -219,14 +219,7 @@ app.MapControllers();
 // Map SignalR Hub
 app.MapHub<RotaryHub>("/hub");
 
-// Map Blazor Components (Legacy)
-app.MapRazorComponents<App>()
-    .AddInteractiveServerRenderMode();
-
-// Fallback to React SPA
+// Fallback to React SPA in wwwroot/index.html
 app.MapFallbackToFile("index.html");
 
 app.Run();
-
-// Ensure Serilog is properly disposed
-Log.CloseAndFlush();

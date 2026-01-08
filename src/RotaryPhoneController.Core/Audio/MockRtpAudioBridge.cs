@@ -14,7 +14,9 @@ public class MockRtpAudioBridge : IRtpAudioBridge
 
     public event Action? OnBridgeEstablished;
     public event Action? OnBridgeTerminated;
+#pragma warning disable CS0067 // Mock implementation
     public event Action<string>? OnBridgeError;
+#pragma warning restore CS0067
 
     public bool IsActive => _isActive;
     public AudioRoute CurrentRoute => _currentRoute;

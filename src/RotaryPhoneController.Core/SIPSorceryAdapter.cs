@@ -4,6 +4,7 @@ using Serilog;
 using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
+using RotaryPhoneController.Core.Configuration;
 
 namespace RotaryPhoneController.Core;
 
@@ -18,6 +19,13 @@ public class SIPSorceryAdapter : ISipAdapter
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
     public event Action? OnIncomingCall;
+
+    public SIPSorceryAdapter(ILogger logger, AppConfiguration config)
+    {
+        _logger = logger;
+        _localIPAddress = config.SipListenAddress;
+        _localPort = config.SipPort;
+    }
 
     public SIPSorceryAdapter(ILogger logger, string localIPAddress = "0.0.0.0", int localPort = 5060)
     {
@@ -171,7 +179,7 @@ public class SIPSorceryAdapter : ISipAdapter
                 
                 // Important: We must answer the INVITE to establish the SIP dialog
                 // and stop the HT801 from retransmitting.
-                var response = sipRequest.CreateResponse(SIPResponseStatusCodesEnum.Ok);
+                var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
                 
                 // Add Contact header to response (required)
                 response.Header.Contact = new List<SIPContactHeader> 

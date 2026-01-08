@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using RotaryPhoneController.Core.Contacts;
 
-namespace RotaryPhoneController.WebUI.Controllers;
+namespace RotaryPhoneController.Server.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]

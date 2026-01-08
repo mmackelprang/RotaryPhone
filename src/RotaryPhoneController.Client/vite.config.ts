@@ -7,7 +7,7 @@ import path from 'path'
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: '../RotaryPhoneController.WebUI/wwwroot',
+    outDir: '../RotaryPhoneController.Server/wwwroot',
     emptyOutDir: true,
   },
   server: {

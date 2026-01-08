@@ -176,11 +176,9 @@ public class RtpAudioBridge : IRtpAudioBridge, IDisposable
             _rtpSession.OnRtpPacketReceived += HandleIncomingRtpPacket;
 
             // Start RTP session
-            _rtpSession.Start();
+            await _rtpSession.Start();
 
             _logger.LogInformation("RTP session created and started");
-            
-            await Task.CompletedTask;
         }
         catch (Exception ex)
         {

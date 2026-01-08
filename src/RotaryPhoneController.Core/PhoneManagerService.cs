@@ -13,12 +13,47 @@ public class PhoneManagerService
     private readonly ILogger<PhoneManagerService> _logger;
     private readonly Dictionary<string, CallManager> _phoneManagers = new();
     private readonly ICallHistoryService? _callHistoryService;
+    private readonly AppConfiguration _config;
+    private readonly ISipAdapter _sipAdapter;
+    private readonly IBluetoothHfpAdapter _bluetoothAdapter;
+    private readonly IRtpAudioBridge _rtpBridge;
+    private readonly ILogger<CallManager> _callManagerLogger;
 
-    public PhoneManagerService(ILogger<PhoneManagerService> logger, ICallHistoryService? callHistoryService = null)
+    public PhoneManagerService(
+        ILogger<PhoneManagerService> logger, 
+        AppConfiguration config,
+        ISipAdapter sipAdapter,
+        IBluetoothHfpAdapter bluetoothAdapter,
+        IRtpAudioBridge rtpBridge,
+        ILogger<CallManager> callManagerLogger,
+        ICallHistoryService? callHistoryService = null)
     {
         _logger = logger;
+        _config = config;
+        _sipAdapter = sipAdapter;
+        _bluetoothAdapter = bluetoothAdapter;
+        _rtpBridge = rtpBridge;
+        _callManagerLogger = callManagerLogger;
         _callHistoryService = callHistoryService;
+        
+        InitializePhones();
+        
         _logger.LogInformation("PhoneManagerService initialized");
+    }
+
+    private void InitializePhones()
+    {
+        foreach (var phoneConfig in _config.Phones)
+        {
+            RegisterPhone(
+                phoneConfig.Id,
+                _sipAdapter,
+                _bluetoothAdapter,
+                _rtpBridge,
+                _callManagerLogger,
+                phoneConfig,
+                _config.RtpBasePort);
+        }
     }
 
     /// <summary>
