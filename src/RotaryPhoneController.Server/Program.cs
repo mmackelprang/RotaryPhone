@@ -8,20 +8,13 @@ using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Configuration;
 using Serilog;
 
-// Configure Serilog
-Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Debug()
-    .WriteTo.Console()
-    .WriteTo.Debug()
-    .WriteTo.File(
-        path: "logs/rotary-.log",
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 31,
-        fileSizeLimitBytes: 10 * 1024 * 1024,
-        rollOnFileSizeLimit: true)
-    .CreateLogger();
-
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Serilog from appsettings
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .CreateLogger();
 
 // Use Serilog
 builder.Host.UseSerilog();
@@ -152,18 +145,14 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 builder.Services.AddSingleton<ISipAdapter>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<SIPSorceryAdapter>>();
-    // We are using Microsoft.Extensions.Logging.ILogger<T> normally, but SIPSorceryAdapter currently asks for Serilog.ILogger
-    // However, we updated the ctor to take AppConfiguration.
-    // The previous implementation created a separate logger.
-    
-    // NOTE: In a real migration we should fix SIPSorceryAdapter to use ILogger<T>
-    // For now we will create the Serilog logger as before but pass config.
-    var serilogLogger = new LoggerConfiguration()
-        .MinimumLevel.Debug()
-        .WriteTo.Console()
-        .CreateLogger();
-        
     var config = sp.GetRequiredService<AppConfiguration>();
+
+    // TODO: migrate SIPSorceryAdapter to use ILogger<T>. For now, bridge Serilog from configured logger.
+    var serilogLogger = new LoggerConfiguration()
+        .ReadFrom.Configuration(builder.Configuration)
+        .Enrich.FromLogContext()
+        .CreateLogger();
+    
     var adapter = new SIPSorceryAdapter(serilogLogger, config);
     adapter.StartListening();
     return adapter;
