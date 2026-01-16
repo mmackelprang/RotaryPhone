@@ -41,7 +41,10 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowViteDev", policy =>
     {
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
+        policy.WithOrigins(
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://192.168.86.55:5173")
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials();

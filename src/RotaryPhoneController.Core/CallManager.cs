@@ -17,6 +17,7 @@ public class CallManager
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
+    private bool _isHangingUp;
 
     public event Action? StateChanged;
 
@@ -295,30 +296,42 @@ public class CallManager
 
     public void HangUp()
     {
+        if (_isHangingUp)
+        {
+            _logger.LogDebug("HangUp re-entry detected; ignoring to prevent recursion");
+            return;
+        }
+
+        _isHangingUp = true;
         _logger.LogInformation("Hanging up");
-        
         var previousState = CurrentState;
-        
-        // Terminate Bluetooth call
-        _ = _bluetoothAdapter.TerminateCallAsync();
-        
-        // Stop RTP bridge
-        if (_rtpBridge.IsActive)
+
+        try
         {
-            _ = _rtpBridge.StopBridgeAsync();
+            // Terminate Bluetooth call
+            _ = _bluetoothAdapter.TerminateCallAsync();
+
+            // Stop RTP bridge
+            if (_rtpBridge.IsActive)
+            {
+                _ = _rtpBridge.StopBridgeAsync();
+            }
+
+            // Update call history
+            if (_currentCallHistory != null)
+            {
+                _currentCallHistory.EndTime = DateTime.Now;
+                _callHistoryService?.UpdateCallHistory(_currentCallHistory);
+                _currentCallHistory = null;
+            }
+
+            CurrentState = CallState.Idle;
+            DialedNumber = string.Empty;
+            _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
         }
-        
-        // Update call history
-        if (_currentCallHistory != null)
+        finally
         {
-            _currentCallHistory.EndTime = DateTime.Now;
-            _callHistoryService?.UpdateCallHistory(_currentCallHistory);
-            _currentCallHistory = null;
+            _isHangingUp = false;
         }
-        
-        CurrentState = CallState.Idle;
-        DialedNumber = string.Empty;
-        
-        _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
     }
 }
