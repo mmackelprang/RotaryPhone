@@ -15,9 +15,14 @@ public class RotaryHub : Hub
     {
         await Clients.All.SendAsync("IncomingCall", phoneId, phoneNumber);
     }
-    
+
     public async Task SendCallHistoryUpdate(CallHistoryEntry entry)
     {
         await Clients.All.SendAsync("CallHistoryUpdated", entry);
+    }
+
+    public async Task SendSystemStatus(SystemStatus status)
+    {
+        await Clients.All.SendAsync("SystemStatusChanged", status);
     }
 }

@@ -82,6 +82,7 @@ ServiceFabricBackup/
 # Temporary files
 *.tmp
 *.temp
+nul
 
 # Application data
 data/

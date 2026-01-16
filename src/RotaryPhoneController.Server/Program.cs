@@ -107,23 +107,13 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
 // Register SignalR Notifier Service (Hosted Service)
 builder.Services.AddHostedService<SignalRNotifierService>();
 
-// Register audio components (based on configuration)
+// Register Bluetooth HFP adapter (platform-aware factory pattern)
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
-    if (config.UseActualBluetoothHfp)
-    {
-        var logger = sp.GetRequiredService<ILogger<BlueZHfpAdapter>>();
-        var adapter = new BlueZHfpAdapter(logger, config);
-        // Initialize the adapter asynchronously
-        _ = adapter.InitializeAsync();
-        return adapter;
-    }
-    else
-    {
-        var logger = sp.GetRequiredService<ILogger<MockBluetoothHfpAdapter>>();
-        return new MockBluetoothHfpAdapter(logger);
-    }
+    var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+    return BluetoothAdapterFactory.Create(config, loggerFactory);
 });
 
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>

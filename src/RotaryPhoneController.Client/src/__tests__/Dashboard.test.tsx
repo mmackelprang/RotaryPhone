@@ -55,4 +55,27 @@ describe('Dashboard Component', () => {
     
     expect(api.post).toHaveBeenCalledWith('/phone/simulate/dial?digits=123')
   })
+
+  it('renders HT801 status', () => {
+    useStore.setState({ 
+      systemStatus: {
+        platform: 'TestPlatform',
+        isRaspberryPi: false,
+        bluetoothEnabled: false,
+        bluetoothConnected: false,
+        bluetoothDeviceAddress: null,
+        sipListening: false,
+        sipListenAddress: '',
+        sipPort: 0,
+        ht801IpAddress: '192.168.1.10',
+        ht801Reachable: true
+      }
+    })
+    
+    render(<Dashboard />)
+    
+    expect(screen.getByText('HT801 ATA')).toBeInTheDocument()
+    expect(screen.getByText('Online')).toBeInTheDocument()
+    expect(screen.getByText('192.168.1.10')).toBeInTheDocument()
+  })
 })

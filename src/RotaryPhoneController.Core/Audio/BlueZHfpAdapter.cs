@@ -1,3 +1,4 @@
+#if !WINDOWS
 using Microsoft.Extensions.Logging;
 using Tmds.DBus.Protocol;
 using RotaryPhoneController.Core.Configuration;
@@ -491,3 +492,4 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
         _disposed = true;
     }
 }
+#endif

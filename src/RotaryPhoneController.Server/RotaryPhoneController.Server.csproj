@@ -14,8 +14,17 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.0" />
   </ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj" />
+  <!-- Platform-specific Core project reference -->
+  <!-- On Windows, use the Windows TFM to get Windows Bluetooth APIs -->
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
+                      SetTargetFramework="TargetFramework=net9.0-windows10.0.19041.0" />
+  </ItemGroup>
+
+  <!-- On Linux/macOS, use the standard TFM -->
+  <ItemGroup Condition="'$(OS)' != 'Windows_NT'">
+    <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
+                      SetTargetFramework="TargetFramework=net9.0" />
   </ItemGroup>
 
 </Project>

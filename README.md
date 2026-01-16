@@ -40,6 +40,7 @@ The system consists of two main components:
 - **Contact List Management**: Built-in contact management
 - **Call History Page**: View and manage call history
 - **HT801 Configuration Helper**: Web-based configuration assistant
+- **HT801 Status Panel**: Real-time connection status monitoring
 
 ## Prerequisites
 
@@ -120,6 +121,7 @@ To ensure the Grandstream HT801 communicates correctly with the controller, conf
 - [x] **Multiple phone support**
 - [x] **Contact list integration**
 - [x] **Web-based HT801 configuration helper**
+- [x] **HT801 Status Panel**
 - [x] **RTP audio stream bridging** (NAudio/Windows compatible)
 
 ### In Progress / Planned 🚧

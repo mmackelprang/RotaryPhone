@@ -70,7 +70,14 @@ public class AppConfiguration
     /// Enable actual Bluetooth HFP implementation (vs mock)
     /// </summary>
     public bool UseActualBluetoothHfp { get; set; } = false;
-    
+
+    /// <summary>
+    /// Force a specific platform for Bluetooth adapter selection.
+    /// Values: "Windows", "Linux", or null/empty for auto-detect.
+    /// Useful for testing platform-specific code paths.
+    /// </summary>
+    public string? ForcePlatform { get; set; } = null;
+
     /// <summary>
     /// Enable actual RTP audio bridge implementation (vs mock)
     /// </summary>

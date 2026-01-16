@@ -1,5 +1,6 @@
 import * as signalR from '@microsoft/signalr';
 import { useStore, CallState } from '../store/useStore';
+import type { SystemStatus } from '../store/useStore';
 
 const HUB_URL = 'http://localhost:5555/hub';
 
@@ -25,6 +26,11 @@ class SignalRService {
     this.connection.on('IncomingCall', (phoneId: string, phoneNumber: string) => {
       console.log(`SignalR: Incoming call for ${phoneId} from ${phoneNumber}`);
       useStore.getState().setIncomingNumber(phoneNumber);
+    });
+
+    this.connection.on('SystemStatusChanged', (status: SystemStatus) => {
+      console.log(`SignalR: System status changed - Platform: ${status.platform}, Bluetooth: ${status.bluetoothConnected}, SIP: ${status.sipListening}`);
+      useStore.getState().setSystemStatus(status);
     });
   }
 

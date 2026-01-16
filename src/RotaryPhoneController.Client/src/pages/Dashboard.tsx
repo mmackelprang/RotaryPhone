@@ -1,14 +1,22 @@
-import { useState } from 'react';
-import { 
-  Grid, Card, CardContent, Typography, Button, TextField, 
-  Box, Chip, Stack, Divider 
+import { useState, useEffect } from 'react';
+import {
+  Grid, Card, CardContent, Typography, Button, TextField,
+  Box, Chip, Stack, Divider
 } from '@mui/material';
-import { Phone, RingVolume, CallEnd, Dialpad } from '@mui/icons-material';
+import { Phone, RingVolume, CallEnd, Dialpad, Computer, Bluetooth, SettingsPhone, Router } from '@mui/icons-material';
 import { useStore, CallState } from '../store/useStore';
+import type { SystemStatus } from '../store/useStore';
 import api from '../services/api';
 
 const Dashboard: React.FC = () => {
-  const { callState, dialedNumber, incomingNumber } = useStore();
+  const { callState, dialedNumber, incomingNumber, systemStatus, setSystemStatus } = useStore();
+
+  // Fetch initial system status on mount
+  useEffect(() => {
+    api.get<SystemStatus>('/phone/system-status')
+      .then(res => setSystemStatus(res.data))
+      .catch(err => console.error('Failed to fetch system status:', err));
+  }, [setSystemStatus]);
   const [dialInput, setDialInput] = useState('');
 
   // Status Color Logic
@@ -43,6 +51,107 @@ const Dashboard: React.FC = () => {
 
   return (
     <Grid container spacing={3}>
+      {/* System Status Card */}
+      <Grid size={{ xs: 12 }}>
+        <Card>
+          <CardContent>
+            <Typography variant="h6" color="primary" gutterBottom>
+              SYSTEM STATUS
+            </Typography>
+            <Stack
+              direction={{ xs: 'column', sm: 'row' }}
+              spacing={3}
+              divider={<Divider orientation="vertical" flexItem />}
+              sx={{ flexWrap: 'wrap' }}
+            >
+              {/* Platform */}
+              <Box sx={{ minWidth: 150 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  PLATFORM
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Chip
+                    icon={<Computer />}
+                    label={systemStatus?.platform || 'Unknown'}
+                    color="default"
+                    variant="outlined"
+                  />
+                  {systemStatus?.isRaspberryPi && (
+                    <Chip label="Raspberry Pi" size="small" color="success" />
+                  )}
+                </Stack>
+              </Box>
+
+              {/* Bluetooth Status */}
+              <Box sx={{ minWidth: 180 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  BLUETOOTH
+                </Typography>
+                <Chip
+                  icon={<Bluetooth />}
+                  label={
+                    systemStatus?.bluetoothConnected ? 'Connected' :
+                    systemStatus?.bluetoothEnabled ? 'Enabled' : 'Disabled'
+                  }
+                  color={
+                    systemStatus?.bluetoothConnected ? 'success' :
+                    systemStatus?.bluetoothEnabled ? 'warning' : 'default'
+                  }
+                  variant={systemStatus?.bluetoothConnected ? 'filled' : 'outlined'}
+                />
+                {systemStatus?.bluetoothDeviceAddress && (
+                  <Typography variant="caption" display="block" sx={{ mt: 0.5, fontFamily: 'monospace' }}>
+                    {systemStatus.bluetoothDeviceAddress}
+                  </Typography>
+                )}
+              </Box>
+
+              {/* SIP Status */}
+              <Box sx={{ minWidth: 180 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  SIP DEVICE
+                </Typography>
+                <Chip
+                  icon={<SettingsPhone />}
+                  label={systemStatus?.sipListening ? 'Available' : 'Unavailable'}
+                  color={systemStatus?.sipListening ? 'success' : 'error'}
+                  variant={systemStatus?.sipListening ? 'filled' : 'outlined'}
+                />
+                {systemStatus?.sipListening && (
+                  <Typography variant="caption" display="block" sx={{ mt: 0.5, fontFamily: 'monospace' }}>
+                    {systemStatus.sipListenAddress}:{systemStatus.sipPort}
+                  </Typography>
+                )}
+              </Box>
+
+              {/* HT801 Status */}
+              <Box sx={{ minWidth: 180 }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  HT801 ATA
+                </Typography>
+                <Chip
+                  icon={<Router />}
+                  label={
+                    systemStatus?.ht801Reachable === true ? 'Online' :
+                    systemStatus?.ht801Reachable === false ? 'Offline' : 'Unknown'
+                  }
+                  color={
+                    systemStatus?.ht801Reachable === true ? 'success' :
+                    systemStatus?.ht801Reachable === false ? 'error' : 'default'
+                  }
+                  variant={systemStatus?.ht801Reachable ? 'filled' : 'outlined'}
+                />
+                {systemStatus?.ht801IpAddress && (
+                  <Typography variant="caption" display="block" sx={{ mt: 0.5, fontFamily: 'monospace' }}>
+                    {systemStatus.ht801IpAddress}
+                  </Typography>
+                )}
+              </Box>
+            </Stack>
+          </CardContent>
+        </Card>
+      </Grid>
+
       {/* Phone Status Card */}
       <Grid size={{ xs: 12, md: 6 }}>
         <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>

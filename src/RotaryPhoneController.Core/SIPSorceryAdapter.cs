@@ -20,6 +20,11 @@ public class SIPSorceryAdapter : ISipAdapter
     public event Action<string>? OnDigitsReceived;
     public event Action? OnIncomingCall;
 
+    /// <summary>
+    /// Gets whether the SIP transport is currently listening
+    /// </summary>
+    public bool IsListening => _sipTransport != null;
+
     public SIPSorceryAdapter(ILogger logger, AppConfiguration config)
     {
         _logger = logger;
