@@ -96,13 +96,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Copy appsettings.Production.json only if it doesn't exist on target
-ssh $SshTarget "test -f ${TargetPath}/appsettings.Production.json || true"
-if ($LASTEXITCODE -ne 0) {
+$prodExists = ssh $SshTarget "test -f ${TargetPath}/appsettings.Production.json && echo EXISTS"
+if ($prodExists -ne "EXISTS") {
   $prodConfig = Join-Path $RepoRoot "src\RotaryPhoneController.Server\appsettings.Production.json"
   if (Test-Path $prodConfig) {
+    Write-Host "  Copying initial appsettings.Production.json..." -ForegroundColor Yellow
     scp $prodConfig "${SshTarget}:${TargetPath}/appsettings.Production.json"
   }
 }
+
+# Ensure binary is executable
+ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server"
 
 Write-Host "  Files synced" -ForegroundColor Green
 
