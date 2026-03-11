@@ -1,3 +1,4 @@
+#if WINDOWS
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
 using NAudio.Wave;
@@ -499,3 +500,4 @@ public class RtpAudioBridge : IRtpAudioBridge, IDisposable
         _disposed = true;
     }
 }
+#endif

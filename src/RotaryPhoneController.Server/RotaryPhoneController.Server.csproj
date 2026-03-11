@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <!-- Single-target per platform: Windows gets WinRT APIs, Linux gets plain .NET -->
+    <TargetFramework Condition="'$(OS)' == 'Windows_NT'">net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework Condition="'$(OS)' != 'Windows_NT'">net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
@@ -17,13 +19,13 @@
   <!-- On Windows, use the Windows TFM to get Windows Bluetooth APIs -->
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
-                      SetTargetFramework="TargetFramework=net9.0-windows10.0.19041.0" />
+                      SetTargetFramework="TargetFramework=net10.0-windows10.0.19041.0" />
   </ItemGroup>
 
   <!-- On Linux/macOS, use the standard TFM -->
   <ItemGroup Condition="'$(OS)' != 'Windows_NT'">
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
-                      SetTargetFramework="TargetFramework=net9.0" />
+                      SetTargetFramework="TargetFramework=net10.0" />
   </ItemGroup>
 
 </Project>

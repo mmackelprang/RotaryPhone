@@ -1,0 +1,25 @@
+[Unit]
+Description=Rotary Phone Controller API
+After=network.target radio-api.service
+Wants=radio-api.service
+
+[Service]
+Type=simple
+ExecStart=/opt/rotary-phone/RotaryPhoneController.Server
+WorkingDirectory=/opt/rotary-phone
+User=mmack
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=ASPNETCORE_URLS=http://0.0.0.0:5004
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# BlueZ mgmt socket access for disconnect reason detection
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=false
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
