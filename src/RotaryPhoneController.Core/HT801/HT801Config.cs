@@ -8,7 +8,7 @@ public class HT801Config
     /// <summary>
     /// IP address of the HT801
     /// </summary>
-    public string IpAddress { get; set; } = "192.168.1.10";
+    public string IpAddress { get; set; } = "192.168.86.250";
     
     /// <summary>
     /// Admin username for web interface

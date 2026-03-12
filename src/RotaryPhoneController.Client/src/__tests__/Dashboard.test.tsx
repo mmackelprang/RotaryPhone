@@ -7,6 +7,7 @@ import api from '../services/api'
 // Mock API
 vi.mock('../services/api', () => ({
   default: {
+    get: vi.fn().mockResolvedValue({ data: {} }),
     post: vi.fn()
   }
 }))
@@ -67,7 +68,7 @@ describe('Dashboard Component', () => {
         sipListening: false,
         sipListenAddress: '',
         sipPort: 0,
-        ht801IpAddress: '192.168.1.10',
+        ht801IpAddress: '192.168.86.250',
         ht801Reachable: true
       }
     })
@@ -76,6 +77,6 @@ describe('Dashboard Component', () => {
     
     expect(screen.getByText('HT801 ATA')).toBeInTheDocument()
     expect(screen.getByText('Online')).toBeInTheDocument()
-    expect(screen.getByText('192.168.1.10')).toBeInTheDocument()
+    expect(screen.getByText('192.168.86.250')).toBeInTheDocument()
   })
 })
