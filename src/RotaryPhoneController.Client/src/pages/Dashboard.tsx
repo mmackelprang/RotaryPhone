@@ -9,7 +9,7 @@ import type { SystemStatus } from '../store/useStore';
 import api from '../services/api';
 
 const Dashboard: React.FC = () => {
-  const { callState, dialedNumber, incomingNumber, systemStatus, setSystemStatus } = useStore();
+  const { callState, dialedNumber, incomingNumber, callerName, systemStatus, setSystemStatus } = useStore();
 
   // Fetch initial system status on mount
   useEffect(() => {
@@ -175,7 +175,7 @@ const Dashboard: React.FC = () => {
 
             {callState === CallState.Ringing && (
               <Typography variant="h5" color="warning.main" sx={{ mt: 2 }}>
-                Incoming Call: {incomingNumber || 'Unknown'}
+                Incoming Call: {callerName ? `${callerName} (${incomingNumber})` : incomingNumber || 'Unknown'}
               </Typography>
             )}
 

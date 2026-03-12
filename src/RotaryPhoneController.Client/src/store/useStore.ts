@@ -26,11 +26,13 @@ interface PhoneState {
   callState: CallState;
   dialedNumber: string;
   incomingNumber: string | null;
+  callerName: string | null;
   systemStatus: SystemStatus | null;
 
   setCallState: (state: CallState) => void;
   setDialedNumber: (number: string) => void;
   setIncomingNumber: (number: string | null) => void;
+  setCallerName: (name: string | null) => void;
   setSystemStatus: (status: SystemStatus) => void;
 }
 
@@ -38,10 +40,15 @@ export const useStore = create<PhoneState>((set) => ({
   callState: CallState.Idle,
   dialedNumber: '',
   incomingNumber: null,
+  callerName: null,
   systemStatus: null,
 
-  setCallState: (state) => set({ callState: state }),
+  setCallState: (state) => set({
+    callState: state,
+    ...(state === CallState.Idle ? { callerName: null, incomingNumber: null } : {})
+  }),
   setDialedNumber: (number) => set({ dialedNumber: number }),
-  setIncomingNumber: (number) => set({ incomingNumber: number }),
+  setIncomingNumber: (number) => set({ incomingNumber: number, callerName: null }),
+  setCallerName: (name) => set({ callerName: name }),
   setSystemStatus: (status) => set({ systemStatus: status }),
 }));

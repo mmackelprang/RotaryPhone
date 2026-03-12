@@ -153,4 +153,39 @@ public class CallManagerTests
         Assert.Equal(numberToDial, _callManager.DialedNumber);
         _mockBluetoothAdapter.Verify(x => x.InitiateCallAsync(numberToDial), Times.Once);
     }
+
+    [Fact]
+    public void SetResolvedCallerName_WhenRinging_ShouldUpdateCallHistory()
+    {
+        // Arrange - simulate incoming BT call
+        _mockBluetoothAdapter.Raise(x => x.OnIncomingCall += null, "5551234567");
+        Assert.Equal(CallState.Ringing, _callManager.CurrentState);
+
+        // Act
+        _callManager.SetResolvedCallerName("5551234567", "John Smith");
+
+        // Assert - hang up to flush call history update
+        _callManager.HangUp();
+
+        _mockCallHistory.Verify(x => x.UpdateCallHistory(
+            It.Is<CallHistoryEntry>(e => e.CallerName == "John Smith" && e.PhoneNumber == "5551234567")),
+            Times.Once);
+    }
+
+    [Fact]
+    public void SetResolvedCallerName_WrongNumber_ShouldNotUpdate()
+    {
+        // Arrange
+        _mockBluetoothAdapter.Raise(x => x.OnIncomingCall += null, "5551234567");
+
+        // Act - different number should be ignored
+        _callManager.SetResolvedCallerName("9999999999", "Wrong Person");
+
+        // Assert - hang up and verify CallerName is NOT set
+        _callManager.HangUp();
+
+        _mockCallHistory.Verify(x => x.UpdateCallHistory(
+            It.Is<CallHistoryEntry>(e => e.CallerName == null && e.PhoneNumber == "5551234567")),
+            Times.Once);
+    }
 }

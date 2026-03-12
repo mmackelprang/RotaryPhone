@@ -51,6 +51,11 @@ public class CallHistoryEntry
     /// Phone number involved in the call
     /// </summary>
     public string PhoneNumber { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Resolved caller name from PBAP contact lookup (null if unresolved)
+    /// </summary>
+    public string? CallerName { get; set; }
     
     /// <summary>
     /// Direction of the call

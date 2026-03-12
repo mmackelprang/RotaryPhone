@@ -28,6 +28,14 @@ class SignalRService {
       useStore.getState().setIncomingNumber(phoneNumber);
     });
 
+    this.connection.on('CallerResolved', (phoneNumber: string, displayName: string) => {
+      console.log(`SignalR: Caller resolved ${phoneNumber} → ${displayName}`);
+      const state = useStore.getState();
+      if (state.incomingNumber === phoneNumber) {
+        state.setCallerName(displayName);
+      }
+    });
+
     this.connection.on('SystemStatusChanged', (status: SystemStatus) => {
       console.log(`SignalR: System status changed - Platform: ${status.platform}, Bluetooth: ${status.bluetoothConnected}, SIP: ${status.sipListening}`);
       useStore.getState().setSystemStatus(status);
