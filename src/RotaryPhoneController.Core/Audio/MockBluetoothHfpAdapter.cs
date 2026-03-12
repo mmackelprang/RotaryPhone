@@ -58,7 +58,9 @@ public class MockBluetoothHfpAdapter : IBluetoothHfpAdapter
     public Task<bool> TerminateCallAsync()
     {
         _logger.LogInformation("Mock: Terminating call via Bluetooth HFP");
-        OnCallEnded?.Invoke();
+        // Do NOT fire OnCallEnded here — that event is for external call-end
+        // notifications (remote hangup), not for calls we terminate ourselves.
+        // Firing it here creates a feedback loop with CallManager.HangUp().
         return Task.FromResult(true);
     }
 
