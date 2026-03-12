@@ -28,12 +28,6 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
   private Process? _captureProcess;
   private Task? _captureReadTask;
 
-  // G.711 codec constants
-  private const int SAMPLE_RATE = 8000;
-  private const int BITS_PER_SAMPLE = 16;
-  private const int CHANNELS = 1;
-  private const int BYTES_PER_SAMPLE = BITS_PER_SAMPLE / 8;
-
   public event Action<AudioRoute>? OnAudioRouteChanged;
   public event Action? OnBridgeEstablished;
   public event Action? OnBridgeTerminated;
@@ -102,7 +96,7 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
       _bridgeCts?.Dispose();
       _bridgeCts = null;
 
-      StopPipeWireStreams();
+      await StopPipeWireStreamsAsync();
 
       _rtpSession?.Close("Bridge stopped");
       _rtpSession?.Dispose();
@@ -137,7 +131,7 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
       _currentRoute = newRoute;
 
       // Restart PipeWire streams with new routing
-      StopPipeWireStreams();
+      await StopPipeWireStreamsAsync();
       StartPlaybackStream();
       StartCaptureStream();
 
@@ -183,10 +177,8 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
       if (mediaType != SDPMediaTypesEnum.audio || _playbackProcess?.HasExited != false)
         return;
 
-      // Decode G.711 PCMU to PCM
-      var pcmData = DecodeG711MuLaw(rtpPacket.Payload);
+      var pcmData = G711Codec.DecodeMuLaw(rtpPacket.Payload);
 
-      // Write PCM data to pw-cat playback stdin
       try
       {
         _playbackProcess.StandardInput.BaseStream.Write(pcmData, 0, pcmData.Length);
@@ -203,17 +195,10 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
     }
   }
 
-  /// <summary>
-  /// Starts pw-cat in playback mode — reads raw PCM from stdin and plays to PipeWire sink.
-  /// </summary>
   private void StartPlaybackStream()
   {
     try
     {
-      // pw-cat --playback - : reads raw audio from stdin
-      // --format s16 : 16-bit signed integer
-      // --rate 8000 : G.711 sample rate
-      // --channels 1 : mono
       _playbackProcess = Process.Start(new ProcessStartInfo
       {
         FileName = "pw-cat",
@@ -230,20 +215,20 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
         return;
       }
 
-      // Log stderr asynchronously
+      var ct = _bridgeCts?.Token ?? CancellationToken.None;
       _ = Task.Run(async () =>
       {
         try
         {
-          while (!_playbackProcess.HasExited)
+          while (!_playbackProcess.HasExited && !ct.IsCancellationRequested)
           {
-            var line = await _playbackProcess.StandardError.ReadLineAsync();
+            var line = await _playbackProcess.StandardError.ReadLineAsync(ct);
             if (line != null)
               _logger.LogDebug("pw-cat playback: {Line}", line);
           }
         }
-        catch { /* process exited */ }
-      });
+        catch { /* process exited or cancelled */ }
+      }, ct);
 
       _logger.LogInformation("PipeWire playback stream started (pid={Pid})", _playbackProcess.Id);
     }
@@ -253,14 +238,10 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
     }
   }
 
-  /// <summary>
-  /// Starts pw-cat in record mode — captures audio from PipeWire source and sends via RTP.
-  /// </summary>
   private void StartCaptureStream()
   {
     try
     {
-      // pw-cat --record - : writes raw audio to stdout
       _captureProcess = Process.Start(new ProcessStartInfo
       {
         FileName = "pw-cat",
@@ -279,7 +260,6 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
 
       _logger.LogInformation("PipeWire capture stream started (pid={Pid})", _captureProcess.Id);
 
-      // Read captured audio and send via RTP
       var ct = _bridgeCts?.Token ?? CancellationToken.None;
       _captureReadTask = Task.Run(async () =>
       {
@@ -295,16 +275,15 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
             while (totalRead < buffer.Length)
             {
               int read = await stream.ReadAsync(buffer, totalRead, buffer.Length - totalRead, ct);
-              if (read == 0) break; // EOF
+              if (read == 0) break;
               totalRead += read;
             }
 
             if (totalRead == 0) break;
 
-            // Encode PCM to G.711 and send via RTP
             if (_rtpSession != null && _isBridging)
             {
-              var muLawData = EncodeG711MuLaw(buffer, totalRead);
+              var muLawData = G711Codec.EncodeMuLaw(buffer, totalRead);
               _rtpSession.SendAudio((uint)totalRead, muLawData);
             }
           }
@@ -320,20 +299,20 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
         }
       }, ct);
 
-      // Log stderr
+      // Log stderr with cancellation support
       _ = Task.Run(async () =>
       {
         try
         {
-          while (!_captureProcess.HasExited)
+          while (!_captureProcess.HasExited && !ct.IsCancellationRequested)
           {
-            var line = await _captureProcess.StandardError.ReadLineAsync();
+            var line = await _captureProcess.StandardError.ReadLineAsync(ct);
             if (line != null)
               _logger.LogDebug("pw-cat capture: {Line}", line);
           }
         }
-        catch { /* process exited */ }
-      });
+        catch { /* process exited or cancelled */ }
+      }, ct);
     }
     catch (Exception ex)
     {
@@ -341,10 +320,21 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
     }
   }
 
-  private void StopPipeWireStreams()
+  private async Task StopPipeWireStreamsAsync()
   {
     try
     {
+      // Await the capture read task with timeout before killing processes
+      if (_captureReadTask != null)
+      {
+        try
+        {
+          await _captureReadTask.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch { /* timeout or cancellation */ }
+        _captureReadTask = null;
+      }
+
       if (_playbackProcess != null && !_playbackProcess.HasExited)
       {
         try
@@ -370,77 +360,12 @@ public class PipeWireRtpAudioBridge : IRtpAudioBridge, IDisposable
         _captureProcess = null;
       }
 
-      _captureReadTask = null;
-
       _logger.LogDebug("PipeWire streams stopped");
     }
     catch (Exception ex)
     {
       _logger.LogError(ex, "Error stopping PipeWire streams");
     }
-  }
-
-  // G.711 mu-law codec
-
-  private static readonly short[] MuLawDecompressTable = GenerateMuLawDecompressTable();
-
-  private static short[] GenerateMuLawDecompressTable()
-  {
-    var table = new short[256];
-    for (int i = 0; i < 256; i++)
-    {
-      int sign = (i & 0x80) != 0 ? -1 : 1;
-      int exponent = (i >> 4) & 0x07;
-      int mantissa = i & 0x0F;
-      int step = 4 << (exponent + 1);
-      int value = sign * ((0x21 << exponent) + step * mantissa + step / 2 - 4 * 33);
-      table[i] = (short)value;
-    }
-    return table;
-  }
-
-  private static byte[] DecodeG711MuLaw(byte[] muLawData)
-  {
-    var pcmData = new byte[muLawData.Length * 2];
-    for (int i = 0; i < muLawData.Length; i++)
-    {
-      short pcmValue = MuLawDecompressTable[muLawData[i]];
-      pcmData[i * 2] = (byte)(pcmValue & 0xFF);
-      pcmData[i * 2 + 1] = (byte)((pcmValue >> 8) & 0xFF);
-    }
-    return pcmData;
-  }
-
-  private static byte[] EncodeG711MuLaw(byte[] pcmData, int length)
-  {
-    var muLawData = new byte[length / 2];
-    for (int i = 0; i < length / 2; i++)
-    {
-      short pcmValue = (short)(pcmData[i * 2] | (pcmData[i * 2 + 1] << 8));
-      muLawData[i] = LinearToMuLaw(pcmValue);
-    }
-    return muLawData;
-  }
-
-  private static byte LinearToMuLaw(short pcm)
-  {
-    const int cClip = 32635;
-    const int cBias = 0x84;
-
-    int sign = (pcm < 0) ? 0x80 : 0;
-    if (sign != 0)
-      pcm = (short)-pcm;
-    if (pcm > cClip)
-      pcm = cClip;
-    pcm += cBias;
-
-    int exponent = 7;
-    for (int expMask = 0x4000; (pcm & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-
-    int mantissa = (pcm >> (exponent + 3)) & 0x0F;
-    int muLaw = ~(sign | (exponent << 4) | mantissa);
-
-    return (byte)muLaw;
   }
 
   public void Dispose()

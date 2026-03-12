@@ -25,9 +25,6 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
-  <!-- Linux-only dependencies -->
-  <ItemGroup Condition="!$(TargetFramework.Contains('windows'))">
-    <PackageReference Include="Tmds.DBus" Version="0.15.0" />
-  </ItemGroup>
+  <!-- Tmds.DBus removed — BlueZHfpAdapter now uses dbus-monitor subprocess instead of library D-Bus calls -->
 
 </Project>

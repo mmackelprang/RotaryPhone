@@ -16,7 +16,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   private readonly ILogger<BlueZHfpAdapter> _logger;
   private readonly string _deviceName;
   private readonly BluetoothMgmtMonitor? _mgmtMonitor;
-  private bool _isConnected;
+  private readonly object _stateLock = new();
+  private volatile bool _isConnected;
   private string? _connectedDeviceAddress;
   private AudioRoute _currentRoute = AudioRoute.RotaryPhone;
   private bool _disposed;
@@ -189,29 +190,35 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     if (connected)
     {
       var mac = ExtractMacFromDevicePath(devicePath);
-      _isConnected = true;
-      _connectedDeviceAddress = mac;
-      _lastDisconnectReason = null;
+      lock (_stateLock)
+      {
+        _connectedDeviceAddress = mac;
+        _lastDisconnectReason = null;
+        _isConnected = true;
+      }
       _logger.LogInformation("Bluetooth device connected: {Address} (path={Path})", mac, devicePath);
     }
     else if (disconnected)
     {
-      var mac = _connectedDeviceAddress ?? ExtractMacFromDevicePath(devicePath);
+      string? mac;
+      lock (_stateLock)
+      {
+        mac = _connectedDeviceAddress ?? ExtractMacFromDevicePath(devicePath);
+      }
       _logger.LogInformation("Bluetooth device disconnected: {Address}", mac);
 
-      // Get disconnect reason from mgmt monitor
-      if (_mgmtMonitor != null && mac != null)
-      {
-        _lastDisconnectReason = _mgmtMonitor.ConsumeDisconnectReason(mac);
-        _logger.LogInformation("Disconnect reason for {Address}: {Reason}", mac, _lastDisconnectReason);
-      }
-      else
-      {
-        _lastDisconnectReason = BluetoothDisconnectReason.Unknown;
-      }
+      // Get disconnect reason from mgmt monitor (may block up to 300ms)
+      var reason = (_mgmtMonitor != null && mac != null)
+        ? _mgmtMonitor.ConsumeDisconnectReason(mac)
+        : BluetoothDisconnectReason.Unknown;
 
-      _isConnected = false;
-      _connectedDeviceAddress = null;
+      lock (_stateLock)
+      {
+        _lastDisconnectReason = reason;
+        _isConnected = false;
+        _connectedDeviceAddress = null;
+      }
+      _logger.LogInformation("Disconnect reason for {Address}: {Reason}", mac, reason);
     }
   }
 
@@ -270,9 +277,12 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
                 var mac = parts[1];
                 if (!_isConnected || _connectedDeviceAddress != mac)
                 {
-                  _isConnected = true;
-                  _connectedDeviceAddress = mac;
-                  _lastDisconnectReason = null;
+                  lock (_stateLock)
+                  {
+                    _connectedDeviceAddress = mac;
+                    _lastDisconnectReason = null;
+                    _isConnected = true;
+                  }
                   _logger.LogInformation("Bluetooth device connected: {Address}", mac);
                 }
               }
@@ -280,18 +290,20 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
           }
           else if (_isConnected)
           {
-            var previousAddress = _connectedDeviceAddress;
+            string? previousAddress;
+            lock (_stateLock) { previousAddress = _connectedDeviceAddress; }
 
-            // Get disconnect reason
-            if (_mgmtMonitor != null && previousAddress != null)
+            var reason = (_mgmtMonitor != null && previousAddress != null)
+              ? _mgmtMonitor.ConsumeDisconnectReason(previousAddress)
+              : BluetoothDisconnectReason.Unknown;
+
+            lock (_stateLock)
             {
-              _lastDisconnectReason = _mgmtMonitor.ConsumeDisconnectReason(previousAddress);
-              _logger.LogInformation("Disconnect reason for {Address}: {Reason}", previousAddress, _lastDisconnectReason);
+              _lastDisconnectReason = reason;
+              _isConnected = false;
+              _connectedDeviceAddress = null;
             }
-
-            _isConnected = false;
-            _connectedDeviceAddress = null;
-            _logger.LogInformation("Bluetooth device disconnected");
+            _logger.LogInformation("Bluetooth device disconnected, reason={Reason}", reason);
           }
         }
       }

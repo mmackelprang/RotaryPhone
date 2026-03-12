@@ -196,7 +196,7 @@ public class RtpAudioBridge : IRtpAudioBridge, IDisposable
                 return;
 
             // Decode G.711 PCMU audio
-            var pcmData = DecodeG711MuLaw(rtpPacket.Payload);
+            var pcmData = G711Codec.DecodeMuLaw(rtpPacket.Payload);
 
             // Route audio based on current route
             if (_currentRoute == AudioRoute.RotaryPhone)
@@ -367,7 +367,7 @@ public class RtpAudioBridge : IRtpAudioBridge, IDisposable
                 return;
 
             // Convert PCM to G.711 mu-law
-            var muLawData = EncodeG711MuLaw(e.Buffer, e.BytesRecorded);
+            var muLawData = G711Codec.EncodeMuLaw(e.Buffer, e.BytesRecorded);
 
             // Send via RTP
             _rtpSession.SendAudio((uint)e.BytesRecorded, muLawData);
@@ -424,68 +424,6 @@ public class RtpAudioBridge : IRtpAudioBridge, IDisposable
         {
             _logger.LogError(ex, "Error stopping audio processing");
         }
-    }
-
-    // G.711 mu-law encoding/decoding
-    private static readonly short[] MuLawDecompressTable = GenerateMuLawDecompressTable();
-    
-    private static short[] GenerateMuLawDecompressTable()
-    {
-        var table = new short[256];
-        for (int i = 0; i < 256; i++)
-        {
-            int sign = (i & 0x80) != 0 ? -1 : 1;
-            int exponent = (i >> 4) & 0x07;
-            int mantissa = i & 0x0F;
-            int step = 4 << (exponent + 1);
-            int value = sign * ((0x21 << exponent) + step * mantissa + step / 2 - 4 * 33);
-            table[i] = (short)value;
-        }
-        return table;
-    }
-
-    private byte[] DecodeG711MuLaw(byte[] muLawData)
-    {
-        var pcmData = new byte[muLawData.Length * 2];
-        for (int i = 0; i < muLawData.Length; i++)
-        {
-            short pcmValue = MuLawDecompressTable[muLawData[i]];
-            pcmData[i * 2] = (byte)(pcmValue & 0xFF);
-            pcmData[i * 2 + 1] = (byte)((pcmValue >> 8) & 0xFF);
-        }
-        return pcmData;
-    }
-
-    private byte[] EncodeG711MuLaw(byte[] pcmData, int length)
-    {
-        var muLawData = new byte[length / 2];
-        for (int i = 0; i < length / 2; i++)
-        {
-            short pcmValue = (short)(pcmData[i * 2] | (pcmData[i * 2 + 1] << 8));
-            muLawData[i] = LinearToMuLaw(pcmValue);
-        }
-        return muLawData;
-    }
-
-    private static byte LinearToMuLaw(short pcm)
-    {
-        const int cClip = 32635;
-        const int cBias = 0x84;
-
-        int sign = (pcm < 0) ? 0x80 : 0;
-        if (sign != 0)
-            pcm = (short)-pcm;
-        if (pcm > cClip)
-            pcm = cClip;
-        pcm += cBias;
-
-        int exponent = 7;
-        for (int expMask = 0x4000; (pcm & expMask) == 0 && exponent > 0; exponent--, expMask >>= 1) { }
-
-        int mantissa = (pcm >> (exponent + 3)) & 0x0F;
-        int muLaw = ~(sign | (exponent << 4) | mantissa);
-
-        return (byte)muLaw;
     }
 
     public void Dispose()
