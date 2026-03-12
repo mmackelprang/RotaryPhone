@@ -36,14 +36,16 @@ builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Add CORS policy for Vite development
+// Add CORS policy for development and Radio.Web integration
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowViteDev", policy =>
+    options.AddPolicy("AllowClients", policy =>
     {
         policy.WithOrigins(
-                "http://localhost:5173",
+                "http://localhost:5173",   // Vite dev
                 "http://127.0.0.1:5173",
+                "http://localhost:5002",   // Radio.Web local
+                "http://radio:5002",       // Radio.Web on Ubuntu
                 "http://192.168.86.55:5173")
               .AllowAnyMethod()
               .AllowAnyHeader()
@@ -122,16 +124,15 @@ builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
+#if WINDOWS
     if (config.UseActualRtpAudioBridge)
     {
         var logger = sp.GetRequiredService<ILogger<RtpAudioBridge>>();
         return new RtpAudioBridge(logger);
     }
-    else
-    {
-        var logger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
-        return new MockRtpAudioBridge(logger);
-    }
+#endif
+    var mockLogger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
+    return new MockRtpAudioBridge(mockLogger);
 });
 
 // Register Core services as singletons
@@ -180,17 +181,13 @@ if (!app.Environment.IsDevelopment())
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
     app.UseHsts();
 }
-else
-{
-    // Enable Swagger in Development
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
 
-app.UseHttpsRedirection();
+// Enable Swagger in all environments
+app.UseSwagger();
+app.UseSwaggerUI();
 
 // Enable CORS
-app.UseCors("AllowViteDev");
+app.UseCors("AllowClients");
 
 // Static Files - Defaults to wwwroot
 app.UseStaticFiles();

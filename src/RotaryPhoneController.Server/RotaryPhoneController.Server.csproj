@@ -1,9 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <!-- Both TFMs on Windows (for cross-compile to Linux); single net10.0 on Linux -->
+    <TargetFrameworks Condition="'$(OS)' == 'Windows_NT'">net10.0;net10.0-windows10.0.19041.0</TargetFrameworks>
+    <TargetFrameworks Condition="'$(OS)' != 'Windows_NT'">net10.0</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- Define WINDOWS constant for Windows TFM -->
+  <PropertyGroup Condition="$(TargetFramework.Contains('windows'))">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,17 +20,15 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.0" />
   </ItemGroup>
 
-  <!-- Platform-specific Core project reference -->
-  <!-- On Windows, use the Windows TFM to get Windows Bluetooth APIs -->
-  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+  <!-- Platform-specific Core project reference, keyed off TFM not host OS -->
+  <ItemGroup Condition="$(TargetFramework.Contains('windows'))">
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
-                      SetTargetFramework="TargetFramework=net9.0-windows10.0.19041.0" />
+                      SetTargetFramework="TargetFramework=net10.0-windows10.0.19041.0" />
   </ItemGroup>
 
-  <!-- On Linux/macOS, use the standard TFM -->
-  <ItemGroup Condition="'$(OS)' != 'Windows_NT'">
+  <ItemGroup Condition="!$(TargetFramework.Contains('windows'))">
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
-                      SetTargetFramework="TargetFramework=net9.0" />
+                      SetTargetFramework="TargetFramework=net10.0" />
   </ItemGroup>
 
 </Project>

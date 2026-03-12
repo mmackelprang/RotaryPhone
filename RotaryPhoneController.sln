@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.Core"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.Server", "src\RotaryPhoneController.Server\RotaryPhoneController.Server.csproj", "{3E9D8F29-3B5C-4643-92CC-54326B3A7850}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.Tests", "src\RotaryPhoneController.Tests\RotaryPhoneController.Tests.csproj", "{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -43,6 +45,18 @@ Global
 		{3E9D8F29-3B5C-4643-92CC-54326B3A7850}.Release|x64.Build.0 = Release|Any CPU
 		{3E9D8F29-3B5C-4643-92CC-54326B3A7850}.Release|x86.ActiveCfg = Release|Any CPU
 		{3E9D8F29-3B5C-4643-92CC-54326B3A7850}.Release|x86.Build.0 = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|x64.Build.0 = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Debug|x86.Build.0 = Debug|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|x64.ActiveCfg = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|x64.Build.0 = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|x86.ActiveCfg = Release|Any CPU
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -50,5 +64,6 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{7EBC8181-76EA-4B92-8A80-C50BF28F935A} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{3E9D8F29-3B5C-4643-92CC-54326B3A7850} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{F8C324EB-E8BF-45F1-ACFB-5E72CA20E48B} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal
