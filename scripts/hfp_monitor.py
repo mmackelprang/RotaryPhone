@@ -39,6 +39,7 @@ import traceback
 from gi.repository import GLib
 
 HFP_HF_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
+HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/org/rotaryphone/hfp_profile"
 
 # HFP HF features bitmask (minimal: nothing fancy)
@@ -414,9 +415,11 @@ class HfpProfile(dbus.service.Object):
             emit({"event": "error", "message": f"Unknown command: {command}"})
 
 
-def stdin_reader(profile, main_loop):
+def stdin_reader(profile):
     """Read JSON commands from stdin in a separate thread."""
     try:
+        if sys.stdin.closed or not sys.stdin.readable():
+            return
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -426,10 +429,9 @@ def stdin_reader(profile, main_loop):
                 GLib.idle_add(lambda c=cmd: profile.handle_stdin_command(c) or False)
             except json.JSONDecodeError:
                 log(f"Invalid JSON on stdin: {line}")
-    except (IOError, BrokenPipeError):
+    except (IOError, BrokenPipeError, ValueError):
         pass
-    finally:
-        GLib.idle_add(main_loop.quit)
+    log("stdin reader exited")
 
 
 def main():
@@ -467,10 +469,76 @@ def main():
     emit({"event": "ready"})
     log("HFP monitor ready, waiting for connections...")
 
+    # Try to connect HFP on already-connected devices
+    try:
+        obj_manager = dbus.Interface(
+            bus.get_object("org.bluez", "/"),
+            "org.freedesktop.DBus.ObjectManager"
+        )
+        objects = obj_manager.GetManagedObjects()
+        for path, interfaces in objects.items():
+            if "org.bluez.Device1" not in interfaces:
+                continue
+            dev_props = interfaces["org.bluez.Device1"]
+            if not dev_props.get("Connected", False):
+                continue
+            uuids = dev_props.get("UUIDs", [])
+            # Check if device supports HFP-AG (0000111f)
+            if any("111f" in str(u).lower() for u in uuids):
+                name = str(dev_props.get("Alias", dev_props.get("Address", path)))
+                log(f"Found connected HFP-AG device: {name} at {path}")
+                try:
+                    dev = dbus.Interface(
+                        bus.get_object("org.bluez", path),
+                        "org.bluez.Device1"
+                    )
+                    dev.ConnectProfile(HFP_AG_UUID)
+                    log(f"Triggered HFP connection to {name}")
+                except dbus.exceptions.DBusException as e:
+                    log(f"Failed to connect HFP profile to {name}: {e}")
+    except Exception as e:
+        log(f"Error scanning for connected devices: {e}")
+
+    # Watch for device connection changes to auto-connect HFP
+    def on_properties_changed(interface, changed, invalidated, path=None):
+        if interface != "org.bluez.Device1":
+            return
+        if "Connected" not in changed:
+            return
+        connected = bool(changed["Connected"])
+        if not connected:
+            return
+        # Device just connected — try to connect HFP after a short delay
+        def try_connect_hfp():
+            try:
+                dev_obj = bus.get_object("org.bluez", path)
+                dev_props = dbus.Interface(dev_obj, "org.freedesktop.DBus.Properties")
+                uuids = dev_props.Get("org.bluez.Device1", "UUIDs")
+                if any("111f" in str(u).lower() for u in uuids):
+                    name = str(dev_props.Get("org.bluez.Device1", "Alias"))
+                    log(f"Device connected with HFP-AG: {name}, triggering HFP connection...")
+                    dev = dbus.Interface(dev_obj, "org.bluez.Device1")
+                    dev.ConnectProfile(HFP_AG_UUID)
+                    log(f"HFP connection triggered for {name}")
+            except Exception as e:
+                log(f"Auto-connect HFP failed: {e}")
+            return False  # Don't repeat
+
+        # Delay to let the device finish connecting other profiles
+        GLib.timeout_add(2000, try_connect_hfp)
+
+    bus.add_signal_receiver(
+        on_properties_changed,
+        signal_name="PropertiesChanged",
+        dbus_interface="org.freedesktop.DBus.Properties",
+        bus_name="org.bluez",
+        path_keyword="path"
+    )
+
     # Start stdin reader thread
     main_loop = GLib.MainLoop()
 
-    stdin_thread = threading.Thread(target=stdin_reader, args=(profile, main_loop), daemon=True)
+    stdin_thread = threading.Thread(target=stdin_reader, args=(profile,), daemon=True)
     stdin_thread.start()
 
     # Handle signals for clean shutdown
