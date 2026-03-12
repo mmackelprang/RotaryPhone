@@ -45,6 +45,11 @@ public class CallManager
         }
     }
 
+    /// <summary>
+    /// Phone number of the current incoming call (set during Ringing state, cleared on Idle).
+    /// </summary>
+    public string? IncomingPhoneNumber { get; private set; }
+
     public CallManager(
         ISipAdapter sipAdapter, 
         IBluetoothHfpAdapter bluetoothAdapter,
@@ -136,13 +141,14 @@ public class CallManager
     public void SimulateIncomingCall()
     {
         _logger.LogInformation("Simulating incoming call");
-        
+
         if (CurrentState != CallState.Idle)
         {
             _logger.LogWarning("Cannot simulate incoming call - not in Idle state. Current state: {State}", CurrentState);
             return;
         }
 
+        IncomingPhoneNumber = "Unknown";
         CurrentState = CallState.Ringing;
         
         // Send INVITE to HT801 to trigger ring
@@ -164,13 +170,14 @@ public class CallManager
     private void HandleBluetoothIncomingCall(string phoneNumber)
     {
         _logger.LogInformation("Bluetooth incoming call from: {PhoneNumber}", phoneNumber);
-        
+
         if (CurrentState != CallState.Idle)
         {
             _logger.LogWarning("Cannot handle incoming call - not in Idle state. Current state: {State}", CurrentState);
             return;
         }
 
+        IncomingPhoneNumber = phoneNumber;
         CurrentState = CallState.Ringing;
         
         // Send INVITE to HT801 to trigger ring
@@ -340,6 +347,7 @@ public class CallManager
 
             CurrentState = CallState.Idle;
             DialedNumber = string.Empty;
+            IncomingPhoneNumber = null;
             _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
         }
         finally

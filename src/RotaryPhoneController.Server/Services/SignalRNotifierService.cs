@@ -57,6 +57,13 @@ public class SignalRNotifierService : IHostedService
     {
         _logger.LogInformation("Broadcasting state change for {PhoneId}: {State}", phoneId, manager.CurrentState);
         _hubContext.Clients.All.SendAsync("CallStateChanged", phoneId, manager.CurrentState.ToString());
+
+        // Also broadcast IncomingCall with the phone number when ringing
+        if (manager.CurrentState == CallState.Ringing && manager.IncomingPhoneNumber != null)
+        {
+            _logger.LogInformation("Broadcasting IncomingCall for {PhoneId}: {Number}", phoneId, manager.IncomingPhoneNumber);
+            _hubContext.Clients.All.SendAsync("IncomingCall", phoneId, manager.IncomingPhoneNumber);
+        }
     }
 
     private async Task MonitorBluetoothConnectionAsync(CancellationToken cancellationToken)

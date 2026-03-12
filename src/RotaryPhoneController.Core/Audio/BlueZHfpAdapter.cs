@@ -1,5 +1,6 @@
 #if !WINDOWS
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Configuration;
 
@@ -9,7 +10,8 @@ namespace RotaryPhoneController.Core.Audio;
 /// Bluetooth HFP adapter for Linux using BlueZ.
 /// RotaryPhone is BT-passive — Radio.API owns the BlueZ agent and adapter configuration.
 /// This adapter monitors D-Bus for device connections on already-paired devices
-/// and manages HFP AT command communication.
+/// and launches a Python HFP Profile1 agent (hfp_monitor.py) to detect call state
+/// via RFCOMM AT commands.
 /// </summary>
 public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
 {
@@ -18,20 +20,24 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   private readonly BluetoothMgmtMonitor? _mgmtMonitor;
   private readonly object _stateLock = new();
   private volatile bool _isConnected;
-#pragma warning disable CS0414 // Assigned but read only when external call-end detection is wired up
   private volatile bool _callActive;
-#pragma warning restore CS0414
   private string? _connectedDeviceAddress;
   private AudioRoute _currentRoute = AudioRoute.RotaryPhone;
   private bool _disposed;
   private CancellationTokenSource? _monitorCts;
   private BluetoothDisconnectReason? _lastDisconnectReason;
 
-#pragma warning disable CS0067 // Events are part of interface but not yet triggered in this implementation
+  // HFP monitor subprocess
+  private Process? _hfpMonitor;
+  private readonly object _hfpLock = new();
+  private bool _hfpMonitorReady;
+  private int _hfpRestartCount;
+  private const int MaxHfpRestarts = 10;
+  private const int HfpRestartDelayMs = 5000;
+
   public event Action<string>? OnIncomingCall;
   public event Action? OnCallAnsweredOnCellPhone;
   public event Action? OnCallEnded;
-#pragma warning restore CS0067
   public event Action<AudioRoute>? OnAudioRouteChanged;
 
   public bool IsConnected => _isConnected;
@@ -56,8 +62,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   }
 
   /// <summary>
-  /// Initialize: check for already-connected devices, then start monitoring
-  /// D-Bus for runtime connection changes.
+  /// Initialize: check for already-connected devices, start D-Bus monitoring,
+  /// and launch the HFP monitor Python script.
   /// Radio.API owns the adapter — we don't configure it here.
   /// </summary>
   public async Task InitializeAsync()
@@ -76,7 +82,10 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
       // Start periodic poll as safety net (D-Bus signals can be missed)
       _ = Task.Run(() => PeriodicConnectionPollAsync(_monitorCts.Token));
 
-      _logger.LogInformation("BlueZ HFP adapter initialized — monitoring for device connections");
+      // Launch HFP monitor Python script
+      _ = Task.Run(() => RunHfpMonitorAsync(_monitorCts.Token));
+
+      _logger.LogInformation("BlueZ HFP adapter initialized — monitoring for device connections and HFP call state");
     }
     catch (Exception ex)
     {
@@ -84,6 +93,282 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
       throw;
     }
   }
+
+  #region HFP Monitor Subprocess
+
+  /// <summary>
+  /// Resolves the path to hfp_monitor.py relative to the application binary.
+  /// </summary>
+  private static string GetHfpMonitorScriptPath()
+  {
+    var baseDir = AppContext.BaseDirectory;
+
+    // Check scripts/ subdirectory first (deployed layout)
+    var scriptPath = Path.Combine(baseDir, "scripts", "hfp_monitor.py");
+    if (File.Exists(scriptPath))
+      return scriptPath;
+
+    // Check sibling scripts/ directory (development layout)
+    var devPath = Path.Combine(baseDir, "..", "..", "..", "..", "..", "scripts", "hfp_monitor.py");
+    var resolved = Path.GetFullPath(devPath);
+    if (File.Exists(resolved))
+      return resolved;
+
+    return scriptPath; // Return the expected path even if not found (will fail with clear error)
+  }
+
+  /// <summary>
+  /// Launches and manages the hfp_monitor.py subprocess with auto-restart.
+  /// </summary>
+  private async Task RunHfpMonitorAsync(CancellationToken ct)
+  {
+    var scriptPath = GetHfpMonitorScriptPath();
+
+    while (!ct.IsCancellationRequested && _hfpRestartCount < MaxHfpRestarts)
+    {
+      try
+      {
+        _logger.LogInformation("Starting HFP monitor script: {ScriptPath} (attempt {Attempt})",
+          scriptPath, _hfpRestartCount + 1);
+
+        if (!File.Exists(scriptPath))
+        {
+          _logger.LogError("HFP monitor script not found at {ScriptPath}. HFP call detection disabled.", scriptPath);
+          return;
+        }
+
+        var process = Process.Start(new ProcessStartInfo
+        {
+          FileName = "python3",
+          Arguments = scriptPath,
+          RedirectStandardOutput = true,
+          RedirectStandardInput = true,
+          RedirectStandardError = true,
+          UseShellExecute = false,
+          CreateNoWindow = true
+        });
+
+        if (process == null)
+        {
+          _logger.LogError("Failed to start python3 process for HFP monitor");
+          await Task.Delay(HfpRestartDelayMs, ct);
+          _hfpRestartCount++;
+          continue;
+        }
+
+        lock (_hfpLock)
+        {
+          _hfpMonitor = process;
+          _hfpMonitorReady = false;
+        }
+
+        _logger.LogInformation("HFP monitor started (pid={Pid})", process.Id);
+
+        // Read stderr in background (for debugging via journalctl)
+        _ = Task.Run(() => ReadHfpStderrAsync(process, ct), ct);
+
+        // Read stdout events
+        await ReadHfpEventsAsync(process, ct);
+
+        // Process exited
+        lock (_hfpLock)
+        {
+          _hfpMonitor = null;
+          _hfpMonitorReady = false;
+        }
+
+        if (!process.HasExited)
+        {
+          try { process.Kill(); } catch { }
+        }
+
+        var exitCode = process.ExitCode;
+        process.Dispose();
+
+        if (ct.IsCancellationRequested) break;
+
+        _hfpRestartCount++;
+        _logger.LogWarning("HFP monitor exited with code {ExitCode}. Restarting in {Delay}ms (attempt {Attempt}/{Max})",
+          exitCode, HfpRestartDelayMs, _hfpRestartCount, MaxHfpRestarts);
+
+        await Task.Delay(HfpRestartDelayMs, ct);
+      }
+      catch (OperationCanceledException)
+      {
+        break;
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex, "Error in HFP monitor management loop");
+        _hfpRestartCount++;
+        if (!ct.IsCancellationRequested)
+          await Task.Delay(HfpRestartDelayMs, ct);
+      }
+    }
+
+    if (_hfpRestartCount >= MaxHfpRestarts)
+    {
+      _logger.LogError("HFP monitor exceeded max restart attempts ({Max}). HFP call detection disabled.", MaxHfpRestarts);
+    }
+  }
+
+  /// <summary>
+  /// Read JSON events from the HFP monitor's stdout.
+  /// </summary>
+  private async Task ReadHfpEventsAsync(Process process, CancellationToken ct)
+  {
+    var reader = process.StandardOutput;
+
+    while (!ct.IsCancellationRequested && !process.HasExited)
+    {
+      string? line;
+      try
+      {
+        line = await reader.ReadLineAsync(ct);
+      }
+      catch (OperationCanceledException)
+      {
+        break;
+      }
+
+      if (line == null) break; // EOF
+      if (string.IsNullOrWhiteSpace(line)) continue;
+
+      try
+      {
+        ProcessHfpEvent(line);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogWarning(ex, "Error processing HFP event: {Line}", line);
+      }
+    }
+  }
+
+  /// <summary>
+  /// Parse and handle a JSON event from the HFP monitor.
+  /// </summary>
+  private void ProcessHfpEvent(string jsonLine)
+  {
+    using var doc = JsonDocument.Parse(jsonLine);
+    var root = doc.RootElement;
+
+    if (!root.TryGetProperty("event", out var eventProp))
+      return;
+
+    var eventType = eventProp.GetString();
+    _logger.LogInformation("HFP event: {Event} — {Json}", eventType, jsonLine);
+
+    switch (eventType)
+    {
+      case "ready":
+        lock (_hfpLock) { _hfpMonitorReady = true; }
+        _hfpRestartCount = 0; // Reset on successful startup
+        _logger.LogInformation("HFP monitor is ready and waiting for RFCOMM connections");
+        break;
+
+      case "ring":
+        var number = root.TryGetProperty("number", out var numProp) ? numProp.GetString() : "Unknown";
+        _callActive = false; // Reset — call is ringing, not yet active
+        _logger.LogInformation("HFP: Incoming call from {Number}", number);
+        OnIncomingCall?.Invoke(number ?? "Unknown");
+        break;
+
+      case "call_active":
+        _callActive = true;
+        _logger.LogInformation("HFP: Call answered (on cell phone)");
+        OnCallAnsweredOnCellPhone?.Invoke();
+        break;
+
+      case "call_ended":
+        if (_callActive)
+        {
+          _callActive = false;
+          _logger.LogInformation("HFP: Call ended");
+          OnCallEnded?.Invoke();
+        }
+        else
+        {
+          // Call ended without being answered (e.g., caller hung up during ring)
+          _logger.LogInformation("HFP: Call ended (was not active — unanswered/rejected)");
+          OnCallEnded?.Invoke();
+        }
+        break;
+
+      case "connected":
+        var addr = root.TryGetProperty("address", out var addrProp) ? addrProp.GetString() : null;
+        _logger.LogInformation("HFP: RFCOMM connected to {Address}", addr);
+        break;
+
+      case "disconnected":
+        var dAddr = root.TryGetProperty("address", out var dAddrProp) ? dAddrProp.GetString() : null;
+        _callActive = false;
+        _logger.LogInformation("HFP: RFCOMM disconnected from {Address}", dAddr);
+        break;
+
+      case "error":
+        var msg = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() : "unknown";
+        _logger.LogWarning("HFP monitor error: {Message}", msg);
+        break;
+
+      default:
+        _logger.LogDebug("Unknown HFP event: {Event}", eventType);
+        break;
+    }
+  }
+
+  /// <summary>
+  /// Read stderr from the HFP monitor for logging.
+  /// </summary>
+  private async Task ReadHfpStderrAsync(Process process, CancellationToken ct)
+  {
+    try
+    {
+      var reader = process.StandardError;
+      while (!ct.IsCancellationRequested && !process.HasExited)
+      {
+        var line = await reader.ReadLineAsync(ct);
+        if (line == null) break;
+        _logger.LogDebug("HFP monitor stderr: {Line}", line);
+      }
+    }
+    catch (OperationCanceledException) { }
+    catch (Exception ex)
+    {
+      _logger.LogDebug(ex, "Error reading HFP monitor stderr");
+    }
+  }
+
+  /// <summary>
+  /// Send a JSON command to the HFP monitor via stdin.
+  /// </summary>
+  private bool SendHfpCommand(object command)
+  {
+    Process? process;
+    lock (_hfpLock)
+    {
+      process = _hfpMonitor;
+      if (process == null || !_hfpMonitorReady)
+        return false;
+    }
+
+    try
+    {
+      var json = JsonSerializer.Serialize(command);
+      process.StandardInput.WriteLine(json);
+      process.StandardInput.Flush();
+      return true;
+    }
+    catch (Exception ex)
+    {
+      _logger.LogWarning(ex, "Failed to send command to HFP monitor");
+      return false;
+    }
+  }
+
+  #endregion
+
+  #region Device Connection Monitoring
 
   /// <summary>
   /// One-shot poll for currently connected devices using bluetoothctl.
@@ -454,6 +739,10 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     }
   }
 
+  #endregion
+
+  #region IBluetoothHfpAdapter Implementation
+
   public async Task<bool> InitiateCallAsync(string phoneNumber)
   {
     try
@@ -466,14 +755,14 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
         return false;
       }
 
-      var success = await SendAtCommandAsync($"ATD{phoneNumber};");
+      var success = SendHfpCommand(new { command = "dial", number = phoneNumber });
       if (success)
       {
         _callActive = true;
-        _logger.LogInformation("Call initiation successful");
+        _logger.LogInformation("Call initiation command sent");
       }
       else
-        _logger.LogWarning("Call initiation failed");
+        _logger.LogWarning("Call initiation failed — HFP monitor not ready");
 
       return success;
     }
@@ -497,16 +786,16 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
         return false;
       }
 
-      var success = await SendAtCommandAsync("ATA");
+      var success = SendHfpCommand(new { command = "answer" });
       if (success)
       {
         _callActive = true;
-        _logger.LogInformation("Call answered successfully");
+        _logger.LogInformation("Call answer command sent");
         OnAudioRouteChanged?.Invoke(routeAudio);
       }
       else
       {
-        _logger.LogWarning("Failed to answer call");
+        _logger.LogWarning("Failed to answer call — HFP monitor not ready");
       }
 
       return success;
@@ -530,12 +819,16 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
         return false;
       }
 
-      var success = await SendAtCommandAsync("AT+CHUP");
+      var success = SendHfpCommand(new { command = "hangup" });
       if (success)
       {
         _callActive = false;
-        _logger.LogInformation("Call terminated successfully");
+        _logger.LogInformation("Call termination command sent");
       }
+
+      // Do NOT fire OnCallEnded here — that event is for external call-end
+      // notifications (remote hangup), not for calls we terminate ourselves.
+      // Firing it here creates a feedback loop with CallManager.HangUp().
 
       return success;
     }
@@ -565,28 +858,7 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     }
   }
 
-  private async Task<bool> SendAtCommandAsync(string command)
-  {
-    try
-    {
-      _logger.LogDebug("Sending AT command: {Command}", command);
-
-      // AT commands are sent via RFCOMM channel to the connected phone.
-      // For now, we log the command — RFCOMM socket implementation
-      // will be added when HFP call flow is tested end-to-end.
-      // The HT801 ATA handles the actual analog phone line; AT commands
-      // control the Bluetooth HFP link to the mobile phone.
-      await Task.Delay(100);
-
-      _logger.LogDebug("AT command completed: {Command}", command);
-      return true;
-    }
-    catch (Exception ex)
-    {
-      _logger.LogError(ex, "Error sending AT command: {Command}", command);
-      return false;
-    }
-  }
+  #endregion
 
   public void Dispose()
   {
@@ -595,6 +867,18 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     _logger.LogInformation("Disposing BlueZ HFP adapter");
     _monitorCts?.Cancel();
     _monitorCts?.Dispose();
+
+    // Kill HFP monitor process
+    lock (_hfpLock)
+    {
+      if (_hfpMonitor != null && !_hfpMonitor.HasExited)
+      {
+        try { _hfpMonitor.Kill(); } catch { }
+        _hfpMonitor.Dispose();
+        _hfpMonitor = null;
+      }
+    }
+
     _disposed = true;
   }
 }

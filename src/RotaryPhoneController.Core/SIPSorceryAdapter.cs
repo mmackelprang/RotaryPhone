@@ -90,6 +90,9 @@ public class SIPSorceryAdapter : ISipAdapter
                 case SIPMethodsEnum.BYE:
                     HandleBye(sipRequest);
                     break;
+                case SIPMethodsEnum.REGISTER:
+                    HandleRegister(sipRequest, localSIPEndPoint, remoteEndPoint);
+                    break;
                 default:
                     _logger.Debug("Unhandled SIP method: {Method}", sipRequest.Method);
                     break;
@@ -219,6 +222,33 @@ public class SIPSorceryAdapter : ISipAdapter
         _logger.Information("Processing BYE message - Call terminated by remote party");
         // Fire OnHookChange with false (on-hook) to simulate hanging up
         OnHookChange?.Invoke(false);
+    }
+
+    private void HandleRegister(SIPRequest sipRequest, SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint)
+    {
+        try
+        {
+            var contact = sipRequest.Header.Contact?.FirstOrDefault();
+            var expires = sipRequest.Header.Expires > 0 ? sipRequest.Header.Expires : 3600;
+
+            _logger.Information("Processing REGISTER from {Remote}, Contact={Contact}, Expires={Expires}",
+                remoteEndPoint, contact?.ContactURI, expires);
+
+            var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+            response.Header.Expires = expires;
+
+            if (contact != null)
+            {
+                response.Header.Contact = new List<SIPContactHeader> { contact };
+            }
+
+            _sipTransport?.SendResponseAsync(response);
+            _logger.Information("REGISTER accepted — HT801 at {Remote} registered for {Expires}s", remoteEndPoint, expires);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Error processing REGISTER");
+        }
     }
 
     private string? ExtractDialedNumber(string body)
