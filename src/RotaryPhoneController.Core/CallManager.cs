@@ -188,7 +188,19 @@ public class CallManager
         
         _logger.LogInformation("Incoming call - ringing rotary phone");
     }
-    
+
+    /// <summary>
+    /// Called by Radio.API (via SignalR) when it resolves a caller's name from PBAP contacts.
+    /// </summary>
+    public void SetResolvedCallerName(string phoneNumber, string displayName)
+    {
+        if (_currentCallHistory != null && _currentCallHistory.PhoneNumber == phoneNumber)
+        {
+            _currentCallHistory.CallerName = displayName;
+            _logger.LogInformation("Caller resolved: {PhoneNumber} → {DisplayName}", phoneNumber, displayName);
+        }
+    }
+
     private void HandleCallAnsweredOnCellPhone()
     {
         _logger.LogInformation("Call answered on cell phone device");
