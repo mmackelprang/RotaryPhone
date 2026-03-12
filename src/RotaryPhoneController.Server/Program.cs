@@ -112,13 +112,23 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
 // Register SignalR Notifier Service (Hosted Service)
 builder.Services.AddHostedService<SignalRNotifierService>();
 
+// Register BlueZ mgmt monitor (singleton + hosted service for disconnect reason detection)
+#if !WINDOWS
+builder.Services.AddSingleton<BluetoothMgmtMonitor>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BluetoothMgmtMonitor>());
+#endif
+
 // Register Bluetooth HFP adapter (platform-aware factory pattern)
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
     var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
-
+#if !WINDOWS
+    var mgmtMonitor = sp.GetService<BluetoothMgmtMonitor>();
+    return BluetoothAdapterFactory.Create(config, loggerFactory, mgmtMonitor);
+#else
     return BluetoothAdapterFactory.Create(config, loggerFactory);
+#endif
 });
 
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
@@ -129,6 +139,13 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
     {
         var logger = sp.GetRequiredService<ILogger<RtpAudioBridge>>();
         return new RtpAudioBridge(logger);
+    }
+#endif
+#if !WINDOWS
+    if (config.UseActualRtpAudioBridge)
+    {
+        var logger = sp.GetRequiredService<ILogger<PipeWireRtpAudioBridge>>();
+        return new PipeWireRtpAudioBridge(logger);
     }
 #endif
     var mockLogger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();

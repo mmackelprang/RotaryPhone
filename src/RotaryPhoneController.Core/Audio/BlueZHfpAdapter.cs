@@ -1,495 +1,463 @@
 #if !WINDOWS
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
-using Tmds.DBus.Protocol;
 using RotaryPhoneController.Core.Configuration;
 
 namespace RotaryPhoneController.Core.Audio;
 
 /// <summary>
-/// Actual Bluetooth HFP implementation using BlueZ D-Bus API on Linux
-/// Advertises as "Rotary Phone" and supports multiple device pairing
+/// Bluetooth HFP adapter for Linux using BlueZ.
+/// RotaryPhone is BT-passive — Radio.API owns the BlueZ agent and adapter configuration.
+/// This adapter monitors D-Bus for device connections on already-paired devices
+/// and manages HFP AT command communication.
 /// </summary>
 public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
 {
-    private readonly ILogger<BlueZHfpAdapter> _logger;
-    private readonly string _deviceName;
-    private bool _isConnected;
-    private string? _connectedDeviceAddress;
-    private AudioRoute _currentRoute = AudioRoute.RotaryPhone;
-    private bool _disposed;
-    private CancellationTokenSource? _monitorCts;
+  private readonly ILogger<BlueZHfpAdapter> _logger;
+  private readonly string _deviceName;
+  private readonly BluetoothMgmtMonitor? _mgmtMonitor;
+  private readonly object _stateLock = new();
+  private volatile bool _isConnected;
+  private string? _connectedDeviceAddress;
+  private AudioRoute _currentRoute = AudioRoute.RotaryPhone;
+  private bool _disposed;
+  private CancellationTokenSource? _monitorCts;
+  private BluetoothDisconnectReason? _lastDisconnectReason;
 
 #pragma warning disable CS0067 // Events are part of interface but not yet triggered in this implementation
-    public event Action<string>? OnIncomingCall;
-    public event Action? OnCallAnsweredOnCellPhone;
+  public event Action<string>? OnIncomingCall;
+  public event Action? OnCallAnsweredOnCellPhone;
 #pragma warning restore CS0067
 
-    public event Action? OnCallEnded;
-    public event Action<AudioRoute>? OnAudioRouteChanged;
+  public event Action? OnCallEnded;
+  public event Action<AudioRoute>? OnAudioRouteChanged;
 
-    public bool IsConnected => _isConnected;
-    public string? ConnectedDeviceAddress => _connectedDeviceAddress;
+  public bool IsConnected => _isConnected;
+  public string? ConnectedDeviceAddress => _connectedDeviceAddress;
 
-    public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, AppConfiguration config)
-        : this(logger, config.BluetoothDeviceName)
+  /// <summary>
+  /// Last disconnect reason from BlueZ mgmt socket.
+  /// </summary>
+  public BluetoothDisconnectReason? LastDisconnectReason => _lastDisconnectReason;
+
+  public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, AppConfiguration config, BluetoothMgmtMonitor? mgmtMonitor = null)
+    : this(logger, config.BluetoothDeviceName, mgmtMonitor)
+  {
+  }
+
+  public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, string deviceName = "Rotary Phone", BluetoothMgmtMonitor? mgmtMonitor = null)
+  {
+    _logger = logger;
+    _deviceName = deviceName;
+    _mgmtMonitor = mgmtMonitor;
+    _logger.LogInformation("BlueZHfpAdapter initializing with device name: {DeviceName}", _deviceName);
+  }
+
+  /// <summary>
+  /// Initialize: start monitoring D-Bus for device connections.
+  /// Radio.API owns the adapter — we don't configure it here.
+  /// </summary>
+  public async Task InitializeAsync()
+  {
+    try
     {
+      _logger.LogInformation("Initializing BlueZ HFP adapter (passive mode — Radio.API owns BT adapter)");
+
+      // Start monitoring for device connections via D-Bus property changes
+      _monitorCts = new CancellationTokenSource();
+      _ = Task.Run(() => MonitorDeviceConnectionsAsync(_monitorCts.Token));
+
+      _logger.LogInformation("BlueZ HFP adapter initialized — monitoring for device connections");
     }
-
-    public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, string deviceName = "Rotary Phone")
+    catch (Exception ex)
     {
-        _logger = logger;
-        _deviceName = deviceName;
-        _logger.LogInformation("BlueZHfpAdapter initializing with device name: {DeviceName}", _deviceName);
+      _logger.LogError(ex, "Failed to initialize BlueZ HFP adapter");
+      throw;
     }
+  }
 
-    /// <summary>
-    /// Initialize the BlueZ connection and set up HFP profile
-    /// </summary>
-    public async Task InitializeAsync()
+  /// <summary>
+  /// Monitors D-Bus for device connection changes using dbus-monitor.
+  /// Detects when a paired Bluetooth device connects or disconnects.
+  /// </summary>
+  private async Task MonitorDeviceConnectionsAsync(CancellationToken ct)
+  {
+    _logger.LogInformation("Starting D-Bus device connection monitor");
+
+    // Use dbus-monitor to watch for BlueZ device property changes
+    Process? dbusMonitor = null;
+    try
     {
+      dbusMonitor = Process.Start(new ProcessStartInfo
+      {
+        FileName = "dbus-monitor",
+        Arguments = "--system \"type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'\"",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+      });
+
+      if (dbusMonitor == null)
+      {
+        _logger.LogWarning("Failed to start dbus-monitor — falling back to polling");
+        await PollDeviceConnectionsAsync(ct);
+        return;
+      }
+
+      _logger.LogInformation("dbus-monitor started (pid={Pid})", dbusMonitor.Id);
+      var reader = dbusMonitor.StandardOutput;
+      var buffer = new List<string>();
+
+      while (!ct.IsCancellationRequested && !dbusMonitor.HasExited)
+      {
+        string? line;
         try
         {
-            _logger.LogInformation("Connecting to BlueZ via D-Bus...");
-            
-            // For now, we'll use bluetoothctl commands to configure the adapter
-            // In production, this would use proper D-Bus API calls
-            
-            _logger.LogInformation("Connected to BlueZ successfully");
-
-            // Set up Bluetooth adapter
-            await SetupBluetoothAdapterAsync();
-            
-            // Register HFP profile
-            await RegisterHfpProfileAsync();
-            
-            // Start monitoring for device connections and call events
-            _monitorCts = new CancellationTokenSource();
-            _ = Task.Run(() => MonitorBluetoothEventsAsync(_monitorCts.Token));
-            
-            _logger.LogInformation("BlueZ HFP adapter initialized successfully");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to initialize BlueZ HFP adapter");
-            throw;
-        }
-    }
-
-    private async Task SetupBluetoothAdapterAsync()
-    {
-        try
-        {
-            _logger.LogInformation("Setting up Bluetooth adapter...");
-            
-            // Get the Bluetooth adapter (typically hci0)
-            var adapterPath = "/org/bluez/hci0";
-            
-            // Set the device name to "Rotary Phone"
-            await SetAdapterPropertyAsync(adapterPath, "Alias", _deviceName);
-            
-            // Enable discoverability so phones can find us
-            await SetAdapterPropertyAsync(adapterPath, "Discoverable", true);
-            
-            // Set discoverable timeout to 0 (always discoverable)
-            await SetAdapterPropertyAsync(adapterPath, "DiscoverableTimeout", 0u);
-            
-            // Enable pairing
-            await SetAdapterPropertyAsync(adapterPath, "Pairable", true);
-            
-            // Set pairable timeout to 0 (always pairable)
-            await SetAdapterPropertyAsync(adapterPath, "PairableTimeout", 0u);
-            
-            // Power on the adapter
-            await SetAdapterPropertyAsync(adapterPath, "Powered", true);
-            
-            _logger.LogInformation("Bluetooth adapter configured: Name='{DeviceName}', Discoverable=true, Pairable=true", _deviceName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to setup Bluetooth adapter");
-            throw;
-        }
-    }
-
-    private async Task SetAdapterPropertyAsync(string adapterPath, string propertyName, object value)
-    {
-        try
-        {
-            _logger.LogDebug("Setting adapter property {Property} = {Value}", propertyName, value);
-            
-            // Use bluetoothctl commands as the implementation method
-            await SetPropertyViaBluetoothCtlAsync(propertyName, value);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to set adapter property {Property}", propertyName);
-            throw;
-        }
-    }
-
-    private async Task SetPropertyViaBluetoothCtlAsync(string propertyName, object value)
-    {
-        // Fallback: Use bluetoothctl command line tool
-        string? command = propertyName.ToLower() switch
-        {
-            "alias" => $"bluetoothctl system-alias '{value}'",
-            "discoverable" => $"bluetoothctl discoverable {(bool)value switch { true => "on", false => "off" }}",
-            "pairable" => $"bluetoothctl pairable {(bool)value switch { true => "on", false => "off" }}",
-            "powered" => $"bluetoothctl power {(bool)value switch { true => "on", false => "off" }}",
-            _ => null
-        };
-
-        if (command != null)
-        {
-            var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "/bin/bash",
-                Arguments = $"-c \"{command}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
-            });
-
-            if (process != null)
-            {
-                await process.WaitForExitAsync();
-                _logger.LogDebug("Executed bluetoothctl command: {Command}", command);
-            }
-        }
-    }
-
-    private async Task RegisterHfpProfileAsync()
-    {
-        try
-        {
-            _logger.LogInformation("Registering HFP (Hands-Free Profile)...");
-            
-            // In a full implementation, we would register the profile with BlueZ
-            // For now, we ensure the system has HFP support
-            
-            // Check if ofono or other HFP service is running
-            var ofonoRunning = await CheckServiceRunningAsync("ofono");
-            if (ofonoRunning)
-            {
-                _logger.LogInformation("oFono service detected - HFP support available");
-            }
-            else
-            {
-                _logger.LogWarning("oFono service not detected - some HFP features may be limited");
-            }
-            
-            _logger.LogInformation("HFP profile registration completed");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to register HFP profile");
-            throw;
-        }
-    }
-
-    private async Task<bool> CheckServiceRunningAsync(string serviceName)
-    {
-        try
-        {
-            var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "systemctl",
-                Arguments = $"is-active {serviceName}",
-                RedirectStandardOutput = true,
-                UseShellExecute = false
-            });
-
-            if (process != null)
-            {
-                await process.WaitForExitAsync();
-                return process.ExitCode == 0;
-            }
-        }
-        catch
-        {
-            // Service not available
-        }
-        return false;
-    }
-
-    private async Task MonitorBluetoothEventsAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            _logger.LogInformation("Starting Bluetooth event monitoring...");
-            
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                // Monitor for device connections
-                await CheckDeviceConnectionsAsync();
-                
-                // Monitor for call events
-                await CheckCallEventsAsync();
-                
-                // Poll every 500ms
-                await Task.Delay(500, cancellationToken);
-            }
+          line = await reader.ReadLineAsync(ct);
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("Bluetooth event monitoring stopped");
+          break;
         }
-        catch (Exception ex)
+
+        if (line == null) break;
+
+        // Accumulate signal lines
+        buffer.Add(line);
+
+        // Process when we see a blank line (signal boundary)
+        if (string.IsNullOrWhiteSpace(line) && buffer.Count > 0)
         {
-            _logger.LogError(ex, "Error in Bluetooth event monitoring");
+          ProcessDbusSignal(buffer);
+          buffer.Clear();
         }
+      }
+    }
+    catch (OperationCanceledException)
+    {
+      _logger.LogDebug("D-Bus monitor cancelled");
+    }
+    catch (Exception ex)
+    {
+      _logger.LogWarning(ex, "D-Bus monitor failed — falling back to polling");
+      if (!ct.IsCancellationRequested)
+        await PollDeviceConnectionsAsync(ct);
+    }
+    finally
+    {
+      if (dbusMonitor != null && !dbusMonitor.HasExited)
+      {
+        try { dbusMonitor.Kill(); } catch { /* already exited */ }
+        dbusMonitor.Dispose();
+      }
+    }
+  }
+
+  /// <summary>
+  /// Process a D-Bus signal to detect device Connected property changes.
+  /// </summary>
+  private void ProcessDbusSignal(List<string> signalLines)
+  {
+    var joined = string.Join(" ", signalLines);
+
+    // Look for org.bluez.Device1 property changes with Connected
+    if (!joined.Contains("org.bluez.Device1") || !joined.Contains("Connected"))
+      return;
+
+    _logger.LogDebug("D-Bus Device1 Connected property changed: {Signal}", joined.Length > 200 ? joined[..200] : joined);
+
+    // Extract the device path (e.g., /org/bluez/hci0/dev_D4_3A_2C_64_87_9E)
+    string? devicePath = null;
+    foreach (var line in signalLines)
+    {
+      if (line.Contains("path=/org/bluez/") && line.Contains("dev_"))
+      {
+        var pathStart = line.IndexOf("/org/bluez/");
+        if (pathStart >= 0)
+        {
+          var pathEnd = line.IndexOfAny(new[] { ' ', ',' }, pathStart);
+          devicePath = pathEnd > 0 ? line[pathStart..pathEnd] : line[pathStart..].TrimEnd(';', '"');
+        }
+        break;
+      }
     }
 
-    private async Task CheckDeviceConnectionsAsync()
-    {
-        try
-        {
-            // Check via bluetoothctl for connected devices
-            var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "bluetoothctl",
-                Arguments = "devices Connected",
-                RedirectStandardOutput = true,
-                UseShellExecute = false
-            });
+    // Determine connected state from the signal content
+    bool connected = joined.Contains("boolean true") && joined.Contains("Connected");
+    bool disconnected = joined.Contains("boolean false") && joined.Contains("Connected");
 
-            if (process != null)
+    if (connected)
+    {
+      var mac = ExtractMacFromDevicePath(devicePath);
+      lock (_stateLock)
+      {
+        _connectedDeviceAddress = mac;
+        _lastDisconnectReason = null;
+        _isConnected = true;
+      }
+      _logger.LogInformation("Bluetooth device connected: {Address} (path={Path})", mac, devicePath);
+    }
+    else if (disconnected)
+    {
+      string? mac;
+      lock (_stateLock)
+      {
+        mac = _connectedDeviceAddress ?? ExtractMacFromDevicePath(devicePath);
+      }
+      _logger.LogInformation("Bluetooth device disconnected: {Address}", mac);
+
+      // Get disconnect reason from mgmt monitor (may block up to 300ms)
+      var reason = (_mgmtMonitor != null && mac != null)
+        ? _mgmtMonitor.ConsumeDisconnectReason(mac)
+        : BluetoothDisconnectReason.Unknown;
+
+      lock (_stateLock)
+      {
+        _lastDisconnectReason = reason;
+        _isConnected = false;
+        _connectedDeviceAddress = null;
+      }
+      _logger.LogInformation("Disconnect reason for {Address}: {Reason}", mac, reason);
+    }
+  }
+
+  /// <summary>
+  /// Extracts MAC address from BlueZ device path.
+  /// e.g., /org/bluez/hci0/dev_D4_3A_2C_64_87_9E → D4:3A:2C:64:87:9E
+  /// </summary>
+  private static string? ExtractMacFromDevicePath(string? devicePath)
+  {
+    if (devicePath == null) return null;
+
+    var devIdx = devicePath.IndexOf("dev_");
+    if (devIdx < 0) return null;
+
+    var macPart = devicePath[(devIdx + 4)..];
+    // Remove any trailing path segments
+    var slashIdx = macPart.IndexOf('/');
+    if (slashIdx > 0) macPart = macPart[..slashIdx];
+
+    return macPart.Replace('_', ':');
+  }
+
+  /// <summary>
+  /// Fallback: poll for connected devices using bluetoothctl.
+  /// </summary>
+  private async Task PollDeviceConnectionsAsync(CancellationToken ct)
+  {
+    _logger.LogInformation("Using bluetoothctl polling fallback for device monitoring");
+
+    while (!ct.IsCancellationRequested)
+    {
+      try
+      {
+        var process = Process.Start(new ProcessStartInfo
+        {
+          FileName = "bluetoothctl",
+          Arguments = "devices Connected",
+          RedirectStandardOutput = true,
+          UseShellExecute = false,
+          CreateNoWindow = true
+        });
+
+        if (process != null)
+        {
+          await process.WaitForExitAsync(ct);
+          var output = await process.StandardOutput.ReadToEndAsync(ct);
+
+          if (!string.IsNullOrWhiteSpace(output))
+          {
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length > 0)
             {
-                await process.WaitForExitAsync();
-                var output = await process.StandardOutput.ReadToEndAsync();
-                
-                if (!string.IsNullOrWhiteSpace(output))
+              var parts = lines[0].Split(' ');
+              if (parts.Length >= 2)
+              {
+                var mac = parts[1];
+                if (!_isConnected || _connectedDeviceAddress != mac)
                 {
-                    // Parse device MAC addresses
-                    var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                    if (lines.Length > 0)
-                    {
-                        // Get first connected device
-                        var firstLine = lines[0];
-                        var parts = firstLine.Split(' ');
-                        if (parts.Length >= 2)
-                        {
-                            var mac = parts[1];
-                            if (!_isConnected || _connectedDeviceAddress != mac)
-                            {
-                                _isConnected = true;
-                                _connectedDeviceAddress = mac;
-                                _logger.LogInformation("Bluetooth device connected: {Address}", mac);
-                            }
-                        }
-                    }
+                  lock (_stateLock)
+                  {
+                    _connectedDeviceAddress = mac;
+                    _lastDisconnectReason = null;
+                    _isConnected = true;
+                  }
+                  _logger.LogInformation("Bluetooth device connected: {Address}", mac);
                 }
-                else if (_isConnected)
-                {
-                    _isConnected = false;
-                    _connectedDeviceAddress = null;
-                    _logger.LogInformation("Bluetooth device disconnected");
-                }
+              }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error checking device connections");
-        }
-    }
+          }
+          else if (_isConnected)
+          {
+            string? previousAddress;
+            lock (_stateLock) { previousAddress = _connectedDeviceAddress; }
 
-    private async Task CheckCallEventsAsync()
+            var reason = (_mgmtMonitor != null && previousAddress != null)
+              ? _mgmtMonitor.ConsumeDisconnectReason(previousAddress)
+              : BluetoothDisconnectReason.Unknown;
+
+            lock (_stateLock)
+            {
+              _lastDisconnectReason = reason;
+              _isConnected = false;
+              _connectedDeviceAddress = null;
+            }
+            _logger.LogInformation("Bluetooth device disconnected, reason={Reason}", reason);
+          }
+        }
+      }
+      catch (OperationCanceledException)
+      {
+        break;
+      }
+      catch (Exception ex)
+      {
+        _logger.LogDebug(ex, "Error polling device connections");
+      }
+
+      await Task.Delay(2000, ct);
+    }
+  }
+
+  public async Task<bool> InitiateCallAsync(string phoneNumber)
+  {
+    try
     {
-        // In production, this would monitor D-Bus signals for call events
-        // This would integrate with oFono or ModemManager for call detection
-        await Task.CompletedTask;
-    }
+      _logger.LogInformation("Initiating call to {PhoneNumber} via Bluetooth HFP", phoneNumber);
 
-    public async Task<bool> InitiateCallAsync(string phoneNumber)
+      if (!_isConnected)
+      {
+        _logger.LogWarning("Cannot initiate call - no Bluetooth device connected");
+        return false;
+      }
+
+      var success = await SendAtCommandAsync($"ATD{phoneNumber};");
+      if (success)
+        _logger.LogInformation("Call initiation successful");
+      else
+        _logger.LogWarning("Call initiation failed");
+
+      return success;
+    }
+    catch (Exception ex)
     {
-        try
-        {
-            _logger.LogInformation("Initiating call to {PhoneNumber} via Bluetooth HFP", phoneNumber);
-            
-            if (!_isConnected)
-            {
-                _logger.LogWarning("Cannot initiate call - no Bluetooth device connected");
-                return false;
-            }
-
-            // Use AT commands to initiate call via HFP
-            // ATD<number>; - Dial command
-            var success = await SendAtCommandAsync($"ATD{phoneNumber};");
-            
-            if (success)
-            {
-                _logger.LogInformation("Call initiation successful");
-            }
-            else
-            {
-                _logger.LogWarning("Call initiation failed");
-            }
-            
-            return success;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error initiating call");
-            return false;
-        }
+      _logger.LogError(ex, "Error initiating call");
+      return false;
     }
+  }
 
-    public async Task<bool> AnswerCallAsync(AudioRoute routeAudio)
+  public async Task<bool> AnswerCallAsync(AudioRoute routeAudio)
+  {
+    try
     {
-        try
-        {
-            _logger.LogInformation("Answering call with audio route: {Route}", routeAudio);
-            _currentRoute = routeAudio;
-            
-            if (!_isConnected)
-            {
-                _logger.LogWarning("Cannot answer call - no Bluetooth device connected");
-                return false;
-            }
+      _logger.LogInformation("Answering call with audio route: {Route}", routeAudio);
+      _currentRoute = routeAudio;
 
-            // Use AT command to answer call
-            // ATA - Answer command
-            var success = await SendAtCommandAsync("ATA");
-            
-            if (success)
-            {
-                _logger.LogInformation("Call answered successfully");
-                
-                // Configure audio routing
-                await ConfigureAudioRoutingAsync(routeAudio);
-                
-                OnAudioRouteChanged?.Invoke(routeAudio);
-            }
-            else
-            {
-                _logger.LogWarning("Failed to answer call");
-            }
-            
-            return success;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error answering call");
-            return false;
-        }
+      if (!_isConnected)
+      {
+        _logger.LogWarning("Cannot answer call - no Bluetooth device connected");
+        return false;
+      }
+
+      var success = await SendAtCommandAsync("ATA");
+      if (success)
+      {
+        _logger.LogInformation("Call answered successfully");
+        OnAudioRouteChanged?.Invoke(routeAudio);
+      }
+      else
+      {
+        _logger.LogWarning("Failed to answer call");
+      }
+
+      return success;
     }
-
-    public async Task<bool> TerminateCallAsync()
+    catch (Exception ex)
     {
-        try
-        {
-            _logger.LogInformation("Terminating call via Bluetooth HFP");
-            
-            if (!_isConnected)
-            {
-                _logger.LogWarning("Cannot terminate call - no Bluetooth device connected");
-                return false;
-            }
-
-            // Use AT command to hang up
-            // AT+CHUP - Hang up command
-            var success = await SendAtCommandAsync("AT+CHUP");
-            
-            if (success)
-            {
-                _logger.LogInformation("Call terminated successfully");
-                OnCallEnded?.Invoke();
-            }
-            else
-            {
-                _logger.LogWarning("Failed to terminate call");
-            }
-            
-            return success;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error terminating call");
-            return false;
-        }
+      _logger.LogError(ex, "Error answering call");
+      return false;
     }
+  }
 
-    public async Task<bool> SetAudioRouteAsync(AudioRoute route)
+  public async Task<bool> TerminateCallAsync()
+  {
+    try
     {
-        try
-        {
-            _logger.LogInformation("Changing audio route from {CurrentRoute} to {NewRoute}", 
-                _currentRoute, route);
-            
-            _currentRoute = route;
-            
-            await ConfigureAudioRoutingAsync(route);
-            
-            OnAudioRouteChanged?.Invoke(route);
-            
-            _logger.LogInformation("Audio route changed successfully");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error changing audio route");
-            return false;
-        }
-    }
+      _logger.LogInformation("Terminating call via Bluetooth HFP");
 
-    private async Task ConfigureAudioRoutingAsync(AudioRoute route)
+      if (!_isConnected)
+      {
+        _logger.LogWarning("Cannot terminate call - no Bluetooth device connected");
+        return false;
+      }
+
+      var success = await SendAtCommandAsync("AT+CHUP");
+      if (success)
+      {
+        _logger.LogInformation("Call terminated successfully");
+        OnCallEnded?.Invoke();
+      }
+
+      return success;
+    }
+    catch (Exception ex)
     {
-        try
-        {
-            if (route == AudioRoute.RotaryPhone)
-            {
-                _logger.LogInformation("Configuring audio routing through rotary phone");
-                // Audio will be routed through RTP bridge to rotary phone
-                // The Bluetooth audio will be captured and sent via RTP
-            }
-            else
-            {
-                _logger.LogInformation("Configuring audio routing through cell phone");
-                // Audio stays on the Bluetooth device
-                // RTP audio is captured and sent to Bluetooth
-            }
-            
-            await Task.CompletedTask;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error configuring audio routing");
-        }
+      _logger.LogError(ex, "Error terminating call");
+      return false;
     }
+  }
 
-    private async Task<bool> SendAtCommandAsync(string command)
+  public async Task<bool> SetAudioRouteAsync(AudioRoute route)
+  {
+    try
     {
-        try
-        {
-            _logger.LogDebug("Sending AT command: {Command}", command);
-            
-            // In production, this would send AT commands via RFCOMM channel
-            // For now, we'll use dbus-send or similar tool if available
-            
-            // Simulate command success for testing
-            await Task.Delay(100);
-            
-            _logger.LogDebug("AT command completed");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error sending AT command: {Command}", command);
-            return false;
-        }
-    }
+      _logger.LogInformation("Changing audio route from {CurrentRoute} to {NewRoute}",
+        _currentRoute, route);
 
-    public void Dispose()
+      _currentRoute = route;
+      OnAudioRouteChanged?.Invoke(route);
+
+      return true;
+    }
+    catch (Exception ex)
     {
-        if (_disposed)
-            return;
-
-        _logger.LogInformation("Disposing BlueZ HFP adapter");
-        
-        _monitorCts?.Cancel();
-        _monitorCts?.Dispose();
-        
-        _disposed = true;
+      _logger.LogError(ex, "Error changing audio route");
+      return false;
     }
+  }
+
+  private async Task<bool> SendAtCommandAsync(string command)
+  {
+    try
+    {
+      _logger.LogDebug("Sending AT command: {Command}", command);
+
+      // AT commands are sent via RFCOMM channel to the connected phone.
+      // For now, we log the command — RFCOMM socket implementation
+      // will be added when HFP call flow is tested end-to-end.
+      // The HT801 ATA handles the actual analog phone line; AT commands
+      // control the Bluetooth HFP link to the mobile phone.
+      await Task.Delay(100);
+
+      _logger.LogDebug("AT command completed: {Command}", command);
+      return true;
+    }
+    catch (Exception ex)
+    {
+      _logger.LogError(ex, "Error sending AT command: {Command}", command);
+      return false;
+    }
+  }
+
+  public void Dispose()
+  {
+    if (_disposed) return;
+
+    _logger.LogInformation("Disposing BlueZ HFP adapter");
+    _monitorCts?.Cancel();
+    _monitorCts?.Dispose();
+    _disposed = true;
+  }
 }
 #endif
