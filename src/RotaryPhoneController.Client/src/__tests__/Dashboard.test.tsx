@@ -34,6 +34,19 @@ describe('Dashboard Component', () => {
     expect(screen.getByText(/Incoming Call: 555-1234/)).toBeInTheDocument()
   })
 
+  it('renders resolved caller name with incoming number', () => {
+    useStore.setState({
+      callState: CallState.Ringing,
+      incomingNumber: '555-1234',
+      callerName: 'John Smith'
+    })
+
+    render(<Dashboard />)
+
+    expect(screen.getByText(/John Smith/)).toBeInTheDocument()
+    expect(screen.getByText(/555-1234/)).toBeInTheDocument()
+  })
+
   it('calls simulateLiftHandset API on button click', async () => {
     useStore.setState({ callState: CallState.Idle })
     render(<Dashboard />)
