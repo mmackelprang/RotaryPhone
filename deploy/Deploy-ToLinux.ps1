@@ -80,19 +80,25 @@ ssh $SshTarget "sudo mkdir -p ${TargetPath}/{data,logs} && sudo chown -R ${Targe
 # --- Step 3: Sync files ---
 Write-Host "[3/4] Syncing files..." -ForegroundColor Yellow
 
-# Convert Windows path to rsync-compatible path
-$rsyncSource = ($PublishDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower() + "/"
-rsync -az --delete `
-  --exclude 'appsettings.Production.json' `
-  --exclude 'data/' `
-  --exclude 'logs/' `
-  -e ssh `
-  $rsyncSource `
-  "${SshTarget}:${TargetPath}/"
+$rsyncAvailable = Get-Command rsync -ErrorAction SilentlyContinue
+if ($rsyncAvailable) {
+  # Convert Windows path to rsync-compatible path
+  $rsyncSource = ($PublishDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower() + "/"
+  rsync -az --delete `
+    --exclude 'appsettings.Production.json' `
+    --exclude 'data/' `
+    --exclude 'logs/' `
+    -e ssh `
+    $rsyncSource `
+    "${SshTarget}:${TargetPath}/"
 
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "  rsync failed, falling back to scp..." -ForegroundColor Yellow
-  scp -r "${PublishDir}/*" "${SshTarget}:${TargetPath}/"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "  rsync failed, falling back to scp..." -ForegroundColor Yellow
+    scp -r "${PublishDir}\*" "${SshTarget}:${TargetPath}/"
+  }
+} else {
+  Write-Host "  rsync not found, using scp..." -ForegroundColor Yellow
+  scp -r "${PublishDir}\*" "${SshTarget}:${TargetPath}/"
 }
 
 # Copy appsettings.Production.json only if it doesn't exist on target
