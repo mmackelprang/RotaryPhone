@@ -68,7 +68,7 @@ Configuration is stored in `appsettings.json`:
       {
         "Id": "default",
         "Name": "Rotary Phone",
-        "HT801IpAddress": "192.168.1.10",
+        "HT801IpAddress": "192.168.86.250",
         "HT801Extension": "1000",
         "BluetoothMacAddress": null
       }

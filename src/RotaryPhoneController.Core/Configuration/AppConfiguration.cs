@@ -18,7 +18,7 @@ public class RotaryPhoneConfig
     /// <summary>
     /// IP address of the HT801 ATA device
     /// </summary>
-    public string HT801IpAddress { get; set; } = "192.168.1.10";
+    public string HT801IpAddress { get; set; } = "192.168.86.250";
     
     /// <summary>
     /// SIP extension to ring on the HT801

@@ -54,7 +54,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   }
 
   /// <summary>
-  /// Initialize: start monitoring D-Bus for device connections.
+  /// Initialize: check for already-connected devices, then start monitoring
+  /// D-Bus for runtime connection changes.
   /// Radio.API owns the adapter — we don't configure it here.
   /// </summary>
   public async Task InitializeAsync()
@@ -63,9 +64,15 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     {
       _logger.LogInformation("Initializing BlueZ HFP adapter (passive mode — Radio.API owns BT adapter)");
 
+      // Check for already-connected devices (covers service restart while phone is connected)
+      await PollConnectedDeviceOnceAsync();
+
       // Start monitoring for device connections via D-Bus property changes
       _monitorCts = new CancellationTokenSource();
       _ = Task.Run(() => MonitorDeviceConnectionsAsync(_monitorCts.Token));
+
+      // Start periodic poll as safety net (D-Bus signals can be missed)
+      _ = Task.Run(() => PeriodicConnectionPollAsync(_monitorCts.Token));
 
       _logger.LogInformation("BlueZ HFP adapter initialized — monitoring for device connections");
     }
@@ -73,6 +80,131 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
     {
       _logger.LogError(ex, "Failed to initialize BlueZ HFP adapter");
       throw;
+    }
+  }
+
+  /// <summary>
+  /// One-shot poll for currently connected devices using bluetoothctl.
+  /// Called at startup to detect devices that connected before we started monitoring.
+  /// </summary>
+  private async Task PollConnectedDeviceOnceAsync()
+  {
+    try
+    {
+      var process = Process.Start(new ProcessStartInfo
+      {
+        FileName = "bluetoothctl",
+        Arguments = "devices Connected",
+        RedirectStandardOutput = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+      });
+
+      if (process == null) return;
+
+      await process.WaitForExitAsync();
+      var output = await process.StandardOutput.ReadToEndAsync();
+
+      if (string.IsNullOrWhiteSpace(output)) return;
+
+      var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+      if (lines.Length == 0) return;
+
+      // Format: "Device D4:3A:2C:64:87:9E Pixel 8 Pro"
+      var parts = lines[0].Split(' ', 3);
+      if (parts.Length >= 2)
+      {
+        var mac = parts[1];
+        var name = parts.Length >= 3 ? parts[2].Trim() : "Unknown";
+        lock (_stateLock)
+        {
+          _connectedDeviceAddress = mac;
+          _lastDisconnectReason = null;
+          _isConnected = true;
+        }
+        _logger.LogInformation("Startup: Bluetooth device already connected: {Name} ({Address})", name, mac);
+      }
+    }
+    catch (Exception ex)
+    {
+      _logger.LogWarning(ex, "Failed to poll for connected devices at startup");
+    }
+  }
+
+  /// <summary>
+  /// Periodic safety-net poll that runs alongside D-Bus monitoring.
+  /// Catches connection changes that D-Bus signals might miss.
+  /// </summary>
+  private async Task PeriodicConnectionPollAsync(CancellationToken ct)
+  {
+    // Wait a bit before starting periodic polls (D-Bus monitor handles most events)
+    await Task.Delay(10_000, ct);
+
+    while (!ct.IsCancellationRequested)
+    {
+      try
+      {
+        var process = Process.Start(new ProcessStartInfo
+        {
+          FileName = "bluetoothctl",
+          Arguments = "devices Connected",
+          RedirectStandardOutput = true,
+          UseShellExecute = false,
+          CreateNoWindow = true
+        });
+
+        if (process != null)
+        {
+          using var timeoutCts = new CancellationTokenSource(5000);
+          using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+          await process.WaitForExitAsync(linked.Token);
+          var output = await process.StandardOutput.ReadToEndAsync(linked.Token);
+
+          if (!string.IsNullOrWhiteSpace(output))
+          {
+            var parts = output.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0].Split(' ', 3);
+            if (parts.Length >= 2)
+            {
+              var mac = parts[1];
+              if (!_isConnected || _connectedDeviceAddress != mac)
+              {
+                var name = parts.Length >= 3 ? parts[2].Trim() : "Unknown";
+                lock (_stateLock)
+                {
+                  _connectedDeviceAddress = mac;
+                  _lastDisconnectReason = null;
+                  _isConnected = true;
+                }
+                _logger.LogInformation("Poll: Bluetooth device connected: {Name} ({Address})", name, mac);
+              }
+            }
+          }
+          else if (_isConnected)
+          {
+            string? previousAddress;
+            lock (_stateLock) { previousAddress = _connectedDeviceAddress; }
+
+            var reason = (_mgmtMonitor != null && previousAddress != null)
+              ? _mgmtMonitor.ConsumeDisconnectReason(previousAddress)
+              : BluetoothDisconnectReason.Unknown;
+
+            lock (_stateLock)
+            {
+              _lastDisconnectReason = reason;
+              _isConnected = false;
+              _connectedDeviceAddress = null;
+            }
+            _logger.LogInformation("Poll: Bluetooth device disconnected, reason={Reason}", reason);
+          }
+        }
+      }
+      catch (OperationCanceledException) { break; }
+      catch (Exception ex)
+      {
+        _logger.LogDebug(ex, "Error in periodic connection poll");
+      }
+
+      await Task.Delay(5_000, ct);
     }
   }
 
