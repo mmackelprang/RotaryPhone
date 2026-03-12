@@ -39,6 +39,9 @@ public class RotaryHub : Hub
     /// </summary>
     public async Task ReportCallerResolved(string phoneNumber, string displayName)
     {
+        if (string.IsNullOrWhiteSpace(phoneNumber) || string.IsNullOrWhiteSpace(displayName))
+            return;
+
         foreach (var phone in _phoneManager.GetAllPhones())
         {
             phone.CallManager.SetResolvedCallerName(phoneNumber, displayName);

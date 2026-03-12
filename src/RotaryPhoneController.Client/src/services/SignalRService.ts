@@ -30,7 +30,10 @@ class SignalRService {
 
     this.connection.on('CallerResolved', (phoneNumber: string, displayName: string) => {
       console.log(`SignalR: Caller resolved ${phoneNumber} → ${displayName}`);
-      useStore.getState().setCallerName(displayName);
+      const state = useStore.getState();
+      if (state.incomingNumber === phoneNumber) {
+        state.setCallerName(displayName);
+      }
     });
 
     this.connection.on('SystemStatusChanged', (status: SystemStatus) => {
