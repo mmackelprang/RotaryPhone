@@ -182,7 +182,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
           try { process.Kill(); } catch { }
         }
 
-        var exitCode = process.ExitCode;
+        try { await process.WaitForExitAsync(ct); } catch { }
+        var exitCode = process.HasExited ? process.ExitCode : -1;
         process.Dispose();
 
         if (ct.IsCancellationRequested) break;

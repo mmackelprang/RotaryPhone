@@ -363,7 +363,7 @@ class HfpProfile(dbus.service.Object):
 
     def __init__(self, bus, path):
         super().__init__(bus, path)
-        self.connection = None  # type: HfpConnection | None
+        self._hfp_conn = None  # type: HfpConnection | None
         self._conn_thread = None
 
     @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
@@ -373,11 +373,11 @@ class HfpProfile(dbus.service.Object):
         log(f"NewConnection: device={device}, fd={fd}, props={dict(fd_properties)}")
 
         # Close any existing connection
-        if self.connection and self.connection.running:
-            self.connection.running = False
+        if self._hfp_conn and self._hfp_conn.running:
+            self._hfp_conn.running = False
 
         conn = HfpConnection(device, fd)
-        self.connection = conn
+        self._hfp_conn = conn
 
         # Run the connection handler in a separate thread
         self._conn_thread = threading.Thread(target=conn.run, daemon=True)
@@ -387,8 +387,8 @@ class HfpProfile(dbus.service.Object):
     def RequestDisconnection(self, device):
         """Called by BlueZ when the device disconnects."""
         log(f"RequestDisconnection: {device}")
-        if self.connection:
-            self.connection.running = False
+        if self._hfp_conn:
+            self._hfp_conn.running = False
 
     @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
     def Release(self):
@@ -397,19 +397,19 @@ class HfpProfile(dbus.service.Object):
 
     def handle_stdin_command(self, cmd_dict):
         """Handle a command from stdin."""
-        if not self.connection or not self.connection.running:
+        if not self._hfp_conn or not self._hfp_conn.running:
             emit({"event": "error", "message": "No active RFCOMM connection"})
             return
 
         command = cmd_dict.get("command")
         if command == "answer":
-            self.connection.answer()
+            self._hfp_conn.answer()
         elif command == "hangup":
-            self.connection.hangup()
+            self._hfp_conn.hangup()
         elif command == "dial":
             number = cmd_dict.get("number", "")
             if number:
-                self.connection.dial(number)
+                self._hfp_conn.dial(number)
         else:
             emit({"event": "error", "message": f"Unknown command: {command}"})
 
