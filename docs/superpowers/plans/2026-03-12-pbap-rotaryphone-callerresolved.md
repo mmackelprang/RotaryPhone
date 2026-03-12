@@ -90,48 +90,35 @@ git commit -m "feat: add SetResolvedCallerName to CallManager"
 **Files:**
 - Modify: `src/RotaryPhoneController.Server/Hubs/RotaryHub.cs`
 
-- [ ] **Step 1: Add the hub method**
+- [ ] **Step 1: Add constructor injection and the hub method**
 
-Add to `RotaryHub` class (after `SendSystemStatus`):
+The existing `RotaryHub` has no constructor — add one. `PhoneManagerService` is registered as a singleton in `Program.cs` (line 89), so DI will resolve it.
 
-```csharp
-/// <summary>
-/// Called by Radio.API to report a resolved caller name from PBAP contacts.
-/// Broadcasts to all connected UI clients.
-/// </summary>
-public async Task ReportCallerResolved(string phoneNumber, string displayName)
-{
-    await Clients.All.SendAsync("CallerResolved", phoneNumber, displayName);
-}
-```
-
-- [ ] **Step 2: Wire hub method to CallManager via PhoneManagerService**
-
-Read `PhoneController.cs` or `Program.cs` to find how `PhoneManagerService` is accessed. The hub method needs to call `SetResolvedCallerName` on the active phone's CallManager.
-
-In `RotaryHub.cs`, inject `PhoneManagerService` and call through:
+Replace the entire `RotaryHub` class with:
 
 ```csharp
 public class RotaryHub : Hub
 {
-    private readonly PhoneManagerService? _phoneManager;
+    private readonly PhoneManagerService _phoneManager;
 
-    public RotaryHub(PhoneManagerService? phoneManager = null)
+    public RotaryHub(PhoneManagerService phoneManager)
     {
         _phoneManager = phoneManager;
     }
 
-    // ... existing methods ...
+    // ... keep all existing methods (SendCallState, SendIncomingCall, etc.) unchanged ...
 
+    /// <summary>
+    /// Called by Radio.API to report a resolved caller name from PBAP contacts.
+    /// Updates CallManager state and broadcasts to all connected UI clients.
+    /// </summary>
     public async Task ReportCallerResolved(string phoneNumber, string displayName)
     {
-        // Update CallManager state
-        if (_phoneManager != null)
+        // Update CallManager state for all phones
+        // GetAllPhones() returns IEnumerable<(string PhoneId, CallManager CallManager)>
+        foreach (var phone in _phoneManager.GetAllPhones())
         {
-            foreach (var phone in _phoneManager.GetAllPhones())
-            {
-                phone.CallManager.SetResolvedCallerName(phoneNumber, displayName);
-            }
+            phone.CallManager.SetResolvedCallerName(phoneNumber, displayName);
         }
 
         // Broadcast to UI clients
@@ -140,14 +127,12 @@ public class RotaryHub : Hub
 }
 ```
 
-Note: Check how `PhoneManagerService` is registered in DI. If the existing hub methods don't use constructor injection, follow the existing pattern (they may use `IHubContext` from controllers instead). Adapt accordingly — the key requirement is that `ReportCallerResolved` both updates CallManager AND broadcasts to UI clients.
-
-- [ ] **Step 3: Build the server project**
+- [ ] **Step 2: Build the server project**
 
 Run: `dotnet build src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj`
 Expected: Build succeeded
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/RotaryPhoneController.Server/Hubs/RotaryHub.cs
@@ -163,32 +148,47 @@ git commit -m "feat: add ReportCallerResolved hub method"
 
 - [ ] **Step 1: Add test for SetResolvedCallerName**
 
+Note: `_currentCallHistory` is private. To verify `CallerName` was set, capture the `CallHistoryEntry` via the mock call history service. Check how `ICallHistoryService` is mocked in the existing test setup and adapt accordingly.
+
 ```csharp
 [Fact]
 public void SetResolvedCallerName_WhenRinging_ShouldUpdateCallHistory()
 {
-    // Arrange - simulate incoming call
-    _callManager.HandleBluetoothIncomingCall("5551234567");
+    // Arrange - simulate incoming call (triggers HandleBluetoothIncomingCall)
+    _mockBluetoothAdapter.Raise(x => x.OnIncomingCall += null, "5551234567");
 
     // Act
     _callManager.SetResolvedCallerName("5551234567", "John Smith");
 
-    // Assert - verify through public state if possible,
-    // or verify no exception thrown (CallerName is on CallHistoryEntry)
+    // Assert - when call ends, the saved CallHistoryEntry should have CallerName
+    // Trigger call end to flush call history
+    _callManager.HangUp();
+
+    // Verify the call history entry was saved with the resolved name
+    _mockCallHistory.Verify(x => x.AddCallHistory(
+        It.Is<CallHistoryEntry>(e => e.CallerName == "John Smith" && e.PhoneNumber == "5551234567")),
+        Times.Once);
 }
 
 [Fact]
 public void SetResolvedCallerName_WrongNumber_ShouldNotUpdate()
 {
     // Arrange
-    _callManager.HandleBluetoothIncomingCall("5551234567");
+    _mockBluetoothAdapter.Raise(x => x.OnIncomingCall += null, "5551234567");
 
     // Act - different number should be ignored
     _callManager.SetResolvedCallerName("9999999999", "Wrong Person");
 
-    // Assert - no exception, gracefully ignored
+    // Assert - end call and verify CallerName is NOT set
+    _callManager.HangUp();
+
+    _mockCallHistory.Verify(x => x.AddCallHistory(
+        It.Is<CallHistoryEntry>(e => e.CallerName == null && e.PhoneNumber == "5551234567")),
+        Times.Once);
 }
 ```
+
+Adapt the mock setup and event-raising pattern to match the existing test fixtures — the key point is that the assert must verify `CallerName` on the persisted `CallHistoryEntry`, not just check for no exception.
 
 - [ ] **Step 2: Run tests**
 
