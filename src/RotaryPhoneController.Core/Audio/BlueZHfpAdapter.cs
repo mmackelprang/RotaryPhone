@@ -18,6 +18,9 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   private readonly BluetoothMgmtMonitor? _mgmtMonitor;
   private readonly object _stateLock = new();
   private volatile bool _isConnected;
+#pragma warning disable CS0414 // Assigned but read only when external call-end detection is wired up
+  private volatile bool _callActive;
+#pragma warning restore CS0414
   private string? _connectedDeviceAddress;
   private AudioRoute _currentRoute = AudioRoute.RotaryPhone;
   private bool _disposed;
@@ -27,9 +30,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
 #pragma warning disable CS0067 // Events are part of interface but not yet triggered in this implementation
   public event Action<string>? OnIncomingCall;
   public event Action? OnCallAnsweredOnCellPhone;
-#pragma warning restore CS0067
-
   public event Action? OnCallEnded;
+#pragma warning restore CS0067
   public event Action<AudioRoute>? OnAudioRouteChanged;
 
   public bool IsConnected => _isConnected;
@@ -466,7 +468,10 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
 
       var success = await SendAtCommandAsync($"ATD{phoneNumber};");
       if (success)
+      {
+        _callActive = true;
         _logger.LogInformation("Call initiation successful");
+      }
       else
         _logger.LogWarning("Call initiation failed");
 
@@ -495,6 +500,7 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
       var success = await SendAtCommandAsync("ATA");
       if (success)
       {
+        _callActive = true;
         _logger.LogInformation("Call answered successfully");
         OnAudioRouteChanged?.Invoke(routeAudio);
       }
@@ -527,8 +533,8 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
       var success = await SendAtCommandAsync("AT+CHUP");
       if (success)
       {
+        _callActive = false;
         _logger.LogInformation("Call terminated successfully");
-        OnCallEnded?.Invoke();
       }
 
       return success;

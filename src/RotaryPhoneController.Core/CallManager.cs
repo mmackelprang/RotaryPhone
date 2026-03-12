@@ -231,6 +231,7 @@ public class CallManager
     
     private void HandleBluetoothCallEnded()
     {
+        if (CurrentState == CallState.Idle) return;
         _logger.LogInformation("Bluetooth call ended");
         HangUp();
     }
