@@ -131,6 +131,22 @@ builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 #endif
 });
 
+// Register IBluetoothDeviceManager (multi-device BT — runs alongside legacy adapter during transition)
+builder.Services.AddSingleton<IBluetoothDeviceManager>(sp =>
+{
+    var config = sp.GetRequiredService<AppConfiguration>();
+    var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+    if (!config.UseActualBluetoothHfp)
+        return new MockBluetoothDeviceManager(loggerFactory.CreateLogger<MockBluetoothDeviceManager>());
+
+#if !WINDOWS
+    return new BlueZBtManager(loggerFactory.CreateLogger<BlueZBtManager>(), config);
+#else
+    return new MockBluetoothDeviceManager(loggerFactory.CreateLogger<MockBluetoothDeviceManager>());
+#endif
+});
+
 builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
@@ -191,6 +207,10 @@ builder.Services.AddSingleton<CallManager>(sp =>
 });
 
 var app = builder.Build();
+
+// Initialize IBluetoothDeviceManager (starts bt_manager.py subprocess)
+var deviceManager = app.Services.GetRequiredService<IBluetoothDeviceManager>();
+await deviceManager.InitializeAsync();
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

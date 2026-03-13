@@ -13,11 +13,13 @@ public class CallManager
     private readonly ICallHistoryService? _callHistoryService;
     private readonly ILogger<CallManager> _logger;
     private readonly RotaryPhoneConfig _phoneConfig;
+    private readonly IBluetoothDeviceManager? _deviceManager;
     private readonly int _rtpPort;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
     private bool _isHangingUp;
+    private string? _activeDeviceAddress;
 
     public event Action? StateChanged;
 
@@ -51,13 +53,14 @@ public class CallManager
     public string? IncomingPhoneNumber { get; private set; }
 
     public CallManager(
-        ISipAdapter sipAdapter, 
+        ISipAdapter sipAdapter,
         IBluetoothHfpAdapter bluetoothAdapter,
         IRtpAudioBridge rtpBridge,
         ILogger<CallManager> logger,
         RotaryPhoneConfig phoneConfig,
         int rtpPort = 49000,
-        ICallHistoryService? callHistoryService = null)
+        ICallHistoryService? callHistoryService = null,
+        IBluetoothDeviceManager? deviceManager = null)
     {
         _sipAdapter = sipAdapter;
         _bluetoothAdapter = bluetoothAdapter;
@@ -66,6 +69,7 @@ public class CallManager
         _phoneConfig = phoneConfig;
         _rtpPort = rtpPort;
         _callHistoryService = callHistoryService;
+        _deviceManager = deviceManager;
         _currentState = CallState.Idle;
     }
 
@@ -84,7 +88,16 @@ public class CallManager
         _bluetoothAdapter.OnCallAnsweredOnCellPhone += HandleCallAnsweredOnCellPhone;
         _bluetoothAdapter.OnCallEnded += HandleBluetoothCallEnded;
         _bluetoothAdapter.OnAudioRouteChanged += HandleAudioRouteChanged;
-        
+
+        // Subscribe to multi-device BT manager events (if available)
+        if (_deviceManager != null)
+        {
+            _deviceManager.OnIncomingCall += HandleDeviceIncomingCall;
+            _deviceManager.OnCallAnsweredOnPhone += HandleDeviceCallAnsweredOnPhone;
+            _deviceManager.OnCallActive += HandleDeviceCallActive;
+            _deviceManager.OnCallEnded += HandleDeviceCallEnded;
+        }
+
         _logger.LogInformation("CallManager initialized successfully");
     }
 
@@ -246,13 +259,48 @@ public class CallManager
     private void HandleAudioRouteChanged(AudioRoute route)
     {
         _logger.LogInformation("Audio route changed to: {Route}", route);
-        
+
         // Update RTP bridge routing if active
         if (_rtpBridge.IsActive && CurrentState == CallState.InCall)
         {
             _ = _rtpBridge.ChangeAudioRouteAsync(route);
         }
     }
+
+    #region Device-Aware Call Handlers (IBluetoothDeviceManager)
+
+    private void HandleDeviceIncomingCall(BluetoothDevice device, string number)
+    {
+        _activeDeviceAddress = device.Address;
+        HandleBluetoothIncomingCall(number);
+    }
+
+    private void HandleDeviceCallAnsweredOnPhone(BluetoothDevice device)
+    {
+        if (_activeDeviceAddress == device.Address)
+            HandleCallAnsweredOnCellPhone();
+    }
+
+    private void HandleDeviceCallActive(BluetoothDevice device)
+    {
+        if (_activeDeviceAddress == device.Address && CurrentState == CallState.Dialing)
+        {
+            // Outgoing call connected — transition to InCall
+            CurrentState = CallState.InCall;
+            _logger.LogInformation("Outgoing call connected on {Device}", device.Address);
+        }
+    }
+
+    private void HandleDeviceCallEnded(BluetoothDevice device)
+    {
+        if (_activeDeviceAddress == device.Address)
+        {
+            HandleBluetoothCallEnded();
+            _activeDeviceAddress = null;
+        }
+    }
+
+    #endregion
 
     public void AnswerCall()
     {

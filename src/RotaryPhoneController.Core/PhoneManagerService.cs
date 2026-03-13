@@ -18,15 +18,17 @@ public class PhoneManagerService
     private readonly IBluetoothHfpAdapter _bluetoothAdapter;
     private readonly IRtpAudioBridge _rtpBridge;
     private readonly ILogger<CallManager> _callManagerLogger;
+    private readonly IBluetoothDeviceManager? _deviceManager;
 
     public PhoneManagerService(
-        ILogger<PhoneManagerService> logger, 
+        ILogger<PhoneManagerService> logger,
         AppConfiguration config,
         ISipAdapter sipAdapter,
         IBluetoothHfpAdapter bluetoothAdapter,
         IRtpAudioBridge rtpBridge,
         ILogger<CallManager> callManagerLogger,
-        ICallHistoryService? callHistoryService = null)
+        ICallHistoryService? callHistoryService = null,
+        IBluetoothDeviceManager? deviceManager = null)
     {
         _logger = logger;
         _config = config;
@@ -35,9 +37,10 @@ public class PhoneManagerService
         _rtpBridge = rtpBridge;
         _callManagerLogger = callManagerLogger;
         _callHistoryService = callHistoryService;
-        
+        _deviceManager = deviceManager;
+
         InitializePhones();
-        
+
         _logger.LogInformation("PhoneManagerService initialized");
     }
 
@@ -81,7 +84,8 @@ public class PhoneManagerService
             callManagerLogger,
             phoneConfig,
             rtpPort,
-            _callHistoryService);
+            _callHistoryService,
+            _deviceManager);
         
         callManager.Initialize();
         _phoneManagers[phoneId] = callManager;
