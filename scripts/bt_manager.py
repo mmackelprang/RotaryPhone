@@ -80,6 +80,7 @@ class HfpConnection:
         self.clip_number = None
         self.slc_established = False
         self._read_buffer = b""
+        self._we_sent_ata = False
 
     @staticmethod
     def _extract_address(device_path):
@@ -282,7 +283,7 @@ class HfpConnection:
         if line == "RING":
             # Incoming call ringing
             number = self.clip_number or "Unknown"
-            emit({"event": "ring", "number": number})
+            emit({"event": "ring", "address": self.address, "number": number})
             log(f"RING - incoming call from {number}")
 
         elif line.startswith("+CLIP:"):
@@ -302,7 +303,7 @@ class HfpConnection:
             self.clip_number = content[q1 + 1:q2]
             log(f"CLIP number: {self.clip_number}")
             # Emit ring with number (may duplicate if RING already sent, but ensures number is included)
-            emit({"event": "ring", "number": self.clip_number})
+            emit({"event": "ring", "address": self.address, "number": self.clip_number})
 
     def _handle_ciev(self, line):
         """Handle +CIEV: indicator_index, value."""
@@ -324,13 +325,16 @@ class HfpConnection:
             if ind_value == 1 and not self.call_active:
                 # Call became active (answered)
                 self.call_active = True
-                emit({"event": "call_active"})
+                emit({"event": "call_active", "address": self.address,
+                      "answered_locally": not self._we_sent_ata})
+                self._we_sent_ata = False
                 log("Call active (answered)")
             elif ind_value == 0 and self.call_active:
                 # Call ended
                 self.call_active = False
                 self.clip_number = None
-                emit({"event": "call_ended"})
+                self._we_sent_ata = False
+                emit({"event": "call_ended", "address": self.address})
                 log("Call ended")
 
         elif ind_index == callsetup_idx:
@@ -341,12 +345,13 @@ class HfpConnection:
                 # Incoming call setup — emit ring event
                 # Number may come later via +CLIP, so use what we have
                 number = self.clip_number or "Unknown"
-                emit({"event": "ring", "number": number})
+                emit({"event": "ring", "address": self.address, "number": number})
                 log(f"Incoming call setup — ring (number: {number})")
             elif ind_value == 0 and prev_callsetup == 1 and not self.call_active:
                 # Call setup ended without answering (caller hung up / rejected)
                 self.clip_number = None
-                emit({"event": "call_ended"})
+                self._we_sent_ata = False
+                emit({"event": "call_ended", "address": self.address})
                 log("Call setup ended (unanswered)")
 
     def send_command(self, command):
@@ -357,6 +362,7 @@ class HfpConnection:
             log(f"Failed to send command: {e}")
 
     def answer(self):
+        self._we_sent_ata = True
         self.send_command("ATA")
 
     def hangup(self):
@@ -367,12 +373,12 @@ class HfpConnection:
 
 
 class HfpProfile(dbus.service.Object):
-    """BlueZ Profile1 implementation for HFP Hands-Free."""
+    """BlueZ Profile1 implementation for HFP Hands-Free (multi-device)."""
 
     def __init__(self, bus, path):
         super().__init__(bus, path)
-        self._hfp_conn = None  # type: HfpConnection | None
-        self._conn_thread = None
+        self._connections = {}  # device_path -> HfpConnection
+        self._conn_threads = {}
 
     @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
     def NewConnection(self, device, fd, fd_properties):
@@ -380,44 +386,80 @@ class HfpProfile(dbus.service.Object):
         fd = fd.take()  # Take ownership of the file descriptor
         log(f"NewConnection: device={device}, fd={fd}, props={dict(fd_properties)}")
 
-        # Close any existing connection
-        if self._hfp_conn and self._hfp_conn.running:
-            self._hfp_conn.running = False
-
         conn = HfpConnection(device, fd)
-        self._hfp_conn = conn
+        self._connections[device] = conn
+        t = threading.Thread(target=self._run_connection, args=(device, conn), daemon=True)
+        self._conn_threads[device] = t
+        t.start()
 
-        # Run the connection handler in a separate thread
-        self._conn_thread = threading.Thread(target=conn.run, daemon=True)
-        self._conn_thread.start()
+    def _run_connection(self, device, conn):
+        """Run connection handler and clean up when done."""
+        try:
+            conn.run()
+        finally:
+            self._connections.pop(device, None)
+            self._conn_threads.pop(device, None)
 
     @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
     def RequestDisconnection(self, device):
         """Called by BlueZ when the device disconnects."""
         log(f"RequestDisconnection: {device}")
-        if self._hfp_conn:
-            self._hfp_conn.running = False
+        conn = self._connections.get(device)
+        if conn:
+            conn.running = False
 
     @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
     def Release(self):
         """Called by BlueZ when the profile is unregistered."""
         log("Profile released")
 
+    def _find_connection_by_address(self, address):
+        """Find a connection by MAC address."""
+        for conn in self._connections.values():
+            if conn.address == address:
+                return conn
+        return None
+
+    def _find_active_connection(self):
+        """Find a connection with an active or incoming call."""
+        for conn in self._connections.values():
+            if conn.running and (conn.call_active or conn.callsetup > 0):
+                return conn
+        # Fall back to any running connection
+        for conn in self._connections.values():
+            if conn.running:
+                return conn
+        return None
+
     def handle_stdin_command(self, cmd_dict):
         """Handle a command from stdin."""
-        if not self._hfp_conn or not self._hfp_conn.running:
-            emit({"event": "error", "message": "No active RFCOMM connection"})
-            return
-
         command = cmd_dict.get("command")
-        if command == "answer":
-            self._hfp_conn.answer()
-        elif command == "hangup":
-            self._hfp_conn.hangup()
-        elif command == "dial":
-            number = cmd_dict.get("number", "")
-            if number:
-                self._hfp_conn.dial(number)
+        address = cmd_dict.get("address")
+
+        if command in ("answer", "hangup", "dial"):
+            # Find connection by address or fall back to active connection
+            conn = None
+            if address:
+                conn = self._find_connection_by_address(address)
+            if not conn:
+                conn = self._find_active_connection()
+            if not conn:
+                emit({"event": "error", "message": "No active RFCOMM connection"})
+                return
+
+            if command == "answer":
+                conn.answer()
+            elif command == "hangup":
+                conn.hangup()
+            elif command == "dial":
+                number = cmd_dict.get("number", "")
+                if number:
+                    conn.dial(number)
+        elif command in ("start_discovery", "stop_discovery", "pair", "remove_device",
+                         "connect", "disconnect", "confirm_pairing", "set_adapter"):
+            # These commands are handled at the adapter level, not per-connection
+            # They'll be implemented in Phase 4 (Pairing UI)
+            log(f"Command '{command}' received — not yet implemented")
         else:
             emit({"event": "error", "message": f"Unknown command: {command}"})
 
