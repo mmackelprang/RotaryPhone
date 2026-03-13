@@ -52,6 +52,11 @@ class SignalRService {
     }
   }
 
+  public on(event: string, callback: (...args: any[]) => void): () => void {
+    this.connection.on(event, callback);
+    return () => this.connection.off(event, callback);
+  }
+
   public stop() {
     this.connection.stop();
   }

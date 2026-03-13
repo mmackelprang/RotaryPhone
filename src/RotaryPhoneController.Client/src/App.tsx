@@ -5,6 +5,7 @@ import { signalRService } from './services/SignalRService';
 import Dashboard from './pages/Dashboard';
 import Contacts from './pages/Contacts';
 import CallHistory from './pages/CallHistory';
+import Pairing from './pages/Pairing';
 
 function App() {
   useEffect(() => {
@@ -21,6 +22,7 @@ function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/contacts" element={<Contacts />} />
         <Route path="/history" element={<CallHistory />} />
+        <Route path="/pairing" element={<Pairing />} />
       </Routes>
     </Layout>
   );
