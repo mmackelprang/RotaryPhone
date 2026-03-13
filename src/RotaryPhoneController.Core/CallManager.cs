@@ -113,12 +113,16 @@ public class CallManager
             switch (CurrentState)
             {
                 case CallState.Idle:
-                    // User picked up handset - transition to dialing
-                    // Pick the first connected BT device for outgoing calls
+                    // Check for available BT devices before allowing dialing
                     if (_deviceManager != null)
                     {
                         var connected = _deviceManager.ConnectedDevices;
-                        _activeDeviceAddress = connected.Count > 0 ? connected[0].Address : null;
+                        if (connected.Count == 0)
+                        {
+                            _logger.LogWarning("No BT devices connected — cannot make calls");
+                            return;
+                        }
+                        _activeDeviceAddress = connected[0].Address;
                     }
                     CurrentState = CallState.Dialing;
                     DialedNumber = string.Empty;

@@ -865,6 +865,22 @@ def main():
             return
         connected = bool(changed["Connected"])
         if not connected:
+            # Paired device disconnected — try to reconnect after delay
+            def try_reconnect():
+                try:
+                    dev_obj = bus.get_object("org.bluez", path)
+                    dev_props_iface = dbus.Interface(dev_obj, "org.freedesktop.DBus.Properties")
+                    paired = bool(dev_props_iface.Get("org.bluez.Device1", "Paired"))
+                    if not paired:
+                        return False  # Only reconnect paired devices
+                    addr = str(dev_props_iface.Get("org.bluez.Device1", "Address"))
+                    dev = dbus.Interface(dev_obj, "org.bluez.Device1")
+                    dev.Connect()
+                    log(f"Reconnected to {addr}")
+                except Exception as e:
+                    log(f"Reconnect failed for {path}: {e}")
+                return False  # Don't repeat
+            GLib.timeout_add(5000, try_reconnect)
             return
         # Device just connected — try to connect HFP after a short delay
         def try_connect_hfp():
