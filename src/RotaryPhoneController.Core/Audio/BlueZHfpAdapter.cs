@@ -8,15 +8,14 @@ namespace RotaryPhoneController.Core.Audio;
 
 /// <summary>
 /// Bluetooth HFP adapter for Linux using BlueZ.
-/// RotaryPhone is BT-passive — Radio.API owns the BlueZ agent and adapter configuration.
-/// This adapter monitors D-Bus for device connections on already-paired devices
-/// and launches a Python HFP Profile1 agent (hfp_monitor.py) to detect call state
-/// via RFCOMM AT commands.
+/// Launches bt_manager.py to manage the BT adapter, HFP connections,
+/// and call state detection via RFCOMM AT commands.
 /// </summary>
 public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
 {
   private readonly ILogger<BlueZHfpAdapter> _logger;
   private readonly string _deviceName;
+  private readonly string? _adapterPath;
   private readonly BluetoothMgmtMonitor? _mgmtMonitor;
   private readonly object _stateLock = new();
   private volatile bool _isConnected;
@@ -51,6 +50,7 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, AppConfiguration config, BluetoothMgmtMonitor? mgmtMonitor = null)
     : this(logger, config.BluetoothDeviceName, mgmtMonitor)
   {
+    _adapterPath = config.BluetoothAdapter;
   }
 
   public BlueZHfpAdapter(ILogger<BlueZHfpAdapter> logger, string deviceName = "Rotary Phone", BluetoothMgmtMonitor? mgmtMonitor = null)
@@ -64,13 +64,12 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   /// <summary>
   /// Initialize: check for already-connected devices, start D-Bus monitoring,
   /// and launch the HFP monitor Python script.
-  /// Radio.API owns the adapter — we don't configure it here.
   /// </summary>
   public async Task InitializeAsync()
   {
     try
     {
-      _logger.LogInformation("Initializing BlueZ HFP adapter (passive mode — Radio.API owns BT adapter)");
+      _logger.LogInformation("Initializing BlueZ HFP adapter");
 
       // Check for already-connected devices (covers service restart while phone is connected)
       await PollConnectedDeviceOnceAsync();
@@ -97,24 +96,18 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   #region HFP Monitor Subprocess
 
   /// <summary>
-  /// Resolves the path to hfp_monitor.py relative to the application binary.
+  /// Resolves the path to bt_manager.py (or hfp_monitor.py fallback) relative to the application binary.
   /// </summary>
-  private static string GetHfpMonitorScriptPath()
+  private static string GetBtManagerScriptPath()
   {
     var baseDir = AppContext.BaseDirectory;
-
-    // Check scripts/ subdirectory first (deployed layout)
-    var scriptPath = Path.Combine(baseDir, "scripts", "hfp_monitor.py");
-    if (File.Exists(scriptPath))
-      return scriptPath;
-
-    // Check sibling scripts/ directory (development layout)
-    var devPath = Path.Combine(baseDir, "..", "..", "..", "..", "..", "scripts", "hfp_monitor.py");
-    var resolved = Path.GetFullPath(devPath);
-    if (File.Exists(resolved))
-      return resolved;
-
-    return scriptPath; // Return the expected path even if not found (will fail with clear error)
+    var btPath = Path.Combine(baseDir, "scripts", "bt_manager.py");
+    if (File.Exists(btPath)) return btPath;
+    var hfpPath = Path.Combine(baseDir, "scripts", "hfp_monitor.py");
+    if (File.Exists(hfpPath)) return hfpPath;
+    var devPath = Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "..", "scripts", "bt_manager.py"));
+    if (File.Exists(devPath)) return devPath;
+    return btPath;
   }
 
   /// <summary>
@@ -122,7 +115,7 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
   /// </summary>
   private async Task RunHfpMonitorAsync(CancellationToken ct)
   {
-    var scriptPath = GetHfpMonitorScriptPath();
+    var scriptPath = GetBtManagerScriptPath();
 
     while (!ct.IsCancellationRequested && _hfpRestartCount < MaxHfpRestarts)
     {
@@ -137,10 +130,16 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
           return;
         }
 
+        var arguments = scriptPath;
+        if (_adapterPath != null)
+        {
+          arguments += $" --adapter /org/bluez/{_adapterPath}";
+        }
+
         var process = Process.Start(new ProcessStartInfo
         {
           FileName = "python3",
-          Arguments = scriptPath,
+          Arguments = arguments,
           RedirectStandardOutput = true,
           RedirectStandardInput = true,
           RedirectStandardError = true,
