@@ -636,9 +636,9 @@ class HfpProfile(dbus.service.Object):
                 alias = cmd_dict.get("alias")
                 discoverable = cmd_dict.get("discoverable")
                 if alias is not None:
-                    adapter_props.Set("org.bluez.Adapter1", "Alias", alias)
+                    adapter_props.Set("org.bluez.Adapter1", "Alias", dbus.String(alias, variant_level=1))
                 if discoverable is not None:
-                    adapter_props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable))
+                    adapter_props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable, variant_level=1))
                 log(f"Adapter configured: alias={alias}, discoverable={discoverable}")
             except Exception as e:
                 emit({"event": "error", "message": f"SetAdapter failed: {e}"})
@@ -758,8 +758,8 @@ def main():
                 bus.get_object("org.bluez", adapter_path),
                 "org.freedesktop.DBus.Properties"
             )
-            adapter.Set("org.bluez.Adapter1", "Alias", args.alias)
-            adapter.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True))
+            adapter.Set("org.bluez.Adapter1", "Alias", dbus.String(args.alias, variant_level=1))
+            adapter.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True, variant_level=1))
             log(f"Configured adapter {adapter_path}: alias={args.alias}, powered=on")
         except dbus.exceptions.DBusException as e:
             log(f"Warning: could not configure adapter {adapter_path}: {e}")

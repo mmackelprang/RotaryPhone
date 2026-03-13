@@ -121,10 +121,21 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BluetoothMgmtMonit
 #endif
 
 // Register Bluetooth HFP adapter (platform-aware factory pattern)
+// When BlueZBtManager is active, use mock to avoid duplicate HFP profile registration
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
     var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+#if !WINDOWS
+    if (config.UseActualBluetoothHfp)
+    {
+        // BlueZBtManager handles HFP — use mock for legacy interface to avoid UUID conflict
+        var mockLogger = loggerFactory.CreateLogger<MockBluetoothHfpAdapter>();
+        return new MockBluetoothHfpAdapter(mockLogger);
+    }
+#endif
+
 #if !WINDOWS
     var mgmtMonitor = sp.GetService<BluetoothMgmtMonitor>();
     return BluetoothAdapterFactory.Create(config, loggerFactory, mgmtMonitor);
