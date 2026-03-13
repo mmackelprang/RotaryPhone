@@ -76,3 +76,26 @@ public class HT801ConnectionTestResult
     public string? DeviceInfo { get; set; }
     public string? FirmwareVersion { get; set; }
 }
+
+/// <summary>
+/// Result of validating HT801 configuration against expected values.
+/// </summary>
+public class HT801ValidationResult
+{
+    public bool IsValid { get; set; }
+    public bool LoginSucceeded { get; set; }
+    public string? ProductModel { get; set; }
+    public string? FirmwareVersion { get; set; }
+    public List<HT801ValidationItem> Items { get; set; } = new();
+    public int FixedCount { get; set; }
+}
+
+public class HT801ValidationItem
+{
+    public string Setting { get; set; } = string.Empty;
+    public string PValue { get; set; } = string.Empty;
+    public string Expected { get; set; } = string.Empty;
+    public string Actual { get; set; } = string.Empty;
+    public bool Match { get; set; }
+    public bool WasFixed { get; set; }
+}

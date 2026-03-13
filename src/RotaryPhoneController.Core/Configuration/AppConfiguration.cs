@@ -24,7 +24,12 @@ public class RotaryPhoneConfig
     /// SIP extension to ring on the HT801
     /// </summary>
     public string HT801Extension { get; set; } = "1000";
-    
+
+    /// <summary>
+    /// Admin password for HT801 web interface
+    /// </summary>
+    public string HT801AdminPassword { get; set; } = "";
+
     /// <summary>
     /// Bluetooth MAC address of the paired mobile phone (optional)
     /// </summary>

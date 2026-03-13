@@ -128,4 +128,12 @@ public class PhoneController : ControllerBase
 
         return Ok(status);
     }
+
+    [HttpGet("ht801/validate")]
+    public async Task<IActionResult> ValidateHT801([FromQuery] string? phoneId, [FromQuery] bool autoFix = false)
+    {
+        phoneId ??= _config.Phones.FirstOrDefault()?.Id ?? "default";
+        var result = await _ht801Service.ValidateDeviceAsync(phoneId, autoFix);
+        return Ok(result);
+    }
 }

@@ -41,4 +41,11 @@ public interface IHT801ConfigService
     /// <param name="ipAddress">IP address of device</param>
     /// <returns>Current configuration from device</returns>
     Task<HT801Config?> ReadConfigFromDeviceAsync(string ipAddress);
+
+    /// <summary>
+    /// Validate that the HT801 is configured correctly for the given phone.
+    /// Reads key P-values and compares against expected configuration.
+    /// Optionally fixes mismatches.
+    /// </summary>
+    Task<HT801ValidationResult> ValidateDeviceAsync(string phoneId, bool autoFix = false);
 }
