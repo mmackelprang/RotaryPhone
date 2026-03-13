@@ -37,6 +37,8 @@ import dbus.mainloop.glib
 import json
 import os
 import signal
+import socket
+import struct
 import sys
 import threading
 import traceback
@@ -49,6 +51,83 @@ AGENT_PATH = "/org/rotaryphone/agent"
 
 # HFP HF features bitmask (minimal: nothing fancy)
 HF_FEATURES = 0
+
+# Bluetooth SCO socket constants
+BTPROTO_SCO = 2
+
+
+class ScoAudioBridge:
+    """Bridges SCO audio to/from a local UDP port for .NET consumption."""
+
+    def __init__(self, device_address, udp_send_port=49100, udp_recv_port=49101):
+        self.device_address = device_address
+        self.udp_send_port = udp_send_port
+        self.udp_recv_port = udp_recv_port
+        self.sco_sock = None
+        self.udp_sock = None
+        self.running = False
+        self._threads = []
+
+    def start(self, sco_fd):
+        """Start bridging audio between SCO file descriptor and UDP."""
+        self.running = True
+        self.sco_sock = socket.fromfd(sco_fd, socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_SCO)
+
+        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_sock.bind(("127.0.0.1", self.udp_recv_port))
+        self.udp_sock.settimeout(0.1)
+
+        # SCO → UDP (phone voice to .NET)
+        t1 = threading.Thread(target=self._sco_to_udp, daemon=True)
+        t1.start()
+        self._threads.append(t1)
+
+        # UDP → SCO (.NET voice to phone)
+        t2 = threading.Thread(target=self._udp_to_sco, daemon=True)
+        t2.start()
+        self._threads.append(t2)
+
+        emit({"event": "sco_connected", "address": self.device_address, "codec": "CVSD"})
+        log(f"SCO audio bridge started for {self.device_address}")
+
+    def stop(self):
+        self.running = False
+        try:
+            if self.sco_sock:
+                self.sco_sock.close()
+        except Exception:
+            pass
+        try:
+            if self.udp_sock:
+                self.udp_sock.close()
+        except Exception:
+            pass
+        emit({"event": "sco_disconnected", "address": self.device_address})
+        log(f"SCO audio bridge stopped for {self.device_address}")
+
+    def _sco_to_udp(self):
+        """Read PCM from SCO, forward to .NET via UDP."""
+        while self.running:
+            try:
+                data = self.sco_sock.recv(480)
+                if data:
+                    self.udp_sock.sendto(data, ("127.0.0.1", self.udp_send_port))
+            except (OSError, IOError):
+                break
+        log("SCO→UDP thread ended")
+
+    def _udp_to_sco(self):
+        """Read PCM from .NET via UDP, write to SCO."""
+        while self.running:
+            try:
+                data, _ = self.udp_sock.recvfrom(480)
+                if data:
+                    self.sco_sock.send(data)
+            except socket.timeout:
+                continue
+            except (OSError, IOError):
+                break
+        log("UDP→SCO thread ended")
 
 
 def emit(event_dict):
@@ -82,6 +161,7 @@ class HfpConnection:
         self.slc_established = False
         self._read_buffer = b""
         self._we_sent_ata = False
+        self._sco_bridge = None
 
     @staticmethod
     def _extract_address(device_path):
@@ -325,16 +405,23 @@ class HfpConnection:
         if ind_index == call_idx:
             if ind_value == 1 and not self.call_active:
                 # Call became active (answered)
+                we_answered = self._we_sent_ata
                 self.call_active = True
                 emit({"event": "call_active", "address": self.address,
-                      "answered_locally": not self._we_sent_ata})
+                      "answered_locally": not we_answered})
                 self._we_sent_ata = False
                 log("Call active (answered)")
+                # If we sent ATA, accept SCO connection for audio
+                if we_answered:
+                    threading.Thread(target=self._accept_sco, daemon=True).start()
             elif ind_value == 0 and self.call_active:
                 # Call ended
                 self.call_active = False
                 self.clip_number = None
                 self._we_sent_ata = False
+                if self._sco_bridge:
+                    self._sco_bridge.stop()
+                    self._sco_bridge = None
                 emit({"event": "call_ended", "address": self.address})
                 log("Call ended")
 
@@ -352,6 +439,9 @@ class HfpConnection:
                 # Call setup ended without answering (caller hung up / rejected)
                 self.clip_number = None
                 self._we_sent_ata = False
+                if self._sco_bridge:
+                    self._sco_bridge.stop()
+                    self._sco_bridge = None
                 emit({"event": "call_ended", "address": self.address})
                 log("Call setup ended (unanswered)")
 
@@ -371,6 +461,26 @@ class HfpConnection:
 
     def dial(self, number):
         self.send_command(f"ATD{number};")
+
+    def _accept_sco(self):
+        """Listen for and accept an incoming SCO connection from the AG."""
+        try:
+            sco_listen = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_SCO)
+            sco_listen.bind(bytes(6))  # Bind to any local BT address
+            sco_listen.listen(1)
+            sco_listen.settimeout(10.0)  # AG should open SCO within seconds
+            log(f"Waiting for SCO connection from {self.address}...")
+            conn, addr = sco_listen.accept()
+            sco_listen.close()
+
+            self._sco_bridge = ScoAudioBridge(self.address)
+            self._sco_bridge.start(conn.fileno())
+        except socket.timeout:
+            log(f"SCO accept timed out for {self.address}")
+            emit({"event": "error", "message": f"SCO connection timed out for {self.address}"})
+        except Exception as e:
+            log(f"SCO accept failed: {e}")
+            emit({"event": "error", "message": f"SCO connection failed: {e}"})
 
 
 class HfpProfile(dbus.service.Object):

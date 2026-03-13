@@ -122,19 +122,20 @@ public class CallManagerTests
     }
 
     [Fact]
-    public void Bluetooth_OnCallAnsweredOnCellPhone_ShouldRouteAudioToCellPhone()
+    public void Bluetooth_OnCallAnsweredOnCellPhone_ShouldCancelInviteAndNotBridge()
     {
         // Arrange
         _callManager.SimulateIncomingCall();
-        
+
         // Act
-        // Simulate event from Bluetooth adapter
         _mockBluetoothAdapter.Raise(x => x.OnCallAnsweredOnCellPhone += null);
 
         // Assert
         Assert.Equal(CallState.InCall, _callManager.CurrentState);
-        // Verify audio routed to CellPhone
-        _mockRtpBridge.Verify(x => x.StartBridgeAsync(It.IsAny<string>(), AudioRoute.CellPhone), Times.Once);
+        // INVITE should be cancelled so rotary stops ringing
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.Once);
+        // No RTP bridge — audio stays on cell phone
+        _mockRtpBridge.Verify(x => x.StartBridgeAsync(It.IsAny<string>(), It.IsAny<AudioRoute>()), Times.Never);
     }
 
     [Fact]

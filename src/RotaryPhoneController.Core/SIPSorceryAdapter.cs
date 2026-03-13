@@ -15,6 +15,7 @@ public class SIPSorceryAdapter : ISipAdapter
     private SIPUserAgent? _userAgent;
     private readonly string _localIPAddress;
     private readonly int _localPort;
+    private SIPRequest? _pendingInviteRequest;
 
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
@@ -326,12 +327,54 @@ public class SIPSorceryAdapter : ISipAdapter
             // Send the INVITE
             var targetEndpoint = SIPEndPoint.ParseSIPEndPoint($"{targetIP}:5060");
             _sipTransport.SendRequestAsync(targetEndpoint, inviteRequest);
+            _pendingInviteRequest = inviteRequest;
 
             _logger.Information("INVITE sent successfully to HT801");
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to send INVITE to HT801");
+        }
+    }
+
+    public void CancelPendingInvite()
+    {
+        if (_pendingInviteRequest == null)
+        {
+            _logger.Debug("No pending INVITE to cancel");
+            return;
+        }
+
+        try
+        {
+            _logger.Information("Cancelling pending INVITE (Call-ID: {CallId})", _pendingInviteRequest.Header.CallId);
+
+            // Build a BYE using the same dialog identifiers as the INVITE
+            var byeRequest = SIPRequest.GetRequest(
+                SIPMethodsEnum.BYE,
+                _pendingInviteRequest.URI,
+                _pendingInviteRequest.Header.To,
+                _pendingInviteRequest.Header.From);
+
+            byeRequest.Header.CallId = _pendingInviteRequest.Header.CallId;
+            byeRequest.Header.CSeq = _pendingInviteRequest.Header.CSeq + 1;
+            byeRequest.Header.CSeqMethod = SIPMethodsEnum.BYE;
+            byeRequest.Header.Contact = _pendingInviteRequest.Header.Contact;
+            byeRequest.Header.UserAgent = "RotaryPhoneController/1.0";
+
+            var targetEndpoint = _pendingInviteRequest.RemoteSIPEndPoint
+                ?? SIPEndPoint.ParseSIPEndPoint($"{_pendingInviteRequest.URI.Host}:5060");
+
+            _sipTransport?.SendRequestAsync(targetEndpoint, byeRequest);
+            _logger.Information("BYE sent to cancel pending INVITE");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to cancel pending INVITE");
+        }
+        finally
+        {
+            _pendingInviteRequest = null;
         }
     }
 
