@@ -589,9 +589,13 @@ class HfpProfile(dbus.service.Object):
         elif command == "pair":
             try:
                 dev_path = device_path_for(address)
-                dev = dbus.Interface(_bus.get_object("org.bluez", dev_path), "org.bluez.Device1")
+                dev_obj = _bus.get_object("org.bluez", dev_path)
+                dev = dbus.Interface(dev_obj, "org.bluez.Device1")
                 dev.Pair()
-                log(f"Pair initiated for {address}")
+                # Auto-trust paired devices so RFCOMM connections aren't rejected
+                props = dbus.Interface(dev_obj, "org.freedesktop.DBus.Properties")
+                props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True, variant_level=1))
+                log(f"Pair initiated and trusted: {address}")
             except Exception as e:
                 emit({"event": "error", "message": f"Pair failed: {e}"})
         elif command == "remove_device":
@@ -823,7 +827,7 @@ def main():
             pass
     log("BT manager ready, waiting for connections...")
 
-    # Try to connect HFP on already-connected devices
+    # Auto-trust all paired devices and connect HFP on already-connected ones
     try:
         obj_manager = dbus.Interface(
             bus.get_object("org.bluez", "/"),
@@ -836,6 +840,23 @@ def main():
             if adapter_path and not path.startswith(adapter_path + "/"):
                 continue
             dev_props = interfaces["org.bluez.Device1"]
+            is_paired = bool(dev_props.get("Paired", False))
+            is_trusted = bool(dev_props.get("Trusted", False))
+
+            # Auto-trust paired devices so RFCOMM isn't rejected
+            if is_paired and not is_trusted:
+                try:
+                    props = dbus.Interface(
+                        bus.get_object("org.bluez", path),
+                        "org.freedesktop.DBus.Properties"
+                    )
+                    props.Set("org.bluez.Device1", "Trusted",
+                              dbus.Boolean(True, variant_level=1))
+                    addr = str(dev_props.get("Address", path))
+                    log(f"Auto-trusted paired device: {addr}")
+                except Exception as e:
+                    log(f"Failed to trust device at {path}: {e}")
+
             if not dev_props.get("Connected", False):
                 continue
             uuids = dev_props.get("UUIDs", [])
