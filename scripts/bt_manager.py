@@ -45,6 +45,7 @@ from gi.repository import GLib
 HFP_HF_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
 HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/org/rotaryphone/hfp_profile"
+AGENT_PATH = "/org/rotaryphone/agent"
 
 # HFP HF features bitmask (minimal: nothing fancy)
 HF_FEATURES = 0
@@ -455,13 +456,159 @@ class HfpProfile(dbus.service.Object):
                 number = cmd_dict.get("number", "")
                 if number:
                     conn.dial(number)
-        elif command in ("start_discovery", "stop_discovery", "pair", "remove_device",
-                         "connect", "disconnect", "confirm_pairing", "set_adapter"):
-            # These commands are handled at the adapter level, not per-connection
-            # They'll be implemented in Phase 4 (Pairing UI)
-            log(f"Command '{command}' received — not yet implemented")
+        elif command == "start_discovery":
+            try:
+                adapter_iface = dbus.Interface(
+                    _bus.get_object("org.bluez", _adapter_path or "/org/bluez/hci0"),
+                    "org.bluez.Adapter1"
+                )
+                adapter_iface.StartDiscovery()
+                log("Discovery started")
+            except Exception as e:
+                emit({"event": "error", "message": f"StartDiscovery failed: {e}"})
+        elif command == "stop_discovery":
+            try:
+                adapter_iface = dbus.Interface(
+                    _bus.get_object("org.bluez", _adapter_path or "/org/bluez/hci0"),
+                    "org.bluez.Adapter1"
+                )
+                adapter_iface.StopDiscovery()
+                log("Discovery stopped")
+            except Exception as e:
+                emit({"event": "error", "message": f"StopDiscovery failed: {e}"})
+        elif command == "pair":
+            try:
+                dev_path = device_path_for(address)
+                dev = dbus.Interface(_bus.get_object("org.bluez", dev_path), "org.bluez.Device1")
+                dev.Pair()
+                log(f"Pair initiated for {address}")
+            except Exception as e:
+                emit({"event": "error", "message": f"Pair failed: {e}"})
+        elif command == "remove_device":
+            try:
+                dev_path = device_path_for(address)
+                adapter_iface = dbus.Interface(
+                    _bus.get_object("org.bluez", _adapter_path or "/org/bluez/hci0"),
+                    "org.bluez.Adapter1"
+                )
+                adapter_iface.RemoveDevice(dev_path)
+                emit({"event": "device_removed", "address": address})
+                log(f"Device removed: {address}")
+            except Exception as e:
+                emit({"event": "error", "message": f"RemoveDevice failed: {e}"})
+        elif command == "connect":
+            try:
+                dev_path = device_path_for(address)
+                dev = dbus.Interface(_bus.get_object("org.bluez", dev_path), "org.bluez.Device1")
+                dev.Connect()
+                log(f"Connect initiated for {address}")
+            except Exception as e:
+                emit({"event": "error", "message": f"Connect failed: {e}"})
+        elif command == "disconnect":
+            try:
+                dev_path = device_path_for(address)
+                dev = dbus.Interface(_bus.get_object("org.bluez", dev_path), "org.bluez.Device1")
+                dev.Disconnect()
+                log(f"Disconnect initiated for {address}")
+            except Exception as e:
+                emit({"event": "error", "message": f"Disconnect failed: {e}"})
+        elif command == "confirm_pairing":
+            accept = cmd_dict.get("accept", False)
+            if _agent and address:
+                _agent.confirm(address, accept)
+        elif command == "set_adapter":
+            try:
+                ap = _adapter_path or "/org/bluez/hci0"
+                adapter_props = dbus.Interface(
+                    _bus.get_object("org.bluez", ap),
+                    "org.freedesktop.DBus.Properties"
+                )
+                alias = cmd_dict.get("alias")
+                discoverable = cmd_dict.get("discoverable")
+                if alias is not None:
+                    adapter_props.Set("org.bluez.Adapter1", "Alias", alias)
+                if discoverable is not None:
+                    adapter_props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable))
+                log(f"Adapter configured: alias={alias}, discoverable={discoverable}")
+            except Exception as e:
+                emit({"event": "error", "message": f"SetAdapter failed: {e}"})
         else:
             emit({"event": "error", "message": f"Unknown command: {command}"})
+
+
+class RotaryPhoneAgent(dbus.service.Object):
+    """BlueZ Agent1 for handling pairing requests."""
+
+    def __init__(self, bus, path):
+        super().__init__(bus, path)
+        self._pending_confirmations = {}  # address -> threading.Event
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        log(f"AuthorizeService: {device} uuid={uuid}")
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        addr = HfpConnection._extract_address(device)
+        log(f"RequestPinCode: {device}")
+        emit({"event": "pairing_request", "address": addr, "type": "pin", "passkey": None})
+        return "0000"
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        addr = HfpConnection._extract_address(device)
+        log(f"RequestConfirmation: {device} passkey={passkey}")
+        emit({"event": "pairing_request", "address": addr,
+              "type": "confirmation", "passkey": str(passkey).zfill(6)})
+        # Block until confirmed via stdin command (or timeout)
+        event = threading.Event()
+        self._pending_confirmations[addr] = event
+        confirmed = event.wait(timeout=30)
+        self._pending_confirmations.pop(addr, None)
+        if not confirmed:
+            raise dbus.exceptions.DBusException(
+                "org.bluez.Error.Rejected", "Pairing confirmation timed out")
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        log(f"RequestPasskey: {device}")
+        return dbus.UInt32(0)
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Release(self):
+        log("Agent released")
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Cancel(self):
+        log("Agent cancelled")
+        # Reject any pending confirmations
+        for event in self._pending_confirmations.values():
+            event.set()
+
+    def confirm(self, address, accept):
+        """Called when user confirms/rejects pairing via stdin command."""
+        event = self._pending_confirmations.get(address)
+        if event:
+            if accept:
+                event.set()
+            else:
+                # Rejection: set the event to unblock, then the method will check
+                # Actually for rejection, we need to raise, so we just let it timeout
+                self._pending_confirmations.pop(address, None)
+                log(f"Pairing rejected for {address}")
+
+
+# Global reference set during main() for adapter-level commands
+_bus = None
+_adapter_path = None
+_agent = None
+
+
+def device_path_for(address):
+    """Convert MAC address to BlueZ device path."""
+    addr_part = address.replace(":", "_")
+    base = _adapter_path or "/org/bluez/hci0"
+    return f"{base}/dev_{addr_part}"
 
 
 def stdin_reader(profile):
@@ -506,6 +653,25 @@ def main():
             log(f"Configured adapter {adapter_path}: alias={args.alias}, powered=on")
         except dbus.exceptions.DBusException as e:
             log(f"Warning: could not configure adapter {adapter_path}: {e}")
+
+    # Set global references for adapter-level commands
+    global _bus, _adapter_path, _agent
+    _bus = bus
+    _adapter_path = adapter_path
+
+    # Create and register BlueZ Agent1 for pairing
+    agent = RotaryPhoneAgent(bus, AGENT_PATH)
+    _agent = agent
+    try:
+        agent_manager = dbus.Interface(
+            bus.get_object("org.bluez", "/org/bluez"),
+            "org.bluez.AgentManager1"
+        )
+        agent_manager.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+        agent_manager.RequestDefaultAgent(AGENT_PATH)
+        log("Registered BlueZ agent for pairing")
+    except dbus.exceptions.DBusException as e:
+        log(f"Warning: could not register agent: {e}")
 
     # Create Profile1 object
     profile = HfpProfile(bus, PROFILE_PATH)
@@ -617,6 +783,27 @@ def main():
         path_keyword="path"
     )
 
+    # Watch for newly discovered devices during scanning
+    def on_interfaces_added(path, interfaces):
+        if "org.bluez.Device1" not in interfaces:
+            return
+        if adapter_path and not path.startswith(adapter_path + "/"):
+            return
+        dev_props = interfaces["org.bluez.Device1"]
+        addr = str(dev_props.get("Address", ""))
+        name = str(dev_props.get("Alias", dev_props.get("Name", ""))) or None
+        paired = bool(dev_props.get("Paired", False))
+        if addr:
+            emit({"event": "device_discovered", "address": addr, "name": name, "paired": paired})
+            log(f"Discovered device: {name or addr}")
+
+    bus.add_signal_receiver(
+        on_interfaces_added,
+        signal_name="InterfacesAdded",
+        dbus_interface="org.freedesktop.DBus.ObjectManager",
+        bus_name="org.bluez"
+    )
+
     # Start stdin reader thread
     main_loop = GLib.MainLoop()
 
@@ -639,6 +826,11 @@ def main():
         try:
             manager.UnregisterProfile(PROFILE_PATH)
             log("Unregistered HFP profile")
+        except Exception:
+            pass
+        try:
+            agent_manager.UnregisterAgent(AGENT_PATH)
+            log("Unregistered BlueZ agent")
         except Exception:
             pass
 
