@@ -330,13 +330,13 @@ public class BlueZHfpAdapter : IBluetoothHfpAdapter, IDisposable
       {
         var line = await reader.ReadLineAsync(ct);
         if (line == null) break;
-        _logger.LogDebug("HFP monitor stderr: {Line}", line);
+        _logger.LogInformation("HFP monitor stderr: {Line}", line);
       }
     }
     catch (OperationCanceledException) { }
     catch (Exception ex)
     {
-      _logger.LogDebug(ex, "Error reading HFP monitor stderr");
+      _logger.LogWarning(ex, "Error reading HFP monitor stderr");
     }
   }
 

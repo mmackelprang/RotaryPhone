@@ -334,8 +334,11 @@ class HfpConnection:
             self.callsetup = ind_value
 
             if ind_value == 1:
-                # Incoming call setup
-                log("Incoming call setup")
+                # Incoming call setup — emit ring event
+                # Number may come later via +CLIP, so use what we have
+                number = self.clip_number or "Unknown"
+                emit({"event": "ring", "number": number})
+                log(f"Incoming call setup — ring (number: {number})")
             elif ind_value == 0 and prev_callsetup == 1 and not self.call_active:
                 # Call setup ended without answering (caller hung up / rejected)
                 self.clip_number = None
