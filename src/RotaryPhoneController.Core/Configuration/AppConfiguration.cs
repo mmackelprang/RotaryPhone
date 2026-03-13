@@ -72,6 +72,26 @@ public class AppConfiguration
     public bool UseActualBluetoothHfp { get; set; } = false;
 
     /// <summary>
+    /// BlueZ adapter to use (e.g., "hci1"). Null = default adapter.
+    /// </summary>
+    public string? BluetoothAdapter { get; set; }
+
+    /// <summary>
+    /// Alias to set on the BT adapter (visible name during pairing).
+    /// </summary>
+    public string BluetoothAdapterAlias { get; set; } = "Rotary Phone";
+
+    /// <summary>
+    /// Maximum number of phones that can be connected simultaneously.
+    /// </summary>
+    public int MaxConnectedPhones { get; set; } = 2;
+
+    /// <summary>
+    /// Base UDP port for SCO audio bridge (per-device: base, base+1; base+2, base+3; ...).
+    /// </summary>
+    public int ScoUdpBasePort { get; set; } = 49100;
+
+    /// <summary>
     /// Force a specific platform for Bluetooth adapter selection.
     /// Values: "Windows", "Linux", or null/empty for auto-detect.
     /// Useful for testing platform-specific code paths.
