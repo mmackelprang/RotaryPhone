@@ -89,24 +89,26 @@ builder.Services.AddSingleton<IHT801ConfigService>(sp =>
 builder.Services.AddSingleton<PhoneManagerService>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<PhoneManagerService>>();
-    var callHistoryService = appConfig.EnableCallHistory 
-        ? sp.GetRequiredService<ICallHistoryService>() 
+    var callHistoryService = appConfig.EnableCallHistory
+        ? sp.GetRequiredService<ICallHistoryService>()
         : null;
-    
+
     var sipAdapter = sp.GetRequiredService<ISipAdapter>();
     var bluetoothAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
     var rtpBridge = sp.GetRequiredService<IRtpAudioBridge>();
     var callManagerLogger = sp.GetRequiredService<ILogger<CallManager>>();
     var config = sp.GetRequiredService<AppConfiguration>();
+    var deviceManager = sp.GetRequiredService<IBluetoothDeviceManager>();
 
     return new PhoneManagerService(
-        logger, 
+        logger,
         config,
         sipAdapter,
         bluetoothAdapter,
         rtpBridge,
         callManagerLogger,
-        callHistoryService);
+        callHistoryService,
+        deviceManager);
 });
 
 // Register SignalR Notifier Service (Hosted Service)
@@ -160,8 +162,8 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 #if !WINDOWS
     if (config.UseActualRtpAudioBridge)
     {
-        var logger = sp.GetRequiredService<ILogger<PipeWireRtpAudioBridge>>();
-        return new PipeWireRtpAudioBridge(logger);
+        var logger = sp.GetRequiredService<ILogger<ScoRtpBridge>>();
+        return new ScoRtpBridge(logger, config.ScoUdpBasePort, config.ScoUdpBasePort + 1);
     }
 #endif
     var mockLogger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
