@@ -39,25 +39,27 @@ public class PhoneController : ControllerBase
     {
         if (string.IsNullOrEmpty(phoneId))
         {
-            // Default to first phone or return all?
-            // For now, let's return a list of all phones status
-            var statuses = _phoneManager.GetAllPhones().Select(p => new
+            // Return default phone status as a single object matching PhoneCallStateDto shape
+            var defaultPhone = _phoneManager.GetAllPhones().FirstOrDefault();
+            if (defaultPhone.CallManager == null) return Ok(new { CallState = "Idle" });
+
+            var m = defaultPhone.CallManager;
+            return Ok(new
             {
-                Id = p.PhoneId,
-                State = p.CallManager.CurrentState.ToString(),
-                DialedNumber = p.CallManager.DialedNumber
+                CallState = m.CurrentState.ToString(),
+                DialedNumber = m.DialedNumber,
+                IncomingNumber = m.IncomingPhoneNumber,
             });
-            return Ok(statuses);
         }
 
         var manager = _phoneManager.GetPhone(phoneId);
         if (manager == null) return NotFound($"Phone {phoneId} not found");
 
-        return Ok(new 
-        { 
-            Id = phoneId, 
-            State = manager.CurrentState.ToString(),
-            DialedNumber = manager.DialedNumber
+        return Ok(new
+        {
+            CallState = manager.CurrentState.ToString(),
+            DialedNumber = manager.DialedNumber,
+            IncomingNumber = manager.IncomingPhoneNumber,
         });
     }
 
@@ -127,5 +129,13 @@ public class PhoneController : ControllerBase
             status.Platform, status.BluetoothConnected, status.SipListening, status.Ht801Reachable);
 
         return Ok(status);
+    }
+
+    [HttpGet("ht801/validate")]
+    public async Task<IActionResult> ValidateHT801([FromQuery] string? phoneId, [FromQuery] bool autoFix = false)
+    {
+        phoneId ??= _config.Phones.FirstOrDefault()?.Id ?? "default";
+        var result = await _ht801Service.ValidateDeviceAsync(phoneId, autoFix);
+        return Ok(result);
     }
 }

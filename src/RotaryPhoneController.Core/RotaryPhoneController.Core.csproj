@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="RotaryPhoneController.Tests" />
+  </ItemGroup>
+
   <!-- Define WINDOWS constant for Windows builds -->
   <PropertyGroup Condition="$(TargetFramework.Contains('windows'))">
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>

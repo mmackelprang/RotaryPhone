@@ -111,8 +111,16 @@ if ($prodExists -ne "EXISTS") {
   }
 }
 
+# Copy scripts directory (HFP monitor, etc.)
+$scriptsDir = Join-Path $RepoRoot "scripts"
+if (Test-Path $scriptsDir) {
+  Write-Host "  Copying scripts..." -ForegroundColor Yellow
+  ssh $SshTarget "mkdir -p ${TargetPath}/scripts"
+  scp -r ($scriptsDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+}
+
 # Ensure binary is executable
-ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server"
+ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server && chmod +x ${TargetPath}/scripts/*.py 2>/dev/null"
 
 Write-Host "  Files synced" -ForegroundColor Green
 

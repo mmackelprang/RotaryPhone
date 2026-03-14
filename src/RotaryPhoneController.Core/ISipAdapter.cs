@@ -12,4 +12,10 @@ public interface ISipAdapter
     bool IsListening { get; }
 
     void SendInviteToHT801(string extensionToRing, string targetIP);
+
+    /// <summary>
+    /// Cancel a pending SIP INVITE (stop the rotary phone from ringing).
+    /// Sends SIP CANCEL/BYE for an unanswered INVITE dialog.
+    /// </summary>
+    void CancelPendingInvite();
 }

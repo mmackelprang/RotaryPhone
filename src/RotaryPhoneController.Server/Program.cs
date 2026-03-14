@@ -89,24 +89,26 @@ builder.Services.AddSingleton<IHT801ConfigService>(sp =>
 builder.Services.AddSingleton<PhoneManagerService>(sp =>
 {
     var logger = sp.GetRequiredService<ILogger<PhoneManagerService>>();
-    var callHistoryService = appConfig.EnableCallHistory 
-        ? sp.GetRequiredService<ICallHistoryService>() 
+    var callHistoryService = appConfig.EnableCallHistory
+        ? sp.GetRequiredService<ICallHistoryService>()
         : null;
-    
+
     var sipAdapter = sp.GetRequiredService<ISipAdapter>();
     var bluetoothAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
     var rtpBridge = sp.GetRequiredService<IRtpAudioBridge>();
     var callManagerLogger = sp.GetRequiredService<ILogger<CallManager>>();
     var config = sp.GetRequiredService<AppConfiguration>();
+    var deviceManager = sp.GetRequiredService<IBluetoothDeviceManager>();
 
     return new PhoneManagerService(
-        logger, 
+        logger,
         config,
         sipAdapter,
         bluetoothAdapter,
         rtpBridge,
         callManagerLogger,
-        callHistoryService);
+        callHistoryService,
+        deviceManager);
 });
 
 // Register SignalR Notifier Service (Hosted Service)
@@ -119,15 +121,42 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BluetoothMgmtMonit
 #endif
 
 // Register Bluetooth HFP adapter (platform-aware factory pattern)
+// When BlueZBtManager is active, use mock to avoid duplicate HFP profile registration
 builder.Services.AddSingleton<IBluetoothHfpAdapter>(sp =>
 {
     var config = sp.GetRequiredService<AppConfiguration>();
     var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+#if !WINDOWS
+    if (config.UseActualBluetoothHfp)
+    {
+        // BlueZBtManager handles HFP — use mock for legacy interface to avoid UUID conflict
+        var mockLogger = loggerFactory.CreateLogger<MockBluetoothHfpAdapter>();
+        return new MockBluetoothHfpAdapter(mockLogger);
+    }
+#endif
+
 #if !WINDOWS
     var mgmtMonitor = sp.GetService<BluetoothMgmtMonitor>();
     return BluetoothAdapterFactory.Create(config, loggerFactory, mgmtMonitor);
 #else
     return BluetoothAdapterFactory.Create(config, loggerFactory);
+#endif
+});
+
+// Register IBluetoothDeviceManager (multi-device BT — runs alongside legacy adapter during transition)
+builder.Services.AddSingleton<IBluetoothDeviceManager>(sp =>
+{
+    var config = sp.GetRequiredService<AppConfiguration>();
+    var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+
+    if (!config.UseActualBluetoothHfp)
+        return new MockBluetoothDeviceManager(loggerFactory.CreateLogger<MockBluetoothDeviceManager>());
+
+#if !WINDOWS
+    return new BlueZBtManager(loggerFactory.CreateLogger<BlueZBtManager>(), config);
+#else
+    return new MockBluetoothDeviceManager(loggerFactory.CreateLogger<MockBluetoothDeviceManager>());
 #endif
 });
 
@@ -144,8 +173,8 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
 #if !WINDOWS
     if (config.UseActualRtpAudioBridge)
     {
-        var logger = sp.GetRequiredService<ILogger<PipeWireRtpAudioBridge>>();
-        return new PipeWireRtpAudioBridge(logger);
+        var logger = sp.GetRequiredService<ILogger<ScoRtpBridge>>();
+        return new ScoRtpBridge(logger, config.ScoUdpBasePort, config.ScoUdpBasePort + 1);
     }
 #endif
     var mockLogger = sp.GetRequiredService<ILogger<MockRtpAudioBridge>>();
@@ -191,6 +220,10 @@ builder.Services.AddSingleton<CallManager>(sp =>
 });
 
 var app = builder.Build();
+
+// Initialize IBluetoothDeviceManager (starts bt_manager.py subprocess)
+var deviceManager = app.Services.GetRequiredService<IBluetoothDeviceManager>();
+await deviceManager.InitializeAsync();
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

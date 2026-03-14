@@ -15,6 +15,7 @@ public class SignalRNotifierService : IHostedService
     private readonly IBluetoothHfpAdapter _bluetoothAdapter;
     private readonly ISipAdapter _sipAdapter;
     private readonly AppConfiguration _config;
+    private readonly IBluetoothDeviceManager? _deviceManager;
     private bool _lastBluetoothConnected;
 
     public SignalRNotifierService(
@@ -23,7 +24,8 @@ public class SignalRNotifierService : IHostedService
         ILogger<SignalRNotifierService> logger,
         IBluetoothHfpAdapter bluetoothAdapter,
         ISipAdapter sipAdapter,
-        AppConfiguration config)
+        AppConfiguration config,
+        IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
         _hubContext = hubContext;
@@ -31,6 +33,7 @@ public class SignalRNotifierService : IHostedService
         _bluetoothAdapter = bluetoothAdapter;
         _sipAdapter = sipAdapter;
         _config = config;
+        _deviceManager = deviceManager;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -42,6 +45,23 @@ public class SignalRNotifierService : IHostedService
         {
             _logger.LogInformation("Subscribing to events for phone: {PhoneId}", phoneId);
             manager.StateChanged += () => OnStateChanged(phoneId, manager);
+        }
+
+        // Subscribe to IBluetoothDeviceManager events (multi-device)
+        if (_deviceManager != null)
+        {
+            _deviceManager.OnDeviceConnected += dev =>
+                _hubContext.Clients.All.SendAsync("DeviceConnected", dev.Address, dev.Name);
+            _deviceManager.OnDeviceDisconnected += dev =>
+                _hubContext.Clients.All.SendAsync("DeviceDisconnected", dev.Address);
+            _deviceManager.OnDeviceDiscovered += dev =>
+                _hubContext.Clients.All.SendAsync("DeviceDiscovered", dev.Address, dev.Name);
+            _deviceManager.OnDevicePaired += dev =>
+                _hubContext.Clients.All.SendAsync("DevicePaired", dev.Address, dev.Name);
+            _deviceManager.OnDeviceRemoved += dev =>
+                _hubContext.Clients.All.SendAsync("DeviceRemoved", dev.Address);
+            _deviceManager.OnPairingRequest += req =>
+                _hubContext.Clients.All.SendAsync("PairingRequest", req.Address, req.Type, req.Passkey);
         }
 
         // Track initial Bluetooth state
@@ -57,6 +77,13 @@ public class SignalRNotifierService : IHostedService
     {
         _logger.LogInformation("Broadcasting state change for {PhoneId}: {State}", phoneId, manager.CurrentState);
         _hubContext.Clients.All.SendAsync("CallStateChanged", phoneId, manager.CurrentState.ToString());
+
+        // Also broadcast IncomingCall with the phone number when ringing
+        if (manager.CurrentState == CallState.Ringing && manager.IncomingPhoneNumber != null)
+        {
+            _logger.LogInformation("Broadcasting IncomingCall for {PhoneId}: {Number}", phoneId, manager.IncomingPhoneNumber);
+            _hubContext.Clients.All.SendAsync("IncomingCall", phoneId, manager.IncomingPhoneNumber);
+        }
     }
 
     private async Task MonitorBluetoothConnectionAsync(CancellationToken cancellationToken)

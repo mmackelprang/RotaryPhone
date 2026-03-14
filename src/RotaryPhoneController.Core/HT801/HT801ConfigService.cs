@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Configuration;
@@ -13,16 +15,18 @@ namespace RotaryPhoneController.Core.HT801;
 public class HT801ConfigService : IHT801ConfigService
 {
     private readonly ILogger<HT801ConfigService> _logger;
+    private readonly AppConfiguration _appConfig;
     private readonly Dictionary<string, HT801Config> _configs = new();
     private readonly object _lock = new();
     private readonly string? _storageFilePath;
 
     public HT801ConfigService(
-        ILogger<HT801ConfigService> logger, 
+        ILogger<HT801ConfigService> logger,
         AppConfiguration appConfig,
         string? storageFilePath = null)
     {
         _logger = logger;
+        _appConfig = appConfig;
         _storageFilePath = storageFilePath;
         
         // Initialize configs from app configuration
@@ -32,8 +36,9 @@ public class HT801ConfigService : IHT801ConfigService
             {
                 IpAddress = phone.HT801IpAddress,
                 Extension = phone.HT801Extension,
-                SipServerAddress = appConfig.SipListenAddress == "0.0.0.0" 
-                    ? "192.168.1.100" 
+                AdminPassword = phone.HT801AdminPassword,
+                SipServerAddress = appConfig.SipListenAddress == "0.0.0.0"
+                    ? "192.168.1.100"
                     : appConfig.SipListenAddress,
                 SipServerPort = appConfig.SipPort
             };
@@ -77,7 +82,7 @@ public class HT801ConfigService : IHT801ConfigService
     {
         try
         {
-            _logger.LogInformation("Testing connection to HT801 at {IpAddress}", ipAddress);
+            _logger.LogDebug("Testing connection to HT801 at {IpAddress}", ipAddress);
             
             // Test 1: Ping the device
             using var ping = new Ping();
@@ -92,7 +97,7 @@ public class HT801ConfigService : IHT801ConfigService
                 };
             }
             
-            _logger.LogInformation("HT801 at {IpAddress} responded to ping in {RoundtripTime}ms", 
+            _logger.LogDebug("HT801 at {IpAddress} responded to ping in {RoundtripTime}ms",
                 ipAddress, reply.RoundtripTime);
             
             // Test 2: Try to connect to common HT801 web interface port (80)
@@ -120,29 +125,157 @@ public class HT801ConfigService : IHT801ConfigService
 
     public async Task<bool> ApplyConfigToDeviceAsync(HT801Config config)
     {
-        // TODO: Future enhancement - implement HT801 web API integration
-        // The HT801 has a web interface at http://<ip>/cgi-bin/dologin
-        // Would need to:
-        // 1. Authenticate with admin credentials
-        // 2. POST configuration changes
-        // 3. Reboot device if needed
-        
-        _logger.LogWarning("ApplyConfigToDeviceAsync not yet implemented - manual configuration required");
-        await Task.CompletedTask;
-        return false;
+        using var api = new HT801ApiClient(_logger);
+        if (!await api.LoginAsync(config.IpAddress, config.AdminUsername, config.AdminPassword))
+            return false;
+
+        var serverIp = GetServerIpForDevice(config.IpAddress);
+        var values = new Dictionary<string, string>
+        {
+            [HT801ApiClient.PSipServer] = serverIp,
+            [HT801ApiClient.PSipUserId] = config.Extension,
+            [HT801ApiClient.PSipPort] = config.SipServerPort.ToString()
+        };
+
+        return await api.SetValuesAsync(config.IpAddress, values);
     }
 
     public async Task<HT801Config?> ReadConfigFromDeviceAsync(string ipAddress)
     {
-        // TODO: Future enhancement - implement HT801 web API integration
-        // Would need to:
-        // 1. Authenticate with admin credentials
-        // 2. GET current configuration from device
-        // 3. Parse response and map to HT801Config object
-        
-        _logger.LogWarning("ReadConfigFromDeviceAsync not yet implemented - manual configuration required");
-        await Task.CompletedTask;
-        return null;
+        HT801Config? foundConfig;
+        lock (_lock)
+        {
+            foundConfig = _configs.Values.FirstOrDefault(c => c.IpAddress == ipAddress);
+        }
+
+        var username = foundConfig?.AdminUsername ?? "admin";
+        var password = foundConfig?.AdminPassword ?? "";
+
+        using var api = new HT801ApiClient(_logger);
+        if (!await api.LoginAsync(ipAddress, username, password))
+            return null;
+
+        var sipServer = await api.GetValueAsync(ipAddress, HT801ApiClient.PSipServer);
+        var extension = await api.GetValueAsync(ipAddress, HT801ApiClient.PSipUserId);
+        var port = await api.GetValueAsync(ipAddress, HT801ApiClient.PSipPort);
+        var firmware = await api.GetValueAsync(ipAddress, HT801ApiClient.PFirmwareVersion);
+
+        return new HT801Config
+        {
+            IpAddress = ipAddress,
+            SipServerAddress = sipServer ?? "",
+            Extension = extension ?? "1000",
+            SipServerPort = int.TryParse(port, out var p) ? p : 5060,
+            AdminUsername = username,
+            AdminPassword = password
+        };
+    }
+
+    public async Task<HT801ValidationResult> ValidateDeviceAsync(string phoneId, bool autoFix = false)
+    {
+        var result = new HT801ValidationResult();
+        var config = GetConfig(phoneId);
+
+        using var api = new HT801ApiClient(_logger);
+
+        // Step 1: Login
+        if (!await api.LoginAsync(config.IpAddress, config.AdminUsername, config.AdminPassword))
+        {
+            result.LoginSucceeded = false;
+            result.Items.Add(new HT801ValidationItem
+            {
+                Setting = "Login",
+                Expected = "success",
+                Actual = "failed",
+                Match = false
+            });
+            return result;
+        }
+
+        result.LoginSucceeded = true;
+
+        // Step 2: Get product model and firmware
+        result.ProductModel = await api.GetProductModelAsync(config.IpAddress);
+        result.FirmwareVersion = await api.GetValueAsync(config.IpAddress, HT801ApiClient.PFirmwareVersion);
+
+        // Step 3: Determine expected SIP server IP (our server's IP reachable from the device)
+        var expectedSipServer = GetServerIpForDevice(config.IpAddress);
+
+        // Step 4: Validate key settings
+        var checks = new (string setting, string pValue, string expected)[]
+        {
+            ("SIP Server", HT801ApiClient.PSipServer, expectedSipServer),
+            ("SIP User ID", HT801ApiClient.PSipUserId, config.Extension),
+            ("SIP Port", HT801ApiClient.PSipPort, config.SipServerPort.ToString()),
+        };
+
+        var fixes = new Dictionary<string, string>();
+
+        foreach (var (setting, pValue, expected) in checks)
+        {
+            var actual = await api.GetValueAsync(config.IpAddress, pValue) ?? "";
+            // Empty values use device defaults — P40 defaults to 5060
+            if (string.IsNullOrEmpty(actual) && pValue == HT801ApiClient.PSipPort)
+                actual = "5060";
+
+            var match = string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
+            var item = new HT801ValidationItem
+            {
+                Setting = setting,
+                PValue = pValue,
+                Expected = expected,
+                Actual = actual,
+                Match = match
+            };
+
+            if (!match && autoFix)
+                fixes[pValue] = expected;
+
+            result.Items.Add(item);
+        }
+
+        // Step 5: Apply fixes if requested
+        if (autoFix && fixes.Count > 0)
+        {
+            _logger.LogInformation("Auto-fixing {Count} HT801 settings for {PhoneId}", fixes.Count, phoneId);
+            if (await api.SetValuesAsync(config.IpAddress, fixes))
+            {
+                result.FixedCount = fixes.Count;
+                foreach (var item in result.Items)
+                {
+                    if (!item.Match && fixes.ContainsKey(item.PValue))
+                        item.WasFixed = true;
+                }
+            }
+        }
+
+        result.IsValid = result.Items.All(i => i.Match || i.WasFixed);
+        return result;
+    }
+
+    /// <summary>
+    /// Determine our server's IP as seen from the HT801's network.
+    /// </summary>
+    private string GetServerIpForDevice(string deviceIp)
+    {
+        // If SipListenAddress is explicit (not 0.0.0.0), use it
+        if (_appConfig.SipListenAddress != "0.0.0.0")
+            return _appConfig.SipListenAddress;
+
+        // Find the local IP on the same subnet as the device
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(IPAddress.Parse(deviceIp), 1);
+            if (socket.LocalEndPoint is IPEndPoint ep)
+                return ep.Address.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not determine local IP for device {DeviceIp}", deviceIp);
+        }
+
+        return "192.168.1.100"; // fallback
     }
 
     private void LoadFromFile()

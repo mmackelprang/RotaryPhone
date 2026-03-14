@@ -24,7 +24,12 @@ public class RotaryPhoneConfig
     /// SIP extension to ring on the HT801
     /// </summary>
     public string HT801Extension { get; set; } = "1000";
-    
+
+    /// <summary>
+    /// Admin password for HT801 web interface
+    /// </summary>
+    public string HT801AdminPassword { get; set; } = "";
+
     /// <summary>
     /// Bluetooth MAC address of the paired mobile phone (optional)
     /// </summary>
@@ -70,6 +75,26 @@ public class AppConfiguration
     /// Enable actual Bluetooth HFP implementation (vs mock)
     /// </summary>
     public bool UseActualBluetoothHfp { get; set; } = false;
+
+    /// <summary>
+    /// BlueZ adapter to use (e.g., "hci1"). Null = default adapter.
+    /// </summary>
+    public string? BluetoothAdapter { get; set; }
+
+    /// <summary>
+    /// Alias to set on the BT adapter (visible name during pairing).
+    /// </summary>
+    public string BluetoothAdapterAlias { get; set; } = "Rotary Phone";
+
+    /// <summary>
+    /// Maximum number of phones that can be connected simultaneously.
+    /// </summary>
+    public int MaxConnectedPhones { get; set; } = 2;
+
+    /// <summary>
+    /// Base UDP port for SCO audio bridge (per-device: base, base+1; base+2, base+3; ...).
+    /// </summary>
+    public int ScoUdpBasePort { get; set; } = 49100;
 
     /// <summary>
     /// Force a specific platform for Bluetooth adapter selection.

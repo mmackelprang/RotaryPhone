@@ -15,6 +15,7 @@ public class SIPSorceryAdapter : ISipAdapter
     private SIPUserAgent? _userAgent;
     private readonly string _localIPAddress;
     private readonly int _localPort;
+    private SIPRequest? _pendingInviteRequest;
 
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
@@ -90,6 +91,12 @@ public class SIPSorceryAdapter : ISipAdapter
                 case SIPMethodsEnum.BYE:
                     HandleBye(sipRequest);
                     break;
+                case SIPMethodsEnum.REGISTER:
+                    HandleRegister(sipRequest, localSIPEndPoint, remoteEndPoint);
+                    break;
+                case SIPMethodsEnum.OPTIONS:
+                    HandleOptions(sipRequest);
+                    break;
                 default:
                     _logger.Debug("Unhandled SIP method: {Method}", sipRequest.Method);
                     break;
@@ -105,10 +112,45 @@ public class SIPSorceryAdapter : ISipAdapter
 
     private Task<SocketError> OnSIPResponseReceived(SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint, SIPResponse sipResponse)
     {
-        _logger.Information("SIP Response received: {StatusCode} {ReasonPhrase} from {RemoteEndPoint}", 
+        _logger.Information("SIP Response received: {StatusCode} {ReasonPhrase} from {RemoteEndPoint}",
             sipResponse.StatusCode, sipResponse.ReasonPhrase, remoteEndPoint);
         _logger.Debug("SIP Response details: {Response}", sipResponse.ToString());
-        
+
+        // Detect HT801 answering our INVITE (user lifted handset while ringing)
+        if (sipResponse.StatusCode == 200 && _pendingInviteRequest != null &&
+            sipResponse.Header.CallId == _pendingInviteRequest.Header.CallId)
+        {
+            _logger.Information("HT801 answered INVITE (200 OK) — handset lifted, triggering off-hook");
+
+            // Send ACK to complete the SIP dialog (required by SIP spec).
+            // Without ACK, the HT801 retransmits the 200 OK and the dialog stays orphaned.
+            try
+            {
+                var ackRequest = SIPRequest.GetRequest(
+                    SIPMethodsEnum.ACK,
+                    _pendingInviteRequest.URI,
+                    sipResponse.Header.To,
+                    _pendingInviteRequest.Header.From);
+
+                ackRequest.Header.CallId = sipResponse.Header.CallId;
+                ackRequest.Header.CSeq = sipResponse.Header.CSeq;
+                ackRequest.Header.CSeqMethod = SIPMethodsEnum.ACK;
+                ackRequest.Header.Contact = _pendingInviteRequest.Header.Contact;
+
+                var targetEndpoint = sipResponse.RemoteSIPEndPoint
+                    ?? SIPEndPoint.ParseSIPEndPoint($"{_pendingInviteRequest.URI.Host}:5060");
+                _sipTransport?.SendRequestAsync(targetEndpoint, ackRequest);
+                _logger.Information("ACK sent to HT801");
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Failed to send ACK");
+            }
+
+            _pendingInviteRequest = null;
+            OnHookChange?.Invoke(true);
+        }
+
         return Task.FromResult(SocketError.Success);
     }
 
@@ -217,8 +259,49 @@ public class SIPSorceryAdapter : ISipAdapter
     private void HandleBye(SIPRequest sipRequest)
     {
         _logger.Information("Processing BYE message - Call terminated by remote party");
+
+        // Send 200 OK to acknowledge the BYE (required by SIP spec)
+        var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+        _sipTransport?.SendResponseAsync(response);
+
         // Fire OnHookChange with false (on-hook) to simulate hanging up
         OnHookChange?.Invoke(false);
+    }
+
+    private void HandleOptions(SIPRequest sipRequest)
+    {
+        // Respond to OPTIONS keepalives with 200 OK
+        var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+        _sipTransport?.SendResponseAsync(response);
+    }
+
+    private void HandleRegister(SIPRequest sipRequest, SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint)
+    {
+        try
+        {
+            var contact = sipRequest.Header.Contact?.FirstOrDefault();
+            // Force short expiry so HT801 re-registers frequently — prevents stale
+            // registrations when our service restarts
+            var expires = 60;
+
+            _logger.Information("Processing REGISTER from {Remote}, Contact={Contact}, Expires={Expires}",
+                remoteEndPoint, contact?.ContactURI, expires);
+
+            var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+            response.Header.Expires = expires;
+
+            if (contact != null)
+            {
+                response.Header.Contact = new List<SIPContactHeader> { contact };
+            }
+
+            _sipTransport?.SendResponseAsync(response);
+            _logger.Information("REGISTER accepted — HT801 at {Remote} registered for {Expires}s", remoteEndPoint, expires);
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Error processing REGISTER");
+        }
     }
 
     private string? ExtractDialedNumber(string body)
@@ -261,14 +344,22 @@ public class SIPSorceryAdapter : ISipAdapter
                 return;
             }
 
+            // Resolve actual local IP when listening on 0.0.0.0
+            var localIP = _localIPAddress;
+            if (localIP == "0.0.0.0")
+            {
+                localIP = GetLocalIPForTarget(targetIP);
+                _logger.Information("Resolved local SIP address to {LocalIP} for target {TargetIP}", localIP, targetIP);
+            }
+
             // Create destination URI
             var destinationUri = SIPURI.ParseSIPURIRelaxed($"sip:{extensionToRing}@{targetIP}");
-            
+
             // Create local SIP endpoint
-            var fromHeader = new SIPFromHeader(null, 
-                new SIPURI(extensionToRing, _localIPAddress, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp), 
+            var fromHeader = new SIPFromHeader(null,
+                new SIPURI(extensionToRing, localIP, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp),
                 CallProperties.CreateNewTag());
-            
+
             // Create the INVITE request
             var inviteRequest = SIPRequest.GetRequest(
                 SIPMethodsEnum.INVITE,
@@ -277,27 +368,37 @@ public class SIPSorceryAdapter : ISipAdapter
                 fromHeader);
 
             // Add required headers
-            inviteRequest.Header.Contact = new List<SIPContactHeader> 
-            { 
-                new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip, 
-                    SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:{_localPort}"))) 
+            inviteRequest.Header.Contact = new List<SIPContactHeader>
+            {
+                new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
+                    SIPEndPoint.ParseSIPEndPoint($"{localIP}:{_localPort}")))
             };
             inviteRequest.Header.UserAgent = "RotaryPhoneController/1.0";
             inviteRequest.Header.ContentType = "application/sdp";
 
             // Create basic SDP for G.711 PCMU
-            var localEndpoint = SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:49000");
+            var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
             var sdp = CreateBasicSDP(localEndpoint);
             inviteRequest.Body = sdp;
+            inviteRequest.Header.ContentLength = sdp.Length;
 
-            _logger.Debug("INVITE request: {Request}", inviteRequest.ToString());
-            _logger.Debug("SDP body: {SDP}", sdp);
+            // Send the INVITE — explicitly use UDP protocol to match our channel
+            var targetEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(targetIP), 5060);
 
-            // Send the INVITE
-            var targetEndpoint = SIPEndPoint.ParseSIPEndPoint($"{targetIP}:5060");
-            _sipTransport.SendRequestAsync(targetEndpoint, inviteRequest);
+            _logger.Information("INVITE target endpoint: {Endpoint}", targetEndpoint);
+            _logger.Information("INVITE Content-Length: {Length}, Body length: {BodyLength}",
+                inviteRequest.Header.ContentLength, inviteRequest.Body?.Length ?? 0);
+            var sendResult = _sipTransport.SendRequestAsync(targetEndpoint, inviteRequest).Result;
+            _pendingInviteRequest = inviteRequest;
 
-            _logger.Information("INVITE sent successfully to HT801");
+            if (sendResult != System.Net.Sockets.SocketError.Success)
+            {
+                _logger.Error("INVITE send failed with socket error: {Error}", sendResult);
+            }
+            else
+            {
+                _logger.Information("INVITE sent successfully to HT801");
+            }
         }
         catch (Exception ex)
         {
@@ -305,21 +406,62 @@ public class SIPSorceryAdapter : ISipAdapter
         }
     }
 
+    public void CancelPendingInvite()
+    {
+        if (_pendingInviteRequest == null)
+        {
+            _logger.Debug("No pending INVITE to cancel");
+            return;
+        }
+
+        try
+        {
+            _logger.Information("Cancelling pending INVITE (Call-ID: {CallId})", _pendingInviteRequest.Header.CallId);
+
+            // Build a BYE using the same dialog identifiers as the INVITE
+            var byeRequest = SIPRequest.GetRequest(
+                SIPMethodsEnum.BYE,
+                _pendingInviteRequest.URI,
+                _pendingInviteRequest.Header.To,
+                _pendingInviteRequest.Header.From);
+
+            byeRequest.Header.CallId = _pendingInviteRequest.Header.CallId;
+            byeRequest.Header.CSeq = _pendingInviteRequest.Header.CSeq + 1;
+            byeRequest.Header.CSeqMethod = SIPMethodsEnum.BYE;
+            byeRequest.Header.Contact = _pendingInviteRequest.Header.Contact;
+            byeRequest.Header.UserAgent = "RotaryPhoneController/1.0";
+
+            var targetEndpoint = _pendingInviteRequest.RemoteSIPEndPoint
+                ?? new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(_pendingInviteRequest.URI.Host), 5060);
+
+            _sipTransport?.SendRequestAsync(targetEndpoint, byeRequest);
+            _logger.Information("BYE sent to cancel pending INVITE");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(ex, "Failed to cancel pending INVITE");
+        }
+        finally
+        {
+            _pendingInviteRequest = null;
+        }
+    }
+
     private string CreateBasicSDP(SIPEndPoint localEndpoint)
     {
         // Create a basic SDP for G.711 PCMU (codec 0)
+        // RFC 4566 requires \r\n line endings in SDP
         var sessionId = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var sdp = $@"v=0
-o=RotaryPhone {sessionId} {sessionId} IN IP4 {localEndpoint.Address}
-s=RotaryPhone Call
-c=IN IP4 {localEndpoint.Address}
-t=0 0
-m=audio {localEndpoint.Port} RTP/AVP 0 101
-a=rtpmap:0 PCMU/8000
-a=rtpmap:101 telephone-event/8000
-a=fmtp:101 0-15
-a=sendrecv
-";
+        var sdp = $"v=0\r\n" +
+                  $"o=RotaryPhone {sessionId} {sessionId} IN IP4 {localEndpoint.Address}\r\n" +
+                  $"s=RotaryPhone Call\r\n" +
+                  $"c=IN IP4 {localEndpoint.Address}\r\n" +
+                  $"t=0 0\r\n" +
+                  $"m=audio {localEndpoint.Port} RTP/AVP 0 101\r\n" +
+                  $"a=rtpmap:0 PCMU/8000\r\n" +
+                  $"a=rtpmap:101 telephone-event/8000\r\n" +
+                  $"a=fmtp:101 0-15\r\n" +
+                  $"a=sendrecv\r\n";
         return sdp;
     }
 
@@ -340,6 +482,25 @@ a=sendrecv
     {
         _logger.Information("Triggering incoming call event");
         OnIncomingCall?.Invoke();
+    }
+
+    /// <summary>
+    /// Determine our local IP on the same subnet as the target device.
+    /// </summary>
+    private string GetLocalIPForTarget(string targetIP)
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(IPAddress.Parse(targetIP), 1);
+            if (socket.LocalEndPoint is IPEndPoint ep)
+                return ep.Address.ToString();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warning(ex, "Could not determine local IP for target {TargetIP}", targetIP);
+        }
+        return "192.168.86.50"; // fallback
     }
 
     public void Dispose()
