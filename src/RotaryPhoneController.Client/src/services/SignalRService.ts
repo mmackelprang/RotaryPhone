@@ -2,16 +2,14 @@ import * as signalR from '@microsoft/signalr';
 import { useStore, CallState } from '../store/useStore';
 import type { SystemStatus } from '../store/useStore';
 
-const HUB_URL = 'http://localhost:5555/hub';
+const HUB_URL = '/hub';
 
 class SignalRService {
   private connection: signalR.HubConnection;
 
   constructor() {
     this.connection = new signalR.HubConnectionBuilder()
-      .withUrl(HUB_URL, {
-        withCredentials: true // Important for CORS
-      })
+      .withUrl(HUB_URL)
       .withAutomaticReconnect()
       .configureLogging(signalR.LogLevel.Information)
       .build();

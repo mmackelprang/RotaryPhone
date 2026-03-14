@@ -424,6 +424,9 @@ public class CallManager
 
         try
         {
+            // Cancel any pending SIP INVITE so the HT801 stops ringing
+            _sipAdapter.CancelPendingInvite();
+
             // Terminate Bluetooth call
             if (_deviceManager != null && _activeDeviceAddress != null)
             {

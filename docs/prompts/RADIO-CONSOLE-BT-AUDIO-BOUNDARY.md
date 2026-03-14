@@ -229,6 +229,7 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 5. **Always select the correct adapter** before `bluetoothctl` commands.
 6. **Do not register A2DP on the voice adapter** or HFP-HF on the music adapter.
 7. **Update this document** before changing any boundary. The other session will read it.
+8. **CRITICAL: Do NOT pair the same device on both adapters.** If a phone is already paired on hci0 (music), RotaryPhone must NOT pair it on hci1 (voice). Duplicate PipeWire devices with the same MAC-based name break WirePlumber's profile resolution (audio-gateway shows 0 sinks/sources, no bluez_input node). See Change Log 2026-03-13 entry #2.
 
 ---
 
@@ -237,3 +238,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | Date | Changed by | What changed |
 |------|-----------|--------------|
 | 2026-03-13 | Radio Console session | Initial boundary doc. Dual-adapter setup established. Intel AX201 re-enabled for RotaryPhone voice. WP adapter isolation config created. |
+| 2026-03-13 | Radio Console session | CRITICAL: Added rule #8 — same device must NOT be paired on both adapters. Root cause of A2DP audio loss: Pixel 8 Pro paired on hci0+hci1 created duplicate PipeWire `bluez_card` devices, breaking WP profile resolution. `bluetoothctl remove` is global (affects all adapters); to remove from one adapter only, delete `/var/lib/bluetooth/<adapter-MAC>/<device-MAC>/` directly. RotaryPhone's bt_manager.py must check if device is already on hci0 before pairing on hci1. |

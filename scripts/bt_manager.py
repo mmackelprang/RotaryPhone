@@ -490,11 +490,27 @@ class HfpProfile(dbus.service.Object):
         fd = fd.take()  # Take ownership of the file descriptor
         log(f"NewConnection: device={device}, fd={fd}, props={dict(fd_properties)}")
 
-        # Reject connections from the wrong adapter
-        if _adapter_path and not device.startswith(_adapter_path + "/"):
-            log(f"Rejecting HFP connection from wrong adapter: {device} (expected {_adapter_path})")
+        # Accept HFP on any adapter — the phone may connect via hci0 or hci1.
+        # Closing the fd for the "wrong" adapter causes the phone to drop ALL
+        # HFP connections, including the one on the correct adapter.
+
+        # Reject duplicate connections for the same device (race between phone and us)
+        # Use address-based dedup since the same phone may connect via different adapters
+        addr = HfpConnection._extract_address(device)
+        existing = self._find_connection_by_address_any(addr)
+        if existing and existing.running:
+            log(f"Duplicate HFP for {addr} (via {device}) — already active, closing fd={fd}")
             os.close(fd)
             return
+
+        if device in self._connections:
+            existing = self._connections[device]
+            if existing.running:
+                log(f"Duplicate NewConnection for {device} — already active, closing fd={fd}")
+                os.close(fd)
+                return
+            # Previous connection is dead, clean it up
+            log(f"Replacing dead connection for {device}")
 
         conn = HfpConnection(device, fd)
         self._connections[device] = conn
@@ -523,8 +539,15 @@ class HfpProfile(dbus.service.Object):
         """Called by BlueZ when the profile is unregistered."""
         log("Profile released")
 
+    def _find_connection_by_address_any(self, address):
+        """Find any connection (running or not) by MAC address."""
+        for conn in self._connections.values():
+            if conn.address == address:
+                return conn
+        return None
+
     def _find_connection_by_address(self, address):
-        """Find a connection by MAC address."""
+        """Find a running connection by MAC address."""
         for conn in self._connections.values():
             if conn.address == address:
                 return conn
@@ -670,17 +693,9 @@ class RotaryPhoneAgent(dbus.service.Object):
     @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
     def RequestConfirmation(self, device, passkey):
         addr = HfpConnection._extract_address(device)
-        log(f"RequestConfirmation: {device} passkey={passkey}")
-        emit({"event": "pairing_request", "address": addr,
-              "type": "confirmation", "passkey": str(passkey).zfill(6)})
-        # Block until confirmed via stdin command (or timeout)
-        event = threading.Event()
-        self._pending_confirmations[addr] = event
-        confirmed = event.wait(timeout=30)
-        self._pending_confirmations.pop(addr, None)
-        if not confirmed:
-            raise dbus.exceptions.DBusException(
-                "org.bluez.Error.Rejected", "Pairing confirmation timed out")
+        log(f"RequestConfirmation: {device} passkey={passkey} — auto-accepting")
+        emit({"event": "pairing_accepted", "address": addr})
+        # Auto-accept: just return without raising an exception
 
     @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
     def RequestPasskey(self, device):
@@ -715,6 +730,7 @@ class RotaryPhoneAgent(dbus.service.Object):
 _bus = None
 _adapter_path = None
 _agent = None
+_hfp_profile = None
 
 
 def device_path_for(address):
@@ -774,7 +790,7 @@ def main():
             log(f"Warning: could not configure adapter {adapter_path}: {e}")
 
     # Set global references for adapter-level commands
-    global _bus, _adapter_path, _agent
+    global _bus, _adapter_path, _agent, _hfp_profile
     _bus = bus
     _adapter_path = adapter_path
 
@@ -786,14 +802,16 @@ def main():
             bus.get_object("org.bluez", "/org/bluez"),
             "org.bluez.AgentManager1"
         )
-        agent_manager.RegisterAgent(AGENT_PATH, "DisplayYesNo")
+        agent_manager.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
         agent_manager.RequestDefaultAgent(AGENT_PATH)
         log("Registered BlueZ agent for pairing")
     except dbus.exceptions.DBusException as e:
         log(f"Warning: could not register agent: {e}")
 
     # Create Profile1 object
+    global _hfp_profile
     profile = HfpProfile(bus, PROFILE_PATH)
+    _hfp_profile = profile
 
     # Register with BlueZ ProfileManager
     manager = dbus.Interface(
@@ -862,16 +880,47 @@ def main():
                 except Exception as e:
                     log(f"Failed to trust device at {path}: {e}")
 
-            if not dev_props.get("Connected", False):
-                continue
-            uuids = dev_props.get("UUIDs", [])
-            # Check if device supports HFP-AG (0000111f)
-            if any("111f" in str(u).lower() for u in uuids):
-                name = str(dev_props.get("Alias", dev_props.get("Address", path)))
-                log(f"Found connected HFP-AG device: {name} at {path}")
-                # Don't call ConnectProfile — phone will initiate HFP on its own
-                # when it sees our registered HF profile. Explicit ConnectProfile
-                # races with the phone's connection and causes RFCOMM resets.
+            is_connected = bool(dev_props.get("Connected", False))
+            uuids = [str(u) for u in dev_props.get("UUIDs", [])]
+            addr = str(dev_props.get("Address", ""))
+            has_hfp_ag = any("111f" in u.lower() for u in uuids)
+            name = str(dev_props.get("Alias", dev_props.get("Address", path)))
+
+            if is_connected and has_hfp_ag:
+                log(f"Found connected HFP-AG device: {name} ({addr}) at {path}")
+                # Request HFP after a delay to let profile registration settle
+                dev_path = path
+                def connect_hfp_startup(dp=dev_path, nm=name):
+                    if _hfp_profile and dp in _hfp_profile._connections:
+                        log(f"HFP already active for {nm} — skipping")
+                        return False
+                    try:
+                        dev_obj = bus.get_object("org.bluez", dp)
+                        dev = dbus.Interface(dev_obj, "org.bluez.Device1")
+                        dev.ConnectProfile(HFP_AG_UUID)
+                        log(f"Requested HFP AG profile from {nm}")
+                    except Exception as e:
+                        log(f"ConnectProfile(HFP_AG) for {nm}: {e}")
+                    return False
+                GLib.timeout_add(2000, connect_hfp_startup)
+            elif is_paired and not is_connected and has_hfp_ag:
+                # Paired but not connected — initiate full BT connection.
+                # Connect() establishes the ACL link; our Profile1 registration
+                # with AutoConnect=True will then open the RFCOMM HFP channel.
+                # The on_properties_changed handler won't duplicate because
+                # NewConnection guards against simultaneous connections.
+                log(f"Paired HFP device not connected: {name} ({addr}) — connecting")
+                dev_path = path
+                def auto_connect_device(dp=dev_path, nm=name):
+                    try:
+                        dev_obj = bus.get_object("org.bluez", dp)
+                        dev = dbus.Interface(dev_obj, "org.bluez.Device1")
+                        dev.Connect()
+                        log(f"Connect() initiated for {nm}")
+                    except Exception as e:
+                        log(f"Connect() failed for {nm}: {e}")
+                    return False
+                GLib.timeout_add(3000, auto_connect_device)
     except Exception as e:
         log(f"Error scanning for connected devices: {e}")
 
@@ -915,11 +964,26 @@ def main():
                 return False  # Don't repeat
             GLib.timeout_add(10000, try_reconnect)
             return
-        # Phone connected at BT level — it will initiate HFP on its own
-        # (NewConnection callback fires when phone connects our HF profile).
-        # Don't call ConnectProfile — it races with the phone and causes resets.
+        # Phone connected at BT level — request HFP AG connection after a
+        # short delay so the phone has time to finish its own setup.
         addr = path.split("/")[-1].replace("dev_", "").replace("_", ":")
-        log(f"Device connected: {addr} — waiting for phone to initiate HFP")
+        log(f"Device connected: {addr} — will request HFP after delay")
+
+        def request_hfp():
+            # Skip if we already have an active HFP connection for this device
+            if _hfp_profile and path in _hfp_profile._connections:
+                log(f"HFP already active for {addr} — skipping ConnectProfile")
+                return False
+            try:
+                dev_obj = bus.get_object("org.bluez", path)
+                dev = dbus.Interface(dev_obj, "org.bluez.Device1")
+                dev.ConnectProfile(HFP_AG_UUID)
+                log(f"Requested HFP AG profile from {addr}")
+            except Exception as e:
+                log(f"ConnectProfile(HFP_AG) for {addr}: {e}")
+            return False  # Don't repeat
+
+        GLib.timeout_add(3000, request_hfp)
 
     bus.add_signal_receiver(
         on_properties_changed,

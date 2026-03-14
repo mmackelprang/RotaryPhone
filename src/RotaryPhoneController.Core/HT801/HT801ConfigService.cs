@@ -82,7 +82,7 @@ public class HT801ConfigService : IHT801ConfigService
     {
         try
         {
-            _logger.LogInformation("Testing connection to HT801 at {IpAddress}", ipAddress);
+            _logger.LogDebug("Testing connection to HT801 at {IpAddress}", ipAddress);
             
             // Test 1: Ping the device
             using var ping = new Ping();
@@ -97,7 +97,7 @@ public class HT801ConfigService : IHT801ConfigService
                 };
             }
             
-            _logger.LogInformation("HT801 at {IpAddress} responded to ping in {RoundtripTime}ms", 
+            _logger.LogDebug("HT801 at {IpAddress} responded to ping in {RoundtripTime}ms",
                 ipAddress, reply.RoundtripTime);
             
             // Test 2: Try to connect to common HT801 web interface port (80)
