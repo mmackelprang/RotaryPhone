@@ -16,6 +16,7 @@ public class SIPSorceryAdapter : ISipAdapter
     private readonly string _localIPAddress;
     private readonly int _localPort;
     private SIPRequest? _pendingInviteRequest;
+    private bool _inviteAnswered;
 
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
@@ -122,8 +123,7 @@ public class SIPSorceryAdapter : ISipAdapter
         {
             _logger.Information("HT801 answered INVITE (200 OK) — handset lifted, triggering off-hook");
 
-            // Send ACK to complete the SIP dialog (required by SIP spec).
-            // Without ACK, the HT801 retransmits the 200 OK and the dialog stays orphaned.
+            // Send ACK to complete the SIP dialog (required by SIP spec)
             try
             {
                 var ackRequest = SIPRequest.GetRequest(
@@ -147,7 +147,7 @@ public class SIPSorceryAdapter : ISipAdapter
                 _logger.Error(ex, "Failed to send ACK");
             }
 
-            _pendingInviteRequest = null;
+            _inviteAnswered = true;
             OnHookChange?.Invoke(true);
         }
 
@@ -382,14 +382,15 @@ public class SIPSorceryAdapter : ISipAdapter
             inviteRequest.Body = sdp;
             inviteRequest.Header.ContentLength = sdp.Length;
 
-            // Send the INVITE — explicitly use UDP protocol to match our channel
             var targetEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(targetIP), 5060);
 
             _logger.Information("INVITE target endpoint: {Endpoint}", targetEndpoint);
             _logger.Information("INVITE Content-Length: {Length}, Body length: {BodyLength}",
                 inviteRequest.Header.ContentLength, inviteRequest.Body?.Length ?? 0);
+
             var sendResult = _sipTransport.SendRequestAsync(targetEndpoint, inviteRequest).Result;
             _pendingInviteRequest = inviteRequest;
+            _inviteAnswered = false;
 
             if (sendResult != System.Net.Sockets.SocketError.Success)
             {
@@ -414,36 +415,61 @@ public class SIPSorceryAdapter : ISipAdapter
             return;
         }
 
+        var inviteReq = _pendingInviteRequest;
+        var targetEndpoint = inviteReq.RemoteSIPEndPoint
+            ?? new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(inviteReq.URI.Host), 5060);
+
         try
         {
-            _logger.Information("Cancelling pending INVITE (Call-ID: {CallId})", _pendingInviteRequest.Header.CallId);
+            if (_inviteAnswered)
+            {
+                // Established call — send BYE
+                _logger.Information("Sending BYE to end call (Call-ID: {CallId})", inviteReq.Header.CallId);
 
-            // Build a BYE using the same dialog identifiers as the INVITE
-            var byeRequest = SIPRequest.GetRequest(
-                SIPMethodsEnum.BYE,
-                _pendingInviteRequest.URI,
-                _pendingInviteRequest.Header.To,
-                _pendingInviteRequest.Header.From);
+                var byeRequest = SIPRequest.GetRequest(
+                    SIPMethodsEnum.BYE,
+                    inviteReq.URI,
+                    inviteReq.Header.To,
+                    inviteReq.Header.From);
+                byeRequest.Header.CallId = inviteReq.Header.CallId;
+                byeRequest.Header.CSeq = inviteReq.Header.CSeq + 1;
+                byeRequest.Header.CSeqMethod = SIPMethodsEnum.BYE;
+                byeRequest.Header.Contact = inviteReq.Header.Contact;
+                byeRequest.Header.UserAgent = "RotaryPhoneController/1.0";
 
-            byeRequest.Header.CallId = _pendingInviteRequest.Header.CallId;
-            byeRequest.Header.CSeq = _pendingInviteRequest.Header.CSeq + 1;
-            byeRequest.Header.CSeqMethod = SIPMethodsEnum.BYE;
-            byeRequest.Header.Contact = _pendingInviteRequest.Header.Contact;
-            byeRequest.Header.UserAgent = "RotaryPhoneController/1.0";
+                _sipTransport?.SendRequestAsync(targetEndpoint, byeRequest);
+                _logger.Information("BYE sent to HT801");
+            }
+            else
+            {
+                // Still ringing — send CANCEL with matching Via branch
+                _logger.Information("Sending CANCEL for unanswered INVITE (Call-ID: {CallId})",
+                    inviteReq.Header.CallId);
 
-            var targetEndpoint = _pendingInviteRequest.RemoteSIPEndPoint
-                ?? new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(_pendingInviteRequest.URI.Host), 5060);
+                var cancelReq = SIPRequest.GetRequest(
+                    SIPMethodsEnum.CANCEL,
+                    inviteReq.URI,
+                    inviteReq.Header.To,
+                    inviteReq.Header.From);
+                cancelReq.Header.CallId = inviteReq.Header.CallId;
+                cancelReq.Header.CSeq = inviteReq.Header.CSeq;
+                cancelReq.Header.CSeqMethod = SIPMethodsEnum.CANCEL;
+                // Via MUST match the original INVITE exactly for CANCEL to work
+                cancelReq.Header.Vias = inviteReq.Header.Vias;
+                cancelReq.Header.UserAgent = "RotaryPhoneController/1.0";
 
-            _sipTransport?.SendRequestAsync(targetEndpoint, byeRequest);
-            _logger.Information("BYE sent to cancel pending INVITE");
+                _sipTransport?.SendRequestAsync(targetEndpoint, cancelReq);
+                _logger.Information("CANCEL sent to HT801");
+            }
         }
         catch (Exception ex)
         {
-            _logger.Error(ex, "Failed to cancel pending INVITE");
+            _logger.Error(ex, "Failed to cancel/end call");
         }
         finally
         {
             _pendingInviteRequest = null;
+            _inviteAnswered = false;
         }
     }
 
