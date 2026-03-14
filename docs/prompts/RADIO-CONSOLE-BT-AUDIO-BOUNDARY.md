@@ -6,7 +6,7 @@
 > adapter, profiles, or WirePlumber configs without updating this document.
 >
 > **Canonical location:** `D:\prj\RotaryPhone\docs\prompts\RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`
-> **Last updated:** 2026-03-13 by Radio Console session
+> **Last updated:** 2026-03-14 by Radio Console session
 >
 > **If you need to change any boundary (adapter assignment, WP config, profile ownership),
 > update this document first, then coordinate with the other session.**
@@ -78,7 +78,7 @@ These files are in `/etc/wireplumber/bluetooth.lua.d/` and affect WirePlumber's 
 
 **Also patched:** `/usr/share/wireplumber/scripts/monitors/bluez.lua` line 382 — always activates BT devices
 (workaround for PipeWire 1.0.7 quirk where `api.bluez5.connection` reports "disconnected" even when connected).
-Backup at `.bak`. Will need re-patching after WirePlumber package upgrades.
+Backup at `.bak`. **Auto-protected:** APT hook at `/etc/apt/apt.conf.d/99-protect-bluez-lua` re-applies the patch after WirePlumber upgrades.
 
 ---
 
@@ -146,10 +146,18 @@ Radio.API's `PhoneCallIntegrationService` connects to RotaryPhone's SignalR hub 
 ### Service Restart Order
 
 After a reboot or PipeWire restart:
-1. `pactl set-default-sink alsa_output.pci-0000_00_1f.3.analog-stereo` (set default speaker)
-2. Start `radio-api` (or it auto-starts via systemd)
-3. Start `rotary-phone` (or it auto-starts via systemd)
-4. Order doesn't matter between the two services — they reconnect independently
+1. `radio-bt-setup.service` runs first (oneshot, configures adapters, PipeWire sink, patches)
+2. `radio-api.service` starts (depends on radio-bt-setup)
+3. `rotary-phone` starts (independent)
+
+**`radio-bt-setup.service`** (new, 2026-03-14) is a systemd oneshot that runs at boot before radio-api:
+- Sets hci0 alias "Grandpas Radio", discoverable on
+- Sets hci1 alias "Grandpas Phone", discoverable off
+- Removes stale hci1 pairings for music-only devices (from `/opt/radio-console/config/bt-music-devices.conf`)
+- Sets PipeWire default sink
+- Verifies bluez.lua patch and WP configs are intact
+
+This means RotaryPhone no longer needs to set hci1's alias or worry about adapter state on boot — it's handled by the Radio Console boot script.
 
 ### If TP-Link Adapter Disconnects/Reconnects
 
@@ -202,7 +210,8 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 - **BlueZ restart** — affects both adapters. Both services will need reconnection. Warn the user.
 - **`/etc/wireplumber/bluetooth.lua.d/`** — owned by Radio Console. RotaryPhone must request changes via this doc.
 - **udev rules for BT** — coordinate via this doc. The Intel AX201 udev disable rule was removed on 2026-03-13.
-- **systemd service ordering** — both services are independent; no ordering dependency.
+- **systemd service ordering** — `radio-bt-setup` → `radio-api` (ordered). `rotary-phone` is independent of both.
+- **`/opt/radio-console/config/bt-music-devices.conf`** — lists device MACs that must only be paired on hci0. The boot script removes stale hci1 pairings for these devices. If RotaryPhone needs a device excluded from this cleanup, coordinate via this doc.
 
 ### Repo locations:
 
@@ -239,3 +248,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 |------|-----------|--------------|
 | 2026-03-13 | Radio Console session | Initial boundary doc. Dual-adapter setup established. Intel AX201 re-enabled for RotaryPhone voice. WP adapter isolation config created. |
 | 2026-03-13 | Radio Console session | CRITICAL: Added rule #8 — same device must NOT be paired on both adapters. Root cause of A2DP audio loss: Pixel 8 Pro paired on hci0+hci1 created duplicate PipeWire `bluez_card` devices, breaking WP profile resolution. `bluetoothctl remove` is global (affects all adapters); to remove from one adapter only, delete `/var/lib/bluetooth/<adapter-MAC>/<device-MAC>/` directly. RotaryPhone's bt_manager.py must check if device is already on hci0 before pairing on hci1. |
+| 2026-03-14 | Radio Console session | Added BT reliability infrastructure (PR #347). New `radio-bt-setup.service` runs at boot: configures both adapters, removes stale cross-adapter pairings, sets PipeWire defaults, verifies WP patches. APT hook auto-protects bluez.lua patch. Radio.API now has pipeline self-healing monitor (30s) and BT health check. **ACTION NEEDED for RotaryPhone:** bt_manager.py must check if a device is already paired on hci0 before pairing on hci1. See prompt file `docs/prompts/2026-03-14-bt-cross-adapter-pairing-guard.md`. |
