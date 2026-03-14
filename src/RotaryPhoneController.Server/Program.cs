@@ -6,6 +6,7 @@ using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Contacts;
 using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.GVTrunk.Extensions;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -219,6 +220,8 @@ builder.Services.AddSingleton<CallManager>(sp =>
     return firstPhone;
 });
 
+builder.Services.AddGVTrunk(builder.Configuration);
+
 var app = builder.Build();
 
 // Initialize IBluetoothDeviceManager (starts bt_manager.py subprocess)
@@ -247,6 +250,7 @@ app.MapControllers();
 
 // Map SignalR Hub
 app.MapHub<RotaryHub>("/hub");
+app.MapGVTrunk();
 
 // Fallback to React SPA in wwwroot/index.html
 app.MapFallbackToFile("index.html");
