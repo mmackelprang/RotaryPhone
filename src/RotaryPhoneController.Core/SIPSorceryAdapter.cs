@@ -280,11 +280,11 @@ public class SIPSorceryAdapter : ISipAdapter
         try
         {
             var contact = sipRequest.Header.Contact?.FirstOrDefault();
-            // Force short expiry so HT801 re-registers frequently — prevents stale
-            // registrations when our service restarts
-            var expires = 60;
+            // Use the requested expiry (default 3600) — the HT801 re-registers at
+            // ~50% of this value. Too-short values cause REGISTER spam.
+            var expires = sipRequest.Header.Expires > 0 ? sipRequest.Header.Expires : 3600;
 
-            _logger.Information("Processing REGISTER from {Remote}, Contact={Contact}, Expires={Expires}",
+            _logger.Debug("Processing REGISTER from {Remote}, Contact={Contact}, Expires={Expires}",
                 remoteEndPoint, contact?.ContactURI, expires);
 
             var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
@@ -298,7 +298,7 @@ public class SIPSorceryAdapter : ISipAdapter
             }
 
             _sipTransport?.SendResponseAsync(response);
-            _logger.Information("REGISTER accepted — HT801 at {Remote} registered for {Expires}s", remoteEndPoint, expires);
+            _logger.Debug("REGISTER accepted — HT801 at {Remote} registered for {Expires}s", remoteEndPoint, expires);
         }
         catch (Exception ex)
         {
