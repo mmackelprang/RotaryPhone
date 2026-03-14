@@ -364,6 +364,10 @@ class HfpConnection:
             # Caller ID: +CLIP: "number",type
             self._parse_clip(line)
 
+        elif line.startswith("+CLCC:"):
+            # Current call list response — extract caller ID
+            self._parse_clcc(line)
+
         elif line.startswith("+CIEV:"):
             # Indicator event: +CIEV: index,value
             self._handle_ciev(line)
@@ -423,11 +427,13 @@ class HfpConnection:
             self.callsetup = ind_value
 
             if ind_value == 1:
-                # Incoming call setup — emit ring event
-                # Number may come later via +CLIP, so use what we have
+                # Incoming call setup — emit ring immediately, then query CLCC
+                # for caller ID (Android doesn't send RING/+CLIP, only +CIEV)
                 number = self.clip_number or "Unknown"
                 emit({"event": "ring", "address": self.address, "number": number})
                 log(f"Incoming call setup — ring (number: {number})")
+                # Query current calls inline (response handled by _handle_unsolicited)
+                self._send("AT+CLCC")
             elif ind_value == 0 and prev_callsetup == 1 and not self.call_active:
                 # Call setup ended without answering (caller hung up / rejected)
                 self.clip_number = None
@@ -437,6 +443,18 @@ class HfpConnection:
                     self._sco_bridge = None
                 emit({"event": "call_ended", "address": self.address})
                 log("Call setup ended (unanswered)")
+
+    def _parse_clcc(self, line):
+        """Parse +CLCC: idx,dir,status,mode,mpty[,"number",type] for caller ID."""
+        content = line[len("+CLCC:"):].strip()
+        q1 = content.find('"')
+        q2 = content.find('"', q1 + 1) if q1 >= 0 else -1
+        if q1 >= 0 and q2 > q1:
+            number = content[q1 + 1:q2]
+            if number and number != self.clip_number:
+                self.clip_number = number
+                log(f"CLCC caller ID: {number}")
+                emit({"event": "ring", "address": self.address, "number": number})
 
     def send_command(self, command):
         """Send an AT command (from stdin JSON)."""
