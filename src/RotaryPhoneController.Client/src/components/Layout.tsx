@@ -18,6 +18,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
           <Button component={RouterLink} to="/contacts" color="inherit">CONTACTS</Button>
           <Button component={RouterLink} to="/history" color="inherit">HISTORY</Button>
           <Button component={RouterLink} to="/pairing" color="inherit">DEVICES</Button>
+          <Button component={RouterLink} to="/gvtrunk" color="inherit">GV TRUNK</Button>
         </Toolbar>
       </AppBar>
       <Container component="main" maxWidth="lg" sx={{ mt: 4, mb: 4, flexGrow: 1 }}>
