@@ -627,6 +627,9 @@ class HfpProfile(dbus.service.Object):
             except Exception as e:
                 emit({"event": "error", "message": f"StopDiscovery failed: {e}"})
         elif command == "pair":
+            if is_paired_on_other_adapter(address):
+                emit({"event": "error", "message": f"Device {address} is already paired on another adapter — cannot pair here"})
+                return
             try:
                 dev_path = device_path_for(address)
                 dev_obj = _bus.get_object("org.bluez", dev_path)
@@ -651,6 +654,9 @@ class HfpProfile(dbus.service.Object):
             except Exception as e:
                 emit({"event": "error", "message": f"RemoveDevice failed: {e}"})
         elif command == "connect":
+            if is_paired_on_other_adapter(address):
+                emit({"event": "error", "message": f"Device {address} is paired on another adapter — cannot connect here"})
+                return
             try:
                 dev_path = device_path_for(address)
                 dev = dbus.Interface(_bus.get_object("org.bluez", dev_path), "org.bluez.Device1")
@@ -749,6 +755,42 @@ _bus = None
 _adapter_path = None
 _agent = None
 _hfp_profile = None
+
+
+def is_paired_on_other_adapter(address):
+    """Check if device is already paired on another BT adapter via D-Bus.
+
+    Prevents cross-adapter pairing conflicts: if a phone is paired on hci0
+    (music/A2DP, owned by Radio Console), pairing it on hci1 (voice/HFP)
+    creates duplicate PipeWire bluez_card devices that break audio routing.
+    """
+    if not _bus or not _adapter_path:
+        return False
+    try:
+        obj_manager = dbus.Interface(
+            _bus.get_object("org.bluez", "/"),
+            "org.freedesktop.DBus.ObjectManager"
+        )
+        objects = obj_manager.GetManagedObjects()
+        addr_part = address.replace(":", "_")
+        for path, interfaces in objects.items():
+            if "org.bluez.Device1" not in interfaces:
+                continue
+            # Skip devices on OUR adapter
+            if path.startswith(_adapter_path + "/"):
+                continue
+            # Check if this device on another adapter matches the address
+            if path.endswith(f"/dev_{addr_part}"):
+                dev_props = interfaces["org.bluez.Device1"]
+                if bool(dev_props.get("Paired", False)):
+                    other_adapter = path.split("/dev_")[0].split("/")[-1]
+                    log(f"BLOCKED: {address} is already paired on {other_adapter} "
+                        f"— refusing on {_adapter_path} to prevent dual-adapter conflict")
+                    return True
+        return False
+    except Exception as e:
+        log(f"Cross-adapter check failed for {address}: {e}")
+        return False  # Fail open — don't block if we can't check
 
 
 def device_path_for(address):
@@ -927,6 +969,8 @@ def main():
                 # with AutoConnect=True will then open the RFCOMM HFP channel.
                 # The on_properties_changed handler won't duplicate because
                 # NewConnection guards against simultaneous connections.
+                if is_paired_on_other_adapter(addr):
+                    continue
                 log(f"Paired HFP device not connected: {name} ({addr}) — connecting")
                 dev_path = path
                 def auto_connect_device(dp=dev_path, nm=name):
@@ -963,6 +1007,9 @@ def main():
                 return
             _last_disconnect[addr] = now
 
+            if is_paired_on_other_adapter(addr):
+                return
+
             def try_reconnect():
                 try:
                     dev_obj = bus.get_object("org.bluez", path)
@@ -985,6 +1032,8 @@ def main():
         # Phone connected at BT level — request HFP AG connection after a
         # short delay so the phone has time to finish its own setup.
         addr = path.split("/")[-1].replace("dev_", "").replace("_", ":")
+        if is_paired_on_other_adapter(addr):
+            return
         log(f"Device connected: {addr} — will request HFP after delay")
 
         def request_hfp():
