@@ -196,6 +196,18 @@ public class CallManager
     {
         _logger.LogInformation("Bluetooth incoming call from: {PhoneNumber}", phoneNumber);
 
+        // If already ringing and we get an updated caller ID (e.g., +CLIP arrived after +CIEV),
+        // update the phone number and re-broadcast
+        if (CurrentState == CallState.Ringing && phoneNumber != "Unknown" && IncomingPhoneNumber == "Unknown")
+        {
+            IncomingPhoneNumber = phoneNumber;
+            if (_currentCallHistory != null)
+                _currentCallHistory.PhoneNumber = phoneNumber;
+            _logger.LogInformation("Caller ID updated to: {PhoneNumber}", phoneNumber);
+            StateChanged?.Invoke(); // Re-broadcast with updated number
+            return;
+        }
+
         if (CurrentState != CallState.Idle)
         {
             _logger.LogWarning("Cannot handle incoming call - not in Idle state. Current state: {State}", CurrentState);

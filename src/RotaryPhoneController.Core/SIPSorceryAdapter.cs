@@ -292,6 +292,8 @@ public class SIPSorceryAdapter : ISipAdapter
 
             if (contact != null)
             {
+                // Set expires on the Contact header — some devices require this
+                contact.Expires = expires;
                 response.Header.Contact = new List<SIPContactHeader> { contact };
             }
 
