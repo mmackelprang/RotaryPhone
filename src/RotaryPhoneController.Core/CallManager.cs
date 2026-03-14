@@ -52,6 +52,11 @@ public class CallManager
     /// </summary>
     public string? IncomingPhoneNumber { get; private set; }
 
+    /// <summary>
+    /// UTC timestamp when the current call entered InCall state. Null when idle.
+    /// </summary>
+    public DateTime? CallStartedAtUtc { get; private set; }
+
     public CallManager(
         ISipAdapter sipAdapter,
         IBluetoothHfpAdapter bluetoothAdapter,
@@ -268,6 +273,7 @@ public class CallManager
             _callHistoryService?.UpdateCallHistory(_currentCallHistory);
         }
 
+        CallStartedAtUtc = DateTime.UtcNow;
         CurrentState = CallState.InCall;
     }
     
@@ -308,6 +314,7 @@ public class CallManager
         if (_activeDeviceAddress == device.Address && CurrentState == CallState.Dialing)
         {
             // Outgoing call connected — transition to InCall
+            CallStartedAtUtc = DateTime.UtcNow;
             CurrentState = CallState.InCall;
             _logger.LogInformation("Outgoing call connected on {Device}", device.Address);
         }
@@ -378,6 +385,7 @@ public class CallManager
             _callHistoryService?.UpdateCallHistory(_currentCallHistory);
         }
 
+        CallStartedAtUtc = DateTime.UtcNow;
         CurrentState = CallState.InCall;
         _logger.LogInformation("Call answered on rotary phone");
     }
@@ -466,6 +474,7 @@ public class CallManager
             CurrentState = CallState.Idle;
             DialedNumber = string.Empty;
             IncomingPhoneNumber = null;
+            CallStartedAtUtc = null;
             _activeDeviceAddress = null;
             _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
         }
