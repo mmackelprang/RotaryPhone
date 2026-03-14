@@ -1,0 +1,35 @@
+@implements IDisposable
+@inject ITrunkAdapter Trunk
+
+<div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h3>Trunk Status</h3>
+    <p>
+        Registration:
+        <span style="color: @(Trunk.IsRegistered ? "green" : "red"); font-weight: bold;">
+            @(Trunk.IsRegistered ? "Registered" : "Unregistered")
+        </span>
+    </p>
+    <button @onclick="ForceReregister">Force Re-Register</button>
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        Trunk.OnRegistrationChanged += OnRegistrationChanged;
+    }
+
+    private void OnRegistrationChanged(bool registered)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ForceReregister()
+    {
+        await Trunk.RegisterAsync();
+    }
+
+    public void Dispose()
+    {
+        Trunk.OnRegistrationChanged -= OnRegistrationChanged;
+    }
+}

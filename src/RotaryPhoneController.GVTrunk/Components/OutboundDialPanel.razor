@@ -1,0 +1,33 @@
+@inject ITrunkAdapter Trunk
+
+<div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h3>Outbound Dial</h3>
+    <input type="tel" placeholder="+1XXXXXXXXXX" @bind="_dialNumber" style="margin-right: 8px; padding: 0.25rem;" />
+    <button @onclick="Dial" disabled="@(!Trunk.IsRegistered || string.IsNullOrWhiteSpace(_dialNumber))">
+        Dial via GV Trunk
+    </button>
+    @if (!string.IsNullOrEmpty(_statusMessage))
+    {
+        <p style="color: #888; margin-top: 0.5rem;">@_statusMessage</p>
+    }
+</div>
+
+@code {
+    private string _dialNumber = "";
+    private string? _statusMessage;
+
+    private async Task Dial()
+    {
+        if (string.IsNullOrWhiteSpace(_dialNumber)) return;
+        try
+        {
+            await Trunk.PlaceOutboundCallAsync(_dialNumber);
+            _statusMessage = $"Dialing {_dialNumber}...";
+            _dialNumber = "";
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+        }
+    }
+}
