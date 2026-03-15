@@ -1,0 +1,47 @@
+@implements IDisposable
+@inject ICallAdapterRegistry Registry
+
+<div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h3>Call Path</h3>
+    <div style="display: flex; gap: 1rem;">
+        @foreach (var mode in Enum.GetValues<CallAdapterMode>())
+        {
+            <label style="cursor: pointer;">
+                <input type="radio" name="callMode" value="@mode"
+                       checked="@(Registry.ActiveMode == mode)"
+                       @onchange="() => SwitchMode(mode)" />
+                @GetModeLabel(mode)
+            </label>
+        }
+    </div>
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        Registry.OnModeChanged += OnModeChanged;
+    }
+
+    private void OnModeChanged(CallAdapterMode mode)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SwitchMode(CallAdapterMode mode)
+    {
+        await Registry.SwitchModeAsync(mode);
+    }
+
+    private string GetModeLabel(CallAdapterMode mode) => mode switch
+    {
+        CallAdapterMode.BluetoothHfp => "Bluetooth Phone",
+        CallAdapterMode.SipTrunk => "SIP Trunk",
+        CallAdapterMode.GVBrowser => "GV Browser",
+        _ => mode.ToString()
+    };
+
+    public void Dispose()
+    {
+        Registry.OnModeChanged -= OnModeChanged;
+    }
+}
