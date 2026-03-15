@@ -1,0 +1,55 @@
+@implements IDisposable
+@inject ICallLogService CallLog
+
+<div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h3>Call History <button @onclick="Refresh" style="font-size: 0.8em;">Refresh</button></h3>
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+            <tr>
+                <th style="text-align: left;">Time</th>
+                <th style="text-align: left;">Direction</th>
+                <th style="text-align: left;">Number</th>
+                <th style="text-align: left;">Status</th>
+                <th style="text-align: left;">Duration</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var c in _entries)
+            {
+                <tr>
+                    <td>@c.StartedAt.ToLocalTime().ToString("g")</td>
+                    <td>@c.Direction</td>
+                    <td>@c.RemoteNumber</td>
+                    <td>@c.Status</td>
+                    <td>@(c.DurationSeconds.HasValue ? $"{c.DurationSeconds}s" : "-")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    private IReadOnlyList<CallLogEntry> _entries = Array.Empty<CallLogEntry>();
+    private System.Threading.Timer? _timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+        _timer = new System.Threading.Timer(async _ =>
+        {
+            await Refresh();
+            await InvokeAsync(StateHasChanged);
+        }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+    }
+
+    private async Task Refresh()
+    {
+        _entries = await CallLog.GetRecentAsync(50);
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+}
