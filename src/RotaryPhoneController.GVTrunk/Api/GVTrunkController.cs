@@ -25,16 +25,20 @@ public class GVTrunkController : ControllerBase
     [HttpGet("status")]
     public IActionResult GetStatus()
     {
+        var callState = Core.CallState.Idle;
+        int durationSeconds = 0;
         var phone = _phoneManager.GetAllPhones().FirstOrDefault();
-        var callManager = phone.CallManager;
-        var callState = callManager?.CurrentState ?? Core.CallState.Idle;
+        if (phone.CallManager is { } callManager)
+        {
+            callState = callManager.CurrentState;
+            if (callState == Core.CallState.InCall && callManager.CallStartedAtUtc != null)
+                durationSeconds = (int)(DateTime.UtcNow - callManager.CallStartedAtUtc.Value).TotalSeconds;
+        }
         return Ok(new
         {
             isRegistered = _trunk.IsRegistered,
             callState = callState.ToString(),
-            activeCallDurationSeconds = callState == Core.CallState.InCall && callManager?.CallStartedAtUtc != null
-                ? (int)(DateTime.UtcNow - callManager.CallStartedAtUtc.Value).TotalSeconds
-                : 0
+            activeCallDurationSeconds = durationSeconds
         });
     }
 

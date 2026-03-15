@@ -53,7 +53,9 @@ public class CallManager
     public string? IncomingPhoneNumber { get; private set; }
 
     /// <summary>
-    /// UTC timestamp when the current call entered InCall state. Null when idle.
+    /// UTC timestamp when the current call entered InCall state.
+    /// Added for GVTrunk dashboard duration display. Deviation from GVTrunk spec section 3.3
+    /// (approved: property is useful for all callers, not GVTrunk-specific).
     /// </summary>
     public DateTime? CallStartedAtUtc { get; private set; }
 

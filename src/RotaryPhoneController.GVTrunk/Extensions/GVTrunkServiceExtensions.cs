@@ -31,6 +31,7 @@ public static class GVTrunkServiceExtensions
         services.AddHostedService<CallLogInitializer>();
 
         services.AddSingleton<ISmsProvider, GmailSmsService>();
+        services.AddHostedService<SmsServiceStarter>();
         services.AddHostedService<TrunkRegistrationService>();
         services.AddHostedService<GVTrunkEventBridge>();
 
@@ -43,6 +44,14 @@ public static class GVTrunkServiceExtensions
         endpoints.MapControllers();
         return endpoints;
     }
+}
+
+public class SmsServiceStarter : Microsoft.Extensions.Hosting.IHostedService
+{
+    private readonly ISmsProvider _sms;
+    public SmsServiceStarter(ISmsProvider sms) => _sms = sms;
+    public Task StartAsync(CancellationToken ct) => _sms.StartAsync(ct);
+    public Task StopAsync(CancellationToken ct) => _sms.StopAsync(ct);
 }
 
 public class CallLogInitializer : Microsoft.Extensions.Hosting.IHostedService
