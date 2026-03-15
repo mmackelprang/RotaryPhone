@@ -1,0 +1,33 @@
+@implements IDisposable
+@inject GVBridgeService Bridge
+
+<div style="margin-bottom: 1rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;">
+    <h3>Bridge Status</h3>
+    <p>
+        Extension:
+        <span style="color: @(Bridge.IsExtensionConnected ? "green" : "red"); font-weight: bold;">
+            @(Bridge.IsExtensionConnected ? "Connected" : "Disconnected")
+        </span>
+        @if (Bridge.ExtensionVersion != null)
+        {
+            <span style="color: #888; margin-left: 8px;">v@(Bridge.ExtensionVersion)</span>
+        }
+    </p>
+</div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        Bridge.OnConnectionChanged += OnConnectionChanged;
+    }
+
+    private void OnConnectionChanged(bool connected)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Bridge.OnConnectionChanged -= OnConnectionChanged;
+    }
+}
