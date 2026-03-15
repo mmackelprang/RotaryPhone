@@ -6,7 +6,10 @@ using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Contacts;
 using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Adapters;
+using RotaryPhoneController.Server.Adapters;
 using RotaryPhoneController.GVTrunk.Extensions;
+using RotaryPhoneController.GVTrunk.Interfaces;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -86,6 +89,30 @@ builder.Services.AddSingleton<IHT801ConfigService>(sp =>
     return new HT801ConfigService(logger, appConfig, storagePath);
 });
 
+// Call adapter registry — runtime mode switching between BT/SIP/GV
+builder.Services.AddSingleton<BluetoothCallAdapter>(sp =>
+{
+    var hfpAdapter = sp.GetRequiredService<IBluetoothHfpAdapter>();
+    var logger = sp.GetRequiredService<ILogger<BluetoothCallAdapter>>();
+    var deviceManager = sp.GetRequiredService<IBluetoothDeviceManager>();
+    return new BluetoothCallAdapter(hfpAdapter, logger, deviceManager);
+});
+builder.Services.AddSingleton<SipTrunkCallAdapter>(sp =>
+{
+    var trunk = sp.GetRequiredService<ITrunkAdapter>();
+    var logger = sp.GetRequiredService<ILogger<SipTrunkCallAdapter>>();
+    return new SipTrunkCallAdapter(trunk, logger);
+});
+builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
+{
+    var registry = new CallAdapterRegistry(sp.GetRequiredService<ILogger<CallAdapterRegistry>>());
+    registry.Register(sp.GetRequiredService<BluetoothCallAdapter>());
+    registry.Register(sp.GetRequiredService<SipTrunkCallAdapter>());
+    // Default to Bluetooth mode
+    registry.SwitchModeAsync(CallAdapterMode.BluetoothHfp).GetAwaiter().GetResult();
+    return registry;
+});
+
 // Register phone manager service
 builder.Services.AddSingleton<PhoneManagerService>(sp =>
 {
@@ -100,6 +127,7 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
     var callManagerLogger = sp.GetRequiredService<ILogger<CallManager>>();
     var config = sp.GetRequiredService<AppConfiguration>();
     var deviceManager = sp.GetRequiredService<IBluetoothDeviceManager>();
+    var adapterRegistry = sp.GetRequiredService<ICallAdapterRegistry>();
 
     return new PhoneManagerService(
         logger,
@@ -109,7 +137,8 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
         rtpBridge,
         callManagerLogger,
         callHistoryService,
-        deviceManager);
+        deviceManager,
+        adapterRegistry);
 });
 
 // Register SignalR Notifier Service (Hosted Service)
