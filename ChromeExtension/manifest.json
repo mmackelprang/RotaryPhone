@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "RotaryPhone GV Bridge",
+  "version": "1.0.0",
+  "description": "Bridges Google Voice web UI to the RotaryPhone controller",
+  "permissions": [
+    "tabCapture",
+    "tabs",
+    "scripting",
+    "offscreen",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://voice.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [{
+    "matches": ["https://voice.google.com/*"],
+    "js": ["content/gv-bridge.js"],
+    "run_at": "document_idle"
+  }]
+}
