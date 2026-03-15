@@ -10,6 +10,8 @@ using RotaryPhoneController.Core.Adapters;
 using RotaryPhoneController.Server.Adapters;
 using RotaryPhoneController.GVTrunk.Extensions;
 using RotaryPhoneController.GVTrunk.Interfaces;
+using RotaryPhoneController.GVBridge.Extensions;
+using RotaryPhoneController.GVBridge.Adapters;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -108,6 +110,9 @@ builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
     var registry = new CallAdapterRegistry(sp.GetRequiredService<ILogger<CallAdapterRegistry>>());
     registry.Register(sp.GetRequiredService<BluetoothCallAdapter>());
     registry.Register(sp.GetRequiredService<SipTrunkCallAdapter>());
+    // Register GV Browser adapter (if GVBridge is configured)
+    var gvAdapter = sp.GetRequiredService<GVBrowserAdapter>();
+    registry.Register(gvAdapter);
     // Default to Bluetooth mode
     registry.SwitchModeAsync(CallAdapterMode.BluetoothHfp).GetAwaiter().GetResult();
     return registry;
@@ -250,6 +255,7 @@ builder.Services.AddSingleton<CallManager>(sp =>
 });
 
 builder.Services.AddGVTrunk(builder.Configuration);
+builder.Services.AddGVBridge(builder.Configuration);
 
 var app = builder.Build();
 
@@ -280,6 +286,7 @@ app.MapControllers();
 // Map SignalR Hub
 app.MapHub<RotaryHub>("/hub");
 app.MapGVTrunk();
+app.MapGVBridge();
 
 // Fallback to React SPA in wwwroot/index.html
 app.MapFallbackToFile("index.html");
