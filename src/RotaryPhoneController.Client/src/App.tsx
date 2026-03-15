@@ -7,6 +7,7 @@ import Contacts from './pages/Contacts';
 import CallHistory from './pages/CallHistory';
 import Pairing from './pages/Pairing';
 import GVTrunk from './pages/GVTrunk';
+import GVBridge from './pages/GVBridge';
 
 function App() {
   useEffect(() => {
@@ -25,6 +26,7 @@ function App() {
         <Route path="/history" element={<CallHistory />} />
         <Route path="/pairing" element={<Pairing />} />
         <Route path="/gvtrunk" element={<GVTrunk />} />
+        <Route path="/gvbridge" element={<GVBridge />} />
       </Routes>
     </Layout>
   );
