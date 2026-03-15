@@ -14,6 +14,8 @@ public class CallManager
     private readonly ILogger<CallManager> _logger;
     private readonly RotaryPhoneConfig _phoneConfig;
     private readonly IBluetoothDeviceManager? _deviceManager;
+    private readonly ICallAdapterRegistry? _adapterRegistry;
+    private ICallAdapter? _boundAdapter;
     private readonly int _rtpPort;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
@@ -67,7 +69,8 @@ public class CallManager
         RotaryPhoneConfig phoneConfig,
         int rtpPort = 49000,
         ICallHistoryService? callHistoryService = null,
-        IBluetoothDeviceManager? deviceManager = null)
+        IBluetoothDeviceManager? deviceManager = null,
+        ICallAdapterRegistry? adapterRegistry = null)
     {
         _sipAdapter = sipAdapter;
         _bluetoothAdapter = bluetoothAdapter;
@@ -77,6 +80,7 @@ public class CallManager
         _rtpPort = rtpPort;
         _callHistoryService = callHistoryService;
         _deviceManager = deviceManager;
+        _adapterRegistry = adapterRegistry;
         _currentState = CallState.Idle;
     }
 
@@ -107,7 +111,61 @@ public class CallManager
             _deviceManager.OnScoAudioDisconnected += HandleScoDisconnected;
         }
 
+        // Call adapter registry (multi-mode support)
+        if (_adapterRegistry != null)
+        {
+            _adapterRegistry.OnModeChanged += _ => RebindAdapterEvents();
+            RebindAdapterEvents();
+        }
+
         _logger.LogInformation("CallManager initialized successfully");
+    }
+
+    private void RebindAdapterEvents()
+    {
+        if (_adapterRegistry == null) return;
+
+        // Unsubscribe from previous adapter
+        if (_boundAdapter != null)
+        {
+            _boundAdapter.OnIncomingCall -= HandleAdapterIncomingCall;
+            _boundAdapter.OnCallAnswered -= HandleAdapterCallAnswered;
+            _boundAdapter.OnCallEnded -= HandleAdapterCallEnded;
+        }
+
+        try
+        {
+            _boundAdapter = _adapterRegistry.ActiveAdapter;
+        }
+        catch (InvalidOperationException)
+        {
+            _boundAdapter = null;
+            _logger.LogWarning("No active call adapter available");
+            return;
+        }
+
+        // Subscribe to new adapter
+        _boundAdapter.OnIncomingCall += HandleAdapterIncomingCall;
+        _boundAdapter.OnCallAnswered += HandleAdapterCallAnswered;
+        _boundAdapter.OnCallEnded += HandleAdapterCallEnded;
+
+        _logger.LogInformation("CallManager bound to adapter: {Mode}", _boundAdapter.Mode);
+    }
+
+    private void HandleAdapterIncomingCall(string phoneNumber)
+    {
+        HandleBluetoothIncomingCall(phoneNumber);
+    }
+
+    private void HandleAdapterCallAnswered()
+    {
+        HandleCallAnsweredOnCellPhone();
+    }
+
+    private void HandleAdapterCallEnded()
+    {
+        if (CurrentState == CallState.Idle) return;
+        HandleBluetoothCallEnded();
     }
 
     public void HandleHookChange(bool isOffHook)
