@@ -12,6 +12,7 @@ using RotaryPhoneController.GVTrunk.Extensions;
 using RotaryPhoneController.GVTrunk.Interfaces;
 using RotaryPhoneController.GVBridge.Extensions;
 using RotaryPhoneController.GVBridge.Adapters;
+using RotaryPhoneController.Core.Diagnostics;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -257,10 +258,22 @@ builder.Services.AddSingleton<CallManager>(sp =>
     return firstPhone;
 });
 
+// Register SIP diagnostics service (singleton + hosted for periodic INVITE timeout checks)
+builder.Services.AddSingleton<SipDiagnosticService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SipDiagnosticService>());
+
 builder.Services.AddGVTrunk(builder.Configuration);
 builder.Services.AddGVBridge(builder.Configuration);
 
 var app = builder.Build();
+
+// Wire SIP diagnostic event: forward SIP messages from adapter to diagnostics service
+var sipAdapter = app.Services.GetRequiredService<ISipAdapter>();
+var sipDiagnostics = app.Services.GetRequiredService<SipDiagnosticService>();
+if (sipAdapter is SIPSorceryAdapter sorceryAdapter)
+{
+    sorceryAdapter.OnSipMessageLogged += sipDiagnostics.HandleSipMessage;
+}
 
 // Initialize IBluetoothDeviceManager (starts bt_manager.py subprocess)
 var deviceManager = app.Services.GetRequiredService<IBluetoothDeviceManager>();

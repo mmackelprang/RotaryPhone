@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Diagnostics;
 
 namespace RotaryPhoneController.Core.HT801;
 
@@ -251,6 +252,18 @@ public class HT801ConfigService : IHT801ConfigService
 
         result.IsValid = result.Items.All(i => i.Match || i.WasFixed);
         return result;
+    }
+
+    /// <summary>
+    /// Compare expected vs actual configuration on the HT801 device.
+    /// Returns a list of ConfigParameter records for the diagnostics UI.
+    /// </summary>
+    public async Task<List<ConfigParameter>> CompareConfigAsync(string phoneId)
+    {
+        var result = await ValidateDeviceAsync(phoneId, autoFix: false);
+        return result.Items.Select(item => new ConfigParameter(
+            item.Setting, item.PValue, item.Expected, item.Actual, item.Match
+        )).ToList();
     }
 
     /// <summary>

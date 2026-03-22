@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.SignalR;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Server.Hubs;
 
@@ -16,6 +17,7 @@ public class SignalRNotifierService : IHostedService
     private readonly ISipAdapter _sipAdapter;
     private readonly AppConfiguration _config;
     private readonly IBluetoothDeviceManager? _deviceManager;
+    private readonly SipDiagnosticService _diagnostics;
     private bool _lastBluetoothConnected;
 
     public SignalRNotifierService(
@@ -25,6 +27,7 @@ public class SignalRNotifierService : IHostedService
         IBluetoothHfpAdapter bluetoothAdapter,
         ISipAdapter sipAdapter,
         AppConfiguration config,
+        SipDiagnosticService diagnostics,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -33,6 +36,7 @@ public class SignalRNotifierService : IHostedService
         _bluetoothAdapter = bluetoothAdapter;
         _sipAdapter = sipAdapter;
         _config = config;
+        _diagnostics = diagnostics;
         _deviceManager = deviceManager;
     }
 
@@ -63,6 +67,16 @@ public class SignalRNotifierService : IHostedService
             _deviceManager.OnPairingRequest += req =>
                 _hubContext.Clients.All.SendAsync("PairingRequest", req.Address, req.Type, req.Passkey);
         }
+
+        // Subscribe to SIP diagnostic events for real-time broadcasting
+        _diagnostics.OnSipMessageLogged += entry =>
+            _hubContext.Clients.All.SendAsync("SipMessage", entry);
+        _diagnostics.OnDiagnosisGenerated += (issue, suggestions) =>
+            _hubContext.Clients.All.SendAsync("SipDiagnosis", issue, suggestions);
+        _diagnostics.OnHt801HealthUpdate += status =>
+            _hubContext.Clients.All.SendAsync("Ht801Health", status);
+        _diagnostics.OnCallTimelineEvent += entry =>
+            _hubContext.Clients.All.SendAsync("CallTimeline", entry);
 
         // Track initial Bluetooth state
         _lastBluetoothConnected = _bluetoothAdapter.IsConnected;
