@@ -17,8 +17,11 @@ public class GVBrowserAdapterTests
         var config = Options.Create(new GVBridgeConfig { WebSocketPort = 0 });
         var serilogLogger = new Mock<Serilog.ILogger>().Object;
         var bridgeService = new GVBridgeService(config, serilogLogger);
+        var audioConfig = Options.Create(new GVBridgeConfig { LocalRtpPort = 0 });
+        var audioBridgeLogger = new Mock<ILogger<GVAudioBridgeService>>().Object;
+        var audioBridge = new GVAudioBridgeService(bridgeService, audioConfig, audioBridgeLogger);
         var logger = new Mock<ILogger<GVBrowserAdapter>>().Object;
-        return new GVBrowserAdapter(bridgeService, logger);
+        return new GVBrowserAdapter(bridgeService, audioBridge, logger);
     }
 
     [Fact]
