@@ -197,7 +197,7 @@ public class GVTrunkAdapter : ITrunkAdapter, IDisposable
         return _activeCallId;
     }
 
-    public void SendInviteToHT801(string extensionToRing, string targetIP)
+    public void SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
     {
         _logger.Debug("GVTrunk SendInviteToHT801 called — delegating to primary SIP adapter");
     }
