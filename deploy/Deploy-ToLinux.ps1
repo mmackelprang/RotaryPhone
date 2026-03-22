@@ -119,6 +119,24 @@ if (Test-Path $scriptsDir) {
   scp -r ($scriptsDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
 }
 
+# Copy Chrome extension (GV Bridge)
+$extensionDir = Join-Path $RepoRoot "ChromeExtension"
+if (Test-Path $extensionDir) {
+  Write-Host "  Copying Chrome extension..." -ForegroundColor Yellow
+  ssh $SshTarget "mkdir -p ${TargetPath}/ChromeExtension"
+  scp -r ($extensionDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+}
+
+# Copy deploy scripts (setup-gvbridge.sh, etc.)
+$deployScripts = Join-Path $RepoRoot "deploy"
+$setupScript = Join-Path $deployScripts "setup-gvbridge.sh"
+if (Test-Path $setupScript) {
+  Write-Host "  Copying deploy scripts..." -ForegroundColor Yellow
+  ssh $SshTarget "mkdir -p ${TargetPath}/deploy"
+  scp ($setupScript -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
+  ssh $SshTarget "chmod +x ${TargetPath}/deploy/*.sh 2>/dev/null"
+}
+
 # Ensure binary is executable
 ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server && chmod +x ${TargetPath}/scripts/*.py 2>/dev/null"
 

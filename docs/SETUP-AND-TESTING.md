@@ -79,12 +79,6 @@ The GVBridge config section should already be in `appsettings.json` with default
 | `LocalIp` | Radio box LAN IP — `hostname -I` |
 | `HT801Ip` | HT801 ATA IP — check router DHCP or HT801 web UI |
 
-### Create the data directory
-
-```bash
-ssh radio "mkdir -p /opt/rotary-phone/data"
-```
-
 ---
 
 ## Step 2: Deploy
@@ -96,19 +90,7 @@ cd D:\prj\RotaryPhone
 powershell -File deploy/Deploy-ToLinux.ps1
 ```
 
-Or manually:
-
-```bash
-dotnet publish src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj \
-  --configuration Release --runtime linux-x64 -f net10.0 --self-contained \
-  --output publish/linux-x64
-
-# Copy ALL files (not just the executable)
-ssh radio "sudo systemctl stop rotary-phone"
-scp -r publish/linux-x64/* mmack@radio:/opt/rotary-phone/
-ssh radio "chmod +x /opt/rotary-phone/RotaryPhoneController.Server"
-ssh radio "sudo systemctl start rotary-phone"
-```
+This automatically deploys the .NET app, scripts, Chrome extension, and setup script.
 
 Verify the service started:
 
@@ -123,21 +105,42 @@ GVBridgeService: WebSocket server listening on ws://127.0.0.1:8765
 
 ---
 
-## Step 3: Load the Chrome Extension
+## Step 3: Run the Automated Setup (first time only)
 
-On the machine running Chrome (the radio box, or your dev machine for testing):
+SSH into the radio box and run the setup script:
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top-right toggle)
-3. Click **Load unpacked**
-4. Select the `ChromeExtension/` folder from the repo root
-5. The extension appears as "RotaryPhone GV Bridge"
+```bash
+ssh radio "bash /opt/rotary-phone/deploy/setup-gvbridge.sh"
+```
 
-### After loading:
+This automatically:
+- Creates data directories
+- Creates a separate Chrome profile for the GV Bridge
+- Installs a systemd user service (`gv-bridge-chrome.service`) that runs Chrome with `--load-extension` (no manual extension loading needed)
+- Sets up autostart so Chrome launches GV on boot
+- The GV Chrome runs with `--window-position=10000,10000` so it's off-screen behind the kiosk
 
-1. Navigate to `https://voice.google.com` and log in with your Google account
-2. The extension's service worker connects to `ws://127.0.0.1:8765` automatically
-3. Check the service worker console: `chrome://extensions` → GV Bridge card → "Service Worker" link → look for `[GVBridge] Connected to bridge server`
+### First-time Google Voice login (only manual step)
+
+```bash
+# Start the GV Chrome instance
+ssh radio "systemctl --user start gv-bridge-chrome"
+
+# Find and bring the Chrome window to front to log in
+ssh radio "wmctrl -a Chrome"  # or Alt+Tab on the radio box
+```
+
+1. Log into your Google account at `voice.google.com`
+2. The extension auto-connects (check: `curl http://localhost:5004/api/gvbridge/status`)
+3. After login, the session persists — no need to log in again
+
+### Dev machine (for testing without the radio box)
+
+If testing locally, load the extension manually:
+
+1. Open `chrome://extensions` → Enable Developer mode
+2. Click "Load unpacked" → Select `ChromeExtension/` from the repo
+3. Navigate to `https://voice.google.com`
 
 ---
 
