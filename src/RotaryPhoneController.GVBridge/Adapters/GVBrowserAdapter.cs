@@ -8,6 +8,7 @@ namespace RotaryPhoneController.GVBridge.Adapters;
 public class GVBrowserAdapter : ICallAdapter
 {
     private readonly GVBridgeService _bridgeService;
+    private readonly GVAudioBridgeService _audioBridge;
     private readonly ILogger<GVBrowserAdapter> _logger;
     private string? _activeCallId;
 
@@ -20,9 +21,10 @@ public class GVBrowserAdapter : ICallAdapter
     public event Action? OnCallEnded;
     public event Action<string>? OnDtmfReceived;
 
-    public GVBrowserAdapter(GVBridgeService bridgeService, ILogger<GVBrowserAdapter> logger)
+    public GVBrowserAdapter(GVBridgeService bridgeService, GVAudioBridgeService audioBridge, ILogger<GVBrowserAdapter> logger)
     {
         _bridgeService = bridgeService;
+        _audioBridge = audioBridge;
         _logger = logger;
     }
 
@@ -34,11 +36,14 @@ public class GVBrowserAdapter : ICallAdapter
             _activeCallId = msg.CallId;
             OnIncomingCall?.Invoke(msg.From);
         };
-        _bridgeService.OnCallAnswered += _ => OnCallAnswered?.Invoke();
-        _bridgeService.OnCallEnded += _ =>
-        {
+        _bridgeService.OnCallAnswered += msg => {
+            OnCallAnswered?.Invoke();
+            Task.Run(() => _audioBridge.StartAsync());
+        };
+        _bridgeService.OnCallEnded += msg => {
             _activeCallId = null;
             OnCallEnded?.Invoke();
+            Task.Run(() => _audioBridge.StopAsync());
         };
         _bridgeService.OnDtmfReceived += msg => OnDtmfReceived?.Invoke(msg.Digit);
 

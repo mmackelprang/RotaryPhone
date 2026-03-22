@@ -210,7 +210,7 @@ public class GVBridgeService : IHostedService
 
         try
         {
-            var json = JsonSerializer.Serialize(message, message.GetType(), _jsonOptions);
+            var json = JsonSerializer.Serialize<ExtensionMessage>(message, _jsonOptions);
             var bytes = Encoding.UTF8.GetBytes(json);
             await _extensionSocket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
         }
@@ -230,12 +230,13 @@ public class GVBridgeService : IHostedService
     {
         while (!ct.IsCancellationRequested)
         {
-            await Task.Delay(10000, ct);
+            await Task.Delay(15000, ct);
 
             if (!IsExtensionConnected) continue;
 
-            // Check if pong was received within timeout
-            if ((DateTime.UtcNow - _lastPong).TotalSeconds > 15)
+            // MV3 service workers may briefly disconnect and reconnect (~20s alarm cycle).
+            // Allow a generous window before declaring the extension dead.
+            if ((DateTime.UtcNow - _lastPong).TotalSeconds > 45)
             {
                 _logger.Warning("Extension heartbeat timeout — disconnecting");
                 _extensionSocket?.Abort();

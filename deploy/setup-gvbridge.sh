@@ -22,8 +22,10 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/rotary-phone"
-CHROME_PROFILE_DIR="${HOME}/.config/gv-bridge-chrome"
 EXTENSION_DIR="${INSTALL_DIR}/ChromeExtension"
+# Chromium snap requires paths within ~/snap/chromium/common/ for filesystem access
+CHROME_PROFILE_DIR="${HOME}/snap/chromium/common/gv-bridge-profile"
+EXTENSION_DEPLOY_DIR="${CHROME_PROFILE_DIR}/Extension"
 DATA_DIR="${INSTALL_DIR}/data"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 AUTOSTART_DIR="${HOME}/.config/autostart"
@@ -52,8 +54,9 @@ fi
 log "Chrome extension found at ${EXTENSION_DIR}"
 
 # --- Step 3: Verify Chrome is available ---
+# Prefer Chromium (supports --load-extension; Google Chrome does not)
 CHROME_BIN=""
-for candidate in google-chrome google-chrome-stable chromium-browser chromium; do
+for candidate in chromium chromium-browser; do
     if command -v "$candidate" &>/dev/null; then
         CHROME_BIN="$candidate"
         break
@@ -61,10 +64,16 @@ for candidate in google-chrome google-chrome-stable chromium-browser chromium; d
 done
 
 if [ -z "$CHROME_BIN" ]; then
-    warn "No Chrome/Chromium found. Install with: sudo apt install google-chrome-stable"
+    warn "Chromium not found. Google Chrome does NOT support --load-extension."
+    warn "Install with: sudo snap install chromium"
     exit 1
 fi
 log "Using browser: ${CHROME_BIN}"
+
+# --- Step 3b: Copy extension to snap-accessible path ---
+log "Copying extension to snap-accessible path..."
+mkdir -p "${EXTENSION_DEPLOY_DIR}"
+cp -r "${EXTENSION_DIR}/"* "${EXTENSION_DEPLOY_DIR}/"
 
 # --- Step 4: Create systemd user service for GV Chrome ---
 log "Creating systemd user service: gv-bridge-chrome.service"
@@ -79,7 +88,7 @@ Type=simple
 # Wait for rotary-phone WebSocket server to start
 ExecStartPre=/bin/sleep 5
 ExecStart=${CHROME_BIN} \\
-    --load-extension=${EXTENSION_DIR} \\
+    --load-extension=${EXTENSION_DEPLOY_DIR} \\
     --user-data-dir=${CHROME_PROFILE_DIR} \\
     --no-first-run \\
     --disable-default-apps \\
@@ -108,7 +117,7 @@ cat > "${AUTOSTART_DIR}/gv-bridge-chrome.desktop" << EOF
 [Desktop Entry]
 Name=GV Bridge Chrome
 Comment=Google Voice Bridge for RotaryPhone
-Exec=${CHROME_BIN} --load-extension=${EXTENSION_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-background-timer-throttling --disable-renderer-backgrounding --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland https://voice.google.com
+Exec=${CHROME_BIN} --load-extension=${EXTENSION_DEPLOY_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-background-timer-throttling --disable-renderer-backgrounding --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland https://voice.google.com
 Terminal=false
 Type=Application
 X-GNOME-Autostart-enabled=true

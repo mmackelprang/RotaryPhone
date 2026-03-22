@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Bridges Google Voice web UI to the RotaryPhone controller",
   "permissions": [
+    "alarms",
     "tabCapture",
     "tabs",
     "scripting",

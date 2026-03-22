@@ -22,6 +22,7 @@ public static class GVBridgeServiceExtensions
 
         services.AddSingleton<GVBridgeService>();
         services.AddHostedService(sp => sp.GetRequiredService<GVBridgeService>());
+        services.AddSingleton<GVAudioBridgeService>();
 
         services.AddSingleton<GVBrowserAdapter>();
         services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVBrowserAdapter>());

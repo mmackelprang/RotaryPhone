@@ -5,6 +5,7 @@ using SIPSorcery.Net;
 using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Diagnostics;
 
 namespace RotaryPhoneController.Core;
 
@@ -21,6 +22,7 @@ public class SIPSorceryAdapter : ISipAdapter
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
     public event Action? OnIncomingCall;
+    public event Action<SipMessageEntry>? OnSipMessageLogged;
 
     /// <summary>
     /// Gets whether the SIP transport is currently listening
@@ -71,6 +73,13 @@ public class SIPSorceryAdapter : ISipAdapter
         }
     }
 
+    private void LogSipMessage(SipDirection direction, string method, string from, string to,
+        int? statusCode = null, string? statusText = null, string? callId = null, string? note = null)
+    {
+        OnSipMessageLogged?.Invoke(new SipMessageEntry(
+            DateTime.UtcNow, direction, method, from, to, statusCode, statusText, note, callId));
+    }
+
     private Task<SocketError> OnSIPRequestReceived(SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint, SIPRequest sipRequest)
     {
         _logger.Information("SIP Request received: {Method} from {RemoteEndPoint}", sipRequest.Method, remoteEndPoint);
@@ -82,21 +91,27 @@ public class SIPSorceryAdapter : ISipAdapter
             {
                 case SIPMethodsEnum.NOTIFY:
                     HandleNotify(sipRequest);
+                    LogSipMessage(SipDirection.Received, "NOTIFY", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 case SIPMethodsEnum.INFO:
                     HandleInfo(sipRequest);
+                    LogSipMessage(SipDirection.Received, "INFO", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 case SIPMethodsEnum.INVITE:
                     HandleInvite(sipRequest);
+                    LogSipMessage(SipDirection.Received, "INVITE", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 case SIPMethodsEnum.BYE:
                     HandleBye(sipRequest);
+                    LogSipMessage(SipDirection.Received, "BYE", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 case SIPMethodsEnum.REGISTER:
                     HandleRegister(sipRequest, localSIPEndPoint, remoteEndPoint);
+                    LogSipMessage(SipDirection.Received, "REGISTER", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 case SIPMethodsEnum.OPTIONS:
                     HandleOptions(sipRequest);
+                    LogSipMessage(SipDirection.Received, "OPTIONS", remoteEndPoint.ToString(), localSIPEndPoint.ToString(), callId: sipRequest.Header.CallId);
                     break;
                 default:
                     _logger.Debug("Unhandled SIP method: {Method}", sipRequest.Method);
@@ -116,6 +131,11 @@ public class SIPSorceryAdapter : ISipAdapter
         _logger.Information("SIP Response received: {StatusCode} {ReasonPhrase} from {RemoteEndPoint}",
             sipResponse.StatusCode, sipResponse.ReasonPhrase, remoteEndPoint);
         _logger.Debug("SIP Response details: {Response}", sipResponse.ToString());
+
+        LogSipMessage(SipDirection.Received, sipResponse.Header.CSeqMethod.ToString(),
+            remoteEndPoint.ToString(), localSIPEndPoint.ToString(),
+            sipResponse.StatusCode, sipResponse.ReasonPhrase,
+            callId: sipResponse.Header.CallId);
 
         // Detect HT801 answering our INVITE (user lifted handset while ringing)
         if (sipResponse.StatusCode == 200 && _pendingInviteRequest != null &&
@@ -334,7 +354,7 @@ public class SIPSorceryAdapter : ISipAdapter
         return null;
     }
 
-    public void SendInviteToHT801(string extensionToRing, string targetIP)
+    public void SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
     {
         try
         {
@@ -379,7 +399,7 @@ public class SIPSorceryAdapter : ISipAdapter
             inviteRequest.Header.ContentType = "application/sdp";
 
             // Create basic SDP for G.711 PCMU
-            var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
+            var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), localRtpPort);
             var sdp = CreateBasicSDP(localEndpoint);
             inviteRequest.Body = sdp;
             inviteRequest.Header.ContentLength = sdp.Length;
@@ -397,10 +417,14 @@ public class SIPSorceryAdapter : ISipAdapter
             if (sendResult != System.Net.Sockets.SocketError.Success)
             {
                 _logger.Error("INVITE send failed with socket error: {Error}", sendResult);
+                LogSipMessage(SipDirection.Sent, "INVITE", $"{localIP}:{_localPort}", targetEndpoint.ToString(),
+                    callId: inviteRequest.Header.CallId, note: $"Send failed: {sendResult}");
             }
             else
             {
                 _logger.Information("INVITE sent successfully to HT801");
+                LogSipMessage(SipDirection.Sent, "INVITE", $"{localIP}:{_localPort}", targetEndpoint.ToString(),
+                    callId: inviteRequest.Header.CallId);
             }
         }
         catch (Exception ex)

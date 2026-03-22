@@ -8,6 +8,7 @@ import CallHistory from './pages/CallHistory';
 import Pairing from './pages/Pairing';
 import GVTrunk from './pages/GVTrunk';
 import GVBridge from './pages/GVBridge';
+import Diagnostics from './pages/Diagnostics';
 
 function App() {
   useEffect(() => {
@@ -27,6 +28,7 @@ function App() {
         <Route path="/pairing" element={<Pairing />} />
         <Route path="/gvtrunk" element={<GVTrunk />} />
         <Route path="/gvbridge" element={<GVBridge />} />
+        <Route path="/diagnostics" element={<Diagnostics />} />
       </Routes>
     </Layout>
   );
