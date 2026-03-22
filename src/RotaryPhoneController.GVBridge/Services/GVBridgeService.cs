@@ -84,10 +84,12 @@ public class GVBridgeService : IHostedService
 
                 if (IsExtensionConnected)
                 {
-                    _logger.Warning("Rejecting additional WebSocket connection — already connected");
-                    context.Response.StatusCode = 409;
-                    context.Response.Close();
-                    continue;
+                    // Disconnect the old stale connection to accept the new one.
+                    // This handles page reloads where the old WS dies without a close frame.
+                    _logger.Warning("New WebSocket connection while already connected — replacing old connection");
+                    _extensionSocket?.Abort();
+                    // Brief delay for HandleConnectionAsync to finish cleanup
+                    await Task.Delay(100, ct);
                 }
 
                 var wsContext = await context.AcceptWebSocketAsync(null);
@@ -96,7 +98,8 @@ public class GVBridgeService : IHostedService
                 _logger.Information("Chrome extension connected");
                 OnConnectionChanged?.Invoke(true);
 
-                await HandleConnectionAsync(_extensionSocket, ct);
+                // Run connection handler without blocking the accept loop
+                _ = HandleConnectionAsync(_extensionSocket, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
