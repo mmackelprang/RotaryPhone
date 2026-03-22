@@ -152,12 +152,12 @@ public class GVAudioBridgeService : IDisposable
                     // Send via RTP
                     _rtpSession?.SendAudio(timestampIncrement, mulaw);
 
-                    Stats.InboundFramesSent++;
+                    Stats.RecordInboundSent();
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Error processing inbound audio frame");
-                    Stats.InboundErrors++;
+                    Stats.RecordInboundError();
                 }
             }
             else
@@ -191,12 +191,12 @@ public class GVAudioBridgeService : IDisposable
             // Send to Chrome extension via WebSocket
             _ = _bridgeService.SendAudioFrameAsync(pcm16k);
 
-            Stats.OutboundFramesReceived++;
+            Stats.RecordOutboundReceived();
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error processing outbound RTP packet");
-            Stats.OutboundErrors++;
+            Stats.RecordOutboundError();
         }
     }
 
@@ -292,9 +292,10 @@ internal static class MuLawEncoder
         int exponent = (mulaw >> 4) & 0x07;
         int mantissa = mulaw & 0x0F;
 
-        // Reconstruct the magnitude: place mantissa bits and add bias back.
-        // The decoded value = ((mantissa << 4) + MuLawBias) << exponent
-        int sample = ((mantissa << 4) + MuLawBias) << exponent;
+        // Reconstruct the magnitude per ITU-T G.711:
+        // mantissa << 3 restores the 4 mantissa bits to their original position,
+        // MuLawBias adds back the bias applied during encoding.
+        int sample = ((mantissa << 3) + MuLawBias) << exponent;
 
         if (sign != 0)
             sample = -sample;
@@ -308,15 +309,25 @@ internal static class MuLawEncoder
 /// </summary>
 public class AudioBridgeStats
 {
+    private long _inboundFramesSent;
+    private long _outboundFramesReceived;
+    private long _inboundErrors;
+    private long _outboundErrors;
+
     /// <summary>Number of PCM frames from WebSocket successfully encoded and sent as RTP.</summary>
-    public long InboundFramesSent { get; set; }
+    public long InboundFramesSent => Interlocked.Read(ref _inboundFramesSent);
 
     /// <summary>Number of RTP frames received from HT801 and forwarded to WebSocket.</summary>
-    public long OutboundFramesReceived { get; set; }
+    public long OutboundFramesReceived => Interlocked.Read(ref _outboundFramesReceived);
 
     /// <summary>Number of errors during inbound (WebSocket -> RTP) processing.</summary>
-    public long InboundErrors { get; set; }
+    public long InboundErrors => Interlocked.Read(ref _inboundErrors);
 
     /// <summary>Number of errors during outbound (RTP -> WebSocket) processing.</summary>
-    public long OutboundErrors { get; set; }
+    public long OutboundErrors => Interlocked.Read(ref _outboundErrors);
+
+    public void RecordInboundSent() => Interlocked.Increment(ref _inboundFramesSent);
+    public void RecordOutboundReceived() => Interlocked.Increment(ref _outboundFramesReceived);
+    public void RecordInboundError() => Interlocked.Increment(ref _inboundErrors);
+    public void RecordOutboundError() => Interlocked.Increment(ref _outboundErrors);
 }

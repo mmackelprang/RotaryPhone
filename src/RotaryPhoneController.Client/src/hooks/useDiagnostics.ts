@@ -134,14 +134,13 @@ export function useDiagnostics() {
     getDiagnosticsStatus()
       .then((res) => {
         const data = res.data;
-        if (data.sipMessages) setSipMessages(data.sipMessages);
-        if (data.timeline) setTimeline(data.timeline);
-        if (data.ht801Health) setHt801Health(data.ht801Health);
-        if (data.diagnoses) setDiagnoses(data.diagnoses);
-        if (data.gvBridgeStatus) setGvBridgeStatus(data.gvBridgeStatus);
-        if (data.rtpStats) setRtpStats(data.rtpStats);
-        if (data.sipServer) setSipServer(data.sipServer);
-        if (data.callState) setCallState(data.callState);
+        // Server returns camelCase: recentSipMessages, recentTimeline, ht801, sip, gvBridge, gvAudioBridge
+        if (data.recentSipMessages) setSipMessages(data.recentSipMessages);
+        if (data.recentTimeline) setTimeline(data.recentTimeline);
+        if (data.ht801) setHt801Health(data.ht801);
+        if (data.gvBridge) setGvBridgeStatus(data.gvBridge);
+        if (data.gvAudioBridge?.stats) setRtpStats(data.gvAudioBridge.stats);
+        if (data.sip) setSipServer(data.sip);
       })
       .catch((err) => {
         console.error('Failed to load diagnostics status:', err);
