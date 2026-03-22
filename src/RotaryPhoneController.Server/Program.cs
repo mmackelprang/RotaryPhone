@@ -25,6 +25,9 @@ Log.Logger = new LoggerConfiguration()
 // Use Serilog
 builder.Host.UseSerilog();
 
+// Register Serilog.ILogger in DI (GVTrunk/GVBridge services inject it directly)
+builder.Services.AddSingleton<Serilog.ILogger>(Log.Logger);
+
 // Bind configuration
 var appConfig = new AppConfiguration();
 builder.Configuration.GetSection("RotaryPhone").Bind(appConfig);
