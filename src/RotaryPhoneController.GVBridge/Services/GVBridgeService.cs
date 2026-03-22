@@ -84,12 +84,10 @@ public class GVBridgeService : IHostedService
 
                 if (IsExtensionConnected)
                 {
-                    // Disconnect the old stale connection to accept the new one.
-                    // This handles page reloads where the old WS dies without a close frame.
-                    _logger.Warning("New WebSocket connection while already connected — replacing old connection");
-                    _extensionSocket?.Abort();
-                    // Brief delay for HandleConnectionAsync to finish cleanup
-                    await Task.Delay(100, ct);
+                    _logger.Warning("Rejecting additional WebSocket connection — already connected");
+                    context.Response.StatusCode = 409;
+                    context.Response.Close();
+                    continue;
                 }
 
                 var wsContext = await context.AcceptWebSocketAsync(null);
