@@ -1,7 +1,16 @@
 // RotaryPhone GV Bridge — Content Script
-// Injected into voice.google.com to observe DOM and control calls
+// Injected into voice.google.com to observe DOM, control calls,
+// and maintain a persistent WebSocket to the .NET GVBridgeService.
+//
+// The WebSocket lives here (not in the service worker) because
+// MV3 service workers get suspended after ~30s, killing WebSockets.
+// Content scripts persist as long as the page is open.
 
 'use strict';
+
+const WS_URL = 'ws://127.0.0.1:8765';
+let ws = null;
+let backoff = 1000;
 
 // Stable ARIA selectors — update only this block if GV DOM changes
 const SELECTORS = {
@@ -19,6 +28,86 @@ const SELECTORS = {
 let callActive = false;
 let incomingDetected = false;
 
+// --- WebSocket Connection ---
+
+function connect() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch (e) {
+    console.error('[GVBridge] WebSocket creation failed:', e);
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    console.log('[GVBridge] Connected to bridge server');
+    backoff = 1000;
+    ws.send(JSON.stringify({ type: 'connected', version: '1.0.0' }));
+  };
+
+  ws.onclose = () => {
+    console.log('[GVBridge] Disconnected from bridge server');
+    ws = null;
+    scheduleReconnect();
+  };
+
+  ws.onerror = (e) => {
+    console.error('[GVBridge] WebSocket error:', e);
+  };
+
+  ws.onmessage = ({ data }) => {
+    try {
+      const msg = JSON.parse(data);
+      handleBridgeMessage(msg);
+    } catch (e) {
+      console.error('[GVBridge] Error parsing message:', e);
+    }
+  };
+}
+
+function scheduleReconnect() {
+  const delay = Math.min(backoff, 30000);
+  console.log(`[GVBridge] Reconnecting in ${delay}ms...`);
+  setTimeout(connect, delay);
+  backoff = Math.min(backoff * 2, 30000);
+}
+
+function sendToServer(msg) {
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+  } else {
+    console.warn('[GVBridge] Cannot send — not connected to bridge');
+  }
+}
+
+function handleBridgeMessage(msg) {
+  switch (msg.type) {
+    case 'dial':
+      dial(msg.number);
+      break;
+    case 'answer':
+      answer();
+      break;
+    case 'hangup':
+      hangup();
+      break;
+    case 'sendSms':
+      sendSms(msg.to, msg.body);
+      break;
+    case 'ping':
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      }
+      break;
+    default:
+      console.log('[GVBridge] Unknown bridge message:', msg.type);
+  }
+}
+
 // --- DOM Observation ---
 
 function setupObserver() {
@@ -35,7 +124,7 @@ function handleMutations(mutations) {
     if (/incoming call/i.test(label) && !incomingDetected) {
       incomingDetected = true;
       const callerInfo = extractCallerFromDialog(dialog);
-      sendToBridge({
+      sendToServer({
         type: 'incomingCall',
         from: callerInfo || 'Unknown',
         callId: `gv-${Date.now()}`
@@ -48,18 +137,17 @@ function handleMutations(mutations) {
   if (timer && incomingDetected && !callActive) {
     callActive = true;
     incomingDetected = false;
-    sendToBridge({ type: 'callAnswered', callId: `gv-${Date.now()}` });
+    sendToServer({ type: 'callAnswered', callId: `gv-${Date.now()}` });
   }
 
   // Check for call ended (timer disappeared)
   if (!timer && callActive) {
     callActive = false;
-    sendToBridge({ type: 'callEnded', callId: `gv-${Date.now()}` });
+    sendToServer({ type: 'callEnded', callId: `gv-${Date.now()}` });
   }
 }
 
 function extractCallerFromDialog(dialog) {
-  // Try to find caller number or name in dialog content
   const text = dialog.textContent || '';
   const phoneMatch = text.match(/(\+?\d[\d\s\-().]{6,})/);
   return phoneMatch ? phoneMatch[1].trim() : text.substring(0, 50).trim();
@@ -129,7 +217,6 @@ function hangup() {
 
 function sendSms(to, body) {
   console.log('[GVBridge] sendSms not fully implemented — requires thread navigation');
-  // Future: navigate to thread, inject text, click send
 }
 
 // --- fetch() interceptor for SMS data ---
@@ -144,7 +231,7 @@ window.fetch = async function(url, opts) {
         if (data?.conversation?.message) {
           for (const msg of data.conversation.message) {
             if (msg.type === 'INCOMING_TEXT') {
-              sendToBridge({
+              sendToServer({
                 type: 'smsReceived',
                 from: msg.sender || 'Unknown',
                 body: msg.text || '',
@@ -162,36 +249,7 @@ window.fetch = async function(url, opts) {
   return resp;
 };
 
-// --- Message Handling ---
-
-function sendToBridge(msg) {
-  chrome.runtime.sendMessage(msg).catch(err => {
-    console.warn('[GVBridge] Failed to send to background:', err);
-  });
-}
-
-// Listen for commands from background service worker
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  switch (msg.type) {
-    case 'dial':
-      dial(msg.number);
-      break;
-    case 'answer':
-      answer();
-      break;
-    case 'hangup':
-      hangup();
-      break;
-    case 'sendSms':
-      sendSms(msg.to, msg.body);
-      break;
-    default:
-      console.log('[GVBridge] Unknown command:', msg.type);
-  }
-  sendResponse({ ok: true });
-  return false;
-});
-
 // --- Init ---
 setupObserver();
+connect();
 console.log('[GVBridge] Content script loaded on', window.location.href);
