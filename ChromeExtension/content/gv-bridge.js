@@ -27,6 +27,7 @@ const SELECTORS = {
 
 let callActive = false;
 let incomingDetected = false;
+let audioCaptureActive = false;
 
 // --- WebSocket Connection ---
 
@@ -84,6 +85,63 @@ function sendToServer(msg) {
   }
 }
 
+// --- Audio Bridge Control ---
+
+async function startAudioCapture() {
+  if (audioCaptureActive) {
+    console.log('[GVBridge] Audio capture already active');
+    return;
+  }
+
+  try {
+    // 1. Request tabCapture streamId from service worker
+    console.log('[GVBridge] Requesting tabCapture streamId...');
+    const captureResp = await chrome.runtime.sendMessage({ type: 'requestTabCapture' });
+    if (!captureResp?.ok) {
+      console.error('[GVBridge] Failed to get tabCapture streamId:', captureResp?.error);
+      return;
+    }
+    const streamId = captureResp.streamId;
+    console.log('[GVBridge] Got tabCapture streamId');
+
+    // 2. Ensure offscreen document exists
+    console.log('[GVBridge] Ensuring offscreen document...');
+    const offscreenResp = await chrome.runtime.sendMessage({ type: 'createOffscreen' });
+    if (!offscreenResp?.ok) {
+      console.error('[GVBridge] Failed to create offscreen doc:', offscreenResp?.error);
+      return;
+    }
+
+    // 3. Start capture in offscreen document
+    console.log('[GVBridge] Starting audio capture in offscreen document...');
+    const startResp = await chrome.runtime.sendMessage({
+      type: 'startCapture',
+      streamId: streamId,
+    });
+    if (!startResp?.ok) {
+      console.error('[GVBridge] Failed to start capture:', startResp?.error);
+      return;
+    }
+
+    audioCaptureActive = true;
+    console.log('[GVBridge] Audio capture pipeline active');
+  } catch (err) {
+    console.error('[GVBridge] Error starting audio capture:', err);
+  }
+}
+
+async function stopAudioCapture() {
+  if (!audioCaptureActive) return;
+
+  try {
+    await chrome.runtime.sendMessage({ type: 'stopCapture' });
+    console.log('[GVBridge] Audio capture stopped');
+  } catch (err) {
+    console.error('[GVBridge] Error stopping audio capture:', err);
+  }
+  audioCaptureActive = false;
+}
+
 function handleBridgeMessage(msg) {
   switch (msg.type) {
     case 'dial':
@@ -102,6 +160,14 @@ function handleBridgeMessage(msg) {
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'pong' }));
       }
+      break;
+    case 'audioFrame':
+      // Inbound audio from bridge server → forward to offscreen for playback
+      chrome.runtime.sendMessage({
+        type: 'audioFrame',
+        pcm: msg.pcm,
+        direction: 'playback',
+      });
       break;
     default:
       console.log('[GVBridge] Unknown bridge message:', msg.type);
@@ -138,12 +204,16 @@ function handleMutations(mutations) {
     callActive = true;
     incomingDetected = false;
     sendToServer({ type: 'callAnswered', callId: `gv-${Date.now()}` });
+    // Start capturing tab audio for the active call
+    startAudioCapture();
   }
 
   // Check for call ended (timer disappeared)
   if (!timer && callActive) {
     callActive = false;
     sendToServer({ type: 'callEnded', callId: `gv-${Date.now()}` });
+    // Stop audio capture when call ends
+    stopAudioCapture();
   }
 }
 
@@ -248,6 +318,17 @@ window.fetch = async function(url, opts) {
 
   return resp;
 };
+
+// --- Extension message listener (receives audioFrames relayed from offscreen via background) ---
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'audioFrame' && msg.direction === 'capture') {
+    // Captured tab audio → forward to bridge server via WebSocket
+    sendToServer({ type: 'audioFrame', pcm: msg.pcm });
+  }
+  // Return false for synchronous handling
+  return false;
+});
 
 // --- Init ---
 setupObserver();
