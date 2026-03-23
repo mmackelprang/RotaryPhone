@@ -24,6 +24,7 @@ public class SipDiagnosticService : IHostedService, IDisposable
     private bool _isRegistered;
     private DateTime? _lastRegisterReceived;
     private int? _registrationExpiresIn;
+    private static readonly TimeSpan RegistrationStaleThreshold = TimeSpan.FromHours(2);
 
     // Call timeline
     private readonly LinkedList<CallTimelineEntry> _timeline = new();
@@ -205,18 +206,53 @@ public class SipDiagnosticService : IHostedService, IDisposable
 
     /// <summary>
     /// Returns current HT801 health snapshot.
+    /// Derives registration state from both the event flag AND the message buffer
+    /// (in case the REGISTER event was missed during a restart).
     /// </summary>
     public Ht801HealthStatus GetHt801Health()
     {
+        // If we haven't caught a REGISTER event, scan the buffer for recent ones
+        if (!_isRegistered || _lastRegisterReceived == null)
+        {
+            RefreshRegistrationFromBuffer();
+        }
+
+        // Consider registration stale if we haven't seen a REGISTER in a long time
+        var isRegistered = _isRegistered
+            && _lastRegisterReceived.HasValue
+            && (DateTime.UtcNow - _lastRegisterReceived.Value) < RegistrationStaleThreshold;
+
         return new Ht801HealthStatus(
-            IsReachable: _isRegistered,
+            IsReachable: _lastRegisterReceived.HasValue,
             PingMs: null,
-            IsRegistered: _isRegistered,
+            IsRegistered: isRegistered,
             RegistrationExpiresIn: _registrationExpiresIn,
             LastRegisterReceived: _lastRegisterReceived,
             HookState: null,
             FirmwareVersion: null
         );
+    }
+
+    /// <summary>
+    /// Scan the message buffer for REGISTER messages we may have missed as events.
+    /// This handles the case where the HT801 registered before our event wiring was set up,
+    /// or during a service restart.
+    /// </summary>
+    private void RefreshRegistrationFromBuffer()
+    {
+        lock (_lock)
+        {
+            var lastRegister = _messageBuffer
+                .Where(m => string.Equals(m.Method, "REGISTER", StringComparison.OrdinalIgnoreCase)
+                         && m.Direction == SipDirection.Received)
+                .LastOrDefault();
+
+            if (lastRegister != null)
+            {
+                _isRegistered = true;
+                _lastRegisterReceived = lastRegister.Timestamp;
+            }
+        }
     }
 
     private void AddTimelineEvent(string eventType, string description, string? callId)
@@ -255,8 +291,12 @@ public class SipDiagnosticService : IHostedService, IDisposable
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("SipDiagnosticService starting — INVITE timeout check every 3s");
-        _timer = new Timer(_ => CheckInviteTimeouts(), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+        _logger.LogInformation("SipDiagnosticService starting — periodic checks every 3s");
+        _timer = new Timer(_ =>
+        {
+            CheckInviteTimeouts();
+            RefreshRegistrationFromBuffer();
+        }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
         return Task.CompletedTask;
     }
 
