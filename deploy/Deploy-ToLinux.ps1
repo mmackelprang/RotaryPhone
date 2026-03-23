@@ -119,12 +119,14 @@ if (Test-Path $scriptsDir) {
   scp -r ($scriptsDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
 }
 
-# Copy Chrome extension (GV Bridge)
+# Copy Chrome extension (GV Bridge) to both deploy path and snap-accessible path
 $extensionDir = Join-Path $RepoRoot "ChromeExtension"
 if (Test-Path $extensionDir) {
   Write-Host "  Copying Chrome extension..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/ChromeExtension"
   scp -r ($extensionDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+  # Also update the snap-accessible copy if it exists (for running Chromium)
+  ssh $SshTarget "if [ -d ~/snap/chromium/common/gv-bridge-profile/Extension ]; then cp -r ${TargetPath}/ChromeExtension/* ~/snap/chromium/common/gv-bridge-profile/Extension/ && echo '  Extension updated in snap profile'; fi"
 }
 
 # Copy deploy scripts (setup-gvbridge.sh, etc.)
