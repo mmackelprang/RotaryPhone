@@ -1,575 +1,260 @@
-# GVBridge — Setup Guide
-**Component:** `RotaryPhoneController.GVBridge`  
-**Repo:** RotaryPhone  
-**Last updated:** March 2026  
+# GV Bridge — Setup Guide
 
-This guide covers everything needed to get the GVBridge component running from a fresh clone — prerequisites, folder layout, first-run configuration, Chrome extension loading, and a step-by-step smoke test. Read this before opening a Claude Code session.
+**Last updated:** March 23, 2026
 
----
+This guide covers setting up the GV Bridge system on a fresh Ubuntu box. The GV Bridge enables incoming Google Voice calls to ring a physical rotary phone connected via a Grandstream HT801 ATA.
+
+## Architecture
+
+```
+Google Voice call
+  → Chromium browser (voice.google.com + extension)
+  → Content script detects incoming call via button polling
+  → Service worker relays event via HTTP POST
+  → .NET RotaryPhoneController server receives event
+  → CallManager sends SIP INVITE to HT801
+  → HT801 rings the rotary phone
+  → User picks up → 200 OK → call connected
+```
 
 ## Prerequisites
 
-### On the Raspberry Pi (runtime host)
-
 | Requirement | Version | Notes |
 |---|---|---|
-| .NET SDK | 8.0+ | `dotnet --version` to verify |
-| .NET Runtime (ARM64) | 8.0+ | Included with SDK |
-| NAudio.Core | via NuGet | Cross-platform; no ALSA/PulseAudio dependency |
-| SQLite | system | `sudo apt install sqlite3` if not present |
-| Chrome / Chromium | 116+ | Required for `tabCapture` + `offscreen` APIs |
+| Ubuntu | 24.04+ | Tested on Ubuntu 24.04 (x64) |
+| .NET SDK | 10.0 | For building from source |
+| Chromium | 146+ | Installed via snap (`sudo snap install chromium`) |
+| Grandstream HT801 | Firmware 1.0.5+ | Factory reset recommended before setup |
+| Google Voice account | — | With a phone number |
+
+## Hardware Setup
+
+### HT801 ATA Configuration
+
+1. Connect HT801 to your LAN and note its IP address
+2. Log into the web interface at `http://<HT801-IP>`
+3. Go to **Port Settings** and configure:
+   - **SIP Server**: `<radio-box-IP>` (e.g., `192.168.86.50`)
+   - **SIP User ID**: `1000`
+   - **SIP Transport**: `UDP`
+   - **SIP Registration**: Checked
+   - **Enable SIP NOTIFY Authentication**: Unchecked
+4. Verify **Port Status** shows "Registered"
+
+**Important:** If the HT801 was previously configured, do a **factory reset** first. Hidden state can cause incoming SIP to be silently dropped even when settings appear correct.
+
+### Rotary Phone
+
+Connect the rotary phone to the HT801's FXS (Phone) port using a standard RJ11 cable.
+
+## Deployment
+
+### Quick Deploy (from Windows build machine)
+
+```powershell
+# Build and deploy to the radio box
+.\deploy\Deploy-ToLinux.ps1 -TargetHost radio -Runtime linux-x64
+
+# Run the GV Bridge setup on the radio box
+ssh mmack@radio "bash /opt/rotary-phone/deploy/setup-gvbridge.sh"
+```
+
+### What the setup script does
+
+1. Installs Chromium snap if not present
+2. Copies the Chrome extension to a snap-accessible path
+3. Creates a systemd user service (`gv-bridge-chrome.service`)
+4. Installs Chromium notification/autoplay policies
+5. Creates a desktop shortcut for manually starting the browser
+6. Creates an autostart entry as backup
+
+### What starts automatically on boot
+
+| Service | Type | Starts |
+|---------|------|--------|
+| `rotary-phone.service` | System (systemd) | On boot |
+| `gv-bridge-chrome.service` | User (systemd --user) | On user login |
+
+## First-Time Setup (one-time steps)
+
+After deploying, these steps need to be done once on the radio box's display:
+
+### 1. Start the GV Bridge browser
 
 ```bash
-# Verify .NET
-dotnet --version
-
-# Install SQLite if missing
-sudo apt install sqlite3
-
-# Install Chromium on Pi OS
-sudo apt install chromium-browser
+systemctl --user start gv-bridge-chrome
 ```
 
-### On the development machine (build host)
+Or click the **"GV Bridge"** desktop shortcut.
 
-| Requirement | Version |
-|---|---|
-| .NET SDK | 8.0+ |
-| Node.js | 18+ (for React ClientApp) |
-| Chrome | 116+ |
-| Git | any recent |
+### 2. Make the window visible
 
----
-
-## Step 1 — Repo Layout After Adding This Component
-
-Run these commands from your repo root to create the new project structure before opening Claude Code:
+The browser starts off-screen by default. Temporarily make it visible:
 
 ```bash
-# From repo root
-mkdir -p RotaryPhoneController.GVBridge/{Adapters,Services,Models,Interfaces,Registry,Api,Components,Extensions}
-mkdir -p RotaryPhoneController.GVBridge.Tests
-mkdir -p ChromeExtension/{background,content,offscreen,icons}
+# Edit the service file
+nano ~/.config/systemd/user/gv-bridge-chrome.service
+# Change: --window-position=10000,10000  →  --window-position=50,50
+systemctl --user daemon-reload
+systemctl --user restart gv-bridge-chrome
 ```
 
-The full expected layout after implementation:
+### 3. Log into Google Voice
 
-```
-RotaryPhone/                                        ← repo root
-├── RotaryPhoneController.Core/                     # Existing — interfaces promoted here
-│   └── Interfaces/
-│       ├── ICallAdapter.cs                         # NEW (promoted from GVBridge)
-│       ├── ICallAdapterRegistry.cs                 # NEW (promoted from GVBridge)
-│       ├── ISmsProvider.cs                         # NEW (promoted from GVTrunk)
-│       └── ICallLogService.cs                      # NEW (promoted from GVTrunk)
-├── RotaryPhoneController.GVBridge/                 # NEW — Razor Class Library
-│   ├── Adapters/
-│   │   └── GVBrowserAdapter.cs
-│   ├── Services/
-│   │   ├── GVBridgeService.cs                      # WebSocket server
-│   │   ├── AudioBridge.cs                          # PCM ↔ G.711/RTP
-│   │   ├── GVSmsService.cs
-│   │   └── CallLogService.cs
-│   ├── Models/
-│   │   ├── GVBridgeConfig.cs
-│   │   ├── ExtensionMessage.cs
-│   │   ├── CallLogEntry.cs
-│   │   └── SmsNotification.cs
-│   ├── Interfaces/
-│   │   ├── ICallAdapter.cs                         # Also promoted to Core
-│   │   ├── ICallAdapterRegistry.cs
-│   │   ├── ISmsProvider.cs
-│   │   └── ICallLogService.cs
-│   ├── Registry/
-│   │   ├── CallAdapterRegistry.cs
-│   │   └── CallAdapterMode.cs
-│   ├── Api/
-│   │   ├── GVBridgeController.cs
-│   │   └── GVBridgeHub.cs
-│   ├── Components/
-│   │   ├── GVBridgeDashboard.razor
-│   │   ├── ConnectionModeSelector.razor            # Switches BT / SIP / GVBrowser
-│   │   ├── BridgeStatusPanel.razor
-│   │   ├── CallHistoryTable.razor
-│   │   ├── SmsNotificationsPanel.razor
-│   │   └── OutboundDialPanel.razor
-│   ├── Extensions/
-│   │   └── GVBridgeServiceExtensions.cs
-│   └── RotaryPhoneController.GVBridge.csproj
-├── RotaryPhoneController.GVBridge.Tests/           # NEW
-│   └── RotaryPhoneController.GVBridge.Tests.csproj
-├── RotaryPhone/                                    # Existing React host — additive only
-│   ├── Program.cs                                  # + AddGVBridge / MapGVBridge
-│   └── ClientApp/src/
-│       ├── hooks/
-│       │   └── useGVBridge.ts                      # NEW
-│       └── components/
-│           ├── ConnectionModeSelector.tsx           # NEW
-│           └── gvbridge/
-│               ├── GVBridgeDashboard.tsx
-│               ├── BridgeStatusPanel.tsx
-│               ├── CallHistoryTable.tsx
-│               ├── SmsNotificationsPanel.tsx
-│               └── OutboundDialPanel.tsx
-└── ChromeExtension/                               # NEW — not a .NET project
-    ├── manifest.json
-    ├── background/
-    │   └── service-worker.js
-    ├── content/
-    │   └── gv-bridge.js
-    ├── offscreen/
-    │   ├── offscreen.html
-    │   └── audio-bridge.js
-    └── icons/
-        └── icon-*.png
-```
+Navigate to `voice.google.com` in the Chromium window and sign in with your Google account.
 
----
+### 4. Grant notification permission
 
-## Step 2 — Create the .csproj Files
+Click the **lock icon** in the Chromium address bar → **Site settings** → **Notifications** → **Allow**
 
-### `RotaryPhoneController.GVBridge.csproj`
+This is required for Google Voice to show incoming call UI in the browser.
 
-```xml
-<Project Sdk="Microsoft.NET.Sdk.Razor">
+### 5. Verify GV settings
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <AddRazorSupportForMvc>true</AddRazorSupportForMvc>
-  </PropertyGroup>
+In Google Voice settings (gear icon) → **Calls** → **Incoming calls** → **My devices**:
+- Ensure **"Web"** toggle is **ON**
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="1.*" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.*" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.*" />
-    <PackageReference Include="Microsoft.Extensions.Options" Version="8.*" />
-    <PackageReference Include="NAudio.Core" Version="2.*" />
-    <PackageReference Include="Serilog" Version="3.*" />
-    <PackageReference Include="Serilog.Extensions.Logging" Version="8.*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj" />
-  </ItemGroup>
-
-</Project>
-```
-
-### `RotaryPhoneController.GVBridge.Tests.csproj`
-
-```xml
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <IsPackable>false</IsPackable>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
-    <PackageReference Include="xunit" Version="2.*" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
-    <PackageReference Include="Moq" Version="4.*" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\RotaryPhoneController.GVBridge\RotaryPhoneController.GVBridge.csproj" />
-  </ItemGroup>
-
-</Project>
-```
-
-### Add both to the solution
+### 6. Move window back off-screen
 
 ```bash
-dotnet sln add RotaryPhoneController.GVBridge/RotaryPhoneController.GVBridge.csproj
-dotnet sln add RotaryPhoneController.GVBridge.Tests/RotaryPhoneController.GVBridge.Tests.csproj
+# Edit the service file
+nano ~/.config/systemd/user/gv-bridge-chrome.service
+# Change: --window-position=50,50  →  --window-position=10000,10000
+systemctl --user daemon-reload
+systemctl --user restart gv-bridge-chrome
 ```
 
----
+### 7. Switch to GVBrowser mode
 
-## Step 3 — Configuration
+```bash
+curl -X PUT http://localhost:5004/api/gvbridge/adapter/mode \
+  -H 'Content-Type: application/json' -d '{"mode":"GVBrowser"}'
+```
 
-Add the following block to `RotaryPhone/appsettings.json` (and `appsettings.Development.json` with local overrides):
+### 8. Verify everything
+
+```bash
+# Check extension connected
+curl -s http://localhost:5004/api/gvbridge/status
+# Expected: {"extensionConnected":true,"extensionVersion":"1.0.0","activeMode":"GVBrowser"}
+
+# Check HT801 registered
+curl -s http://localhost:5004/api/diagnostics/status | python3 -m json.tool
+```
+
+## Configuration
+
+### appsettings.Production.json
+
+The GVBridge section (update IPs for your network):
 
 ```json
-"GVBridge": {
-  "WebSocketPort": 8765,
-  "WebSocketHost": "127.0.0.1",
-  "LocalRtpPort": 5070,
-  "LocalIp": "192.168.1.20",
-  "HT801Ip": "192.168.1.21",
-  "HT801RtpPort": 5004,
-  "AudioSampleRateHz": 16000,
-  "AudioChannels": 1,
-  "PcmFrameMs": 20,
-  "ExtensionConnectTimeoutSeconds": 30,
-  "CallLogDbPath": "/home/pi/.local/share/rotaryphone/calllog.db",
-  "DefaultMode": "GVBrowser"
-}
-```
-
-**Values to update for your environment:**
-
-| Key | Where to find it |
-|---|---|
-| `LocalIp` | Pi's LAN IP — `hostname -I` on the Pi |
-| `HT801Ip` | HT801's LAN IP — check your router's DHCP table or the HT801 web UI |
-| `HT801RtpPort` | HT801 web UI → FXS Port Settings → Local RTP Port (default 5004) |
-| `CallLogDbPath` | Any writable path on the Pi; directory must exist (`mkdir -p`) |
-
-**Create the data directory on the Pi:**
-
-```bash
-mkdir -p /home/pi/.local/share/rotaryphone
-```
-
----
-
-## Step 4 — Wire Up `Program.cs`
-
-In `RotaryPhone/Program.cs`, add two lines in the locations shown:
-
-```csharp
-using RotaryPhoneController.GVBridge.Extensions;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// ... existing service registrations ...
-
-builder.Services.AddGVBridge(builder.Configuration);   // ← ADD THIS
-
-var app = builder.Build();
-
-// ... existing middleware ...
-
-app.MapGVBridge();                                      // ← ADD THIS
-
-app.Run();
-```
-
----
-
-## Step 5 — Update `CallManager` for Multi-Mode Support
-
-`CallManager` needs one change: swap its direct `ISipAdapter` dependency for `ICallAdapterRegistry`. This is the only modification to existing code required by this PRD.
-
-**Before:**
-```csharp
-public class CallManager
 {
-    private readonly ISipAdapter _adapter;
-    public CallManager(ISipAdapter adapter) { _adapter = adapter; }
+  "GVBridge": {
+    "WebSocketPort": 8765,
+    "WebSocketHost": "127.0.0.1",
+    "LocalRtpPort": 5070,
+    "LocalIp": "0.0.0.0",
+    "HT801Ip": "192.168.86.250",
+    "HT801RtpPort": 5004,
+    "AudioSampleRateHz": 16000,
+    "AudioChannels": 1,
+    "PcmFrameMs": 20,
+    "ExtensionConnectTimeoutSeconds": 30,
+    "CallLogDbPath": "/opt/rotary-phone/data/gvbridge-calllog.db",
+    "DefaultMode": "GVBrowser"
+  }
 }
 ```
 
-**After:**
-```csharp
-public class CallManager
-{
-    private readonly ICallAdapterRegistry _registry;
-    private ICallAdapter Adapter => _registry.ActiveAdapter;
+### Key files on the radio box
 
-    public CallManager(ICallAdapterRegistry registry)
-    {
-        _registry = registry;
-        _registry.OnModeChanged += _ => RebindAdapterEvents();
-        RebindAdapterEvents();
-    }
+| Path | Purpose |
+|------|---------|
+| `/opt/rotary-phone/` | Main application |
+| `/opt/rotary-phone/ChromeExtension/` | Extension source (deployed copy) |
+| `~/snap/chromium/common/gv-bridge-profile/Extension/` | Extension (snap-accessible copy) |
+| `~/.config/systemd/user/gv-bridge-chrome.service` | Chromium systemd service |
+| `/etc/chromium/policies/managed/gv-bridge.json` | Chromium notification policies |
+| `~/Desktop/GV-Bridge.desktop` | Desktop shortcut |
 
-    private void RebindAdapterEvents()
-    {
-        // Unsubscribe from previous adapter events, subscribe to new ones
-        // Pattern: hold a reference to the previous adapter, unsubscribe, then subscribe to Adapter
-    }
-}
-```
+## Diagnostics
 
-All other `CallManager` logic remains unchanged.
+### Web UI
 
----
+Open `http://<radio-box>:5004/diagnostics` for real-time:
+- SIP message log (REGISTER, INVITE, BYE with timestamps)
+- HT801 health (registration status, ping, config validation)
+- Call state timeline
+- GV Bridge extension status
 
-## Step 6 — Add React Route and Nav
-
-In `RotaryPhone/ClientApp/src/App.tsx`, add the route:
-
-```tsx
-import { GVBridgeDashboard } from './components/gvbridge/GVBridgeDashboard';
-
-// Inside your <Routes> block:
-<Route path="/gvbridge" element={<GVBridgeDashboard />} />
-```
-
-In your navigation component, add a link:
-
-```tsx
-<NavLink to="/gvbridge">GV Bridge</NavLink>
-```
-
----
-
-## Step 7 — Load the Chrome Extension
-
-The extension does not auto-install. Do this once on the machine running Chrome:
-
-1. Open Chrome and navigate to `chrome://extensions`
-2. Enable **Developer mode** (toggle in the top-right corner)
-3. Click **Load unpacked**
-4. Select the `ChromeExtension/` folder from the root of the RotaryPhone repo
-5. The extension appears in the list as "RotaryPhone GV Bridge"
-6. Pin it to the toolbar: click the puzzle-piece icon → pin "RotaryPhone GV Bridge"
-
-**After any change to extension source files:**
-1. Go to `chrome://extensions`
-2. Click the ↺ refresh icon on the extension card
-3. Reload `https://voice.google.com`
-
----
-
-## Step 8 — First Run
-
-### On the Pi (or dev machine):
+### API Endpoints
 
 ```bash
-cd RotaryPhone
-dotnet run
+# Full status snapshot
+curl http://localhost:5004/api/diagnostics/status
+
+# SIP message log (filterable)
+curl "http://localhost:5004/api/diagnostics/sip-log?count=20&method=INVITE"
+
+# Send test INVITE to ring the phone
+curl -X POST http://localhost:5004/api/diagnostics/test-ring
+
+# HT801 config comparison (expected vs actual)
+curl http://localhost:5004/api/diagnostics/ht801/config
+
+# Call timeline
+curl http://localhost:5004/api/diagnostics/timeline
 ```
 
-Watch for this log line confirming the WebSocket server is listening:
-
-```
-[INF] GVBridgeService: WebSocket server listening on ws://127.0.0.1:8765
-```
-
-### In Chrome:
-
-1. Navigate to `https://voice.google.com` and log in with your Google account
-2. The extension's service worker activates automatically on page load
-3. Watch the extension icon — it should show a green indicator within ~2 seconds
-4. In the app dashboard at `/gvbridge`, the **Bridge Status** panel should show 🟢 **Connected**
-
-If the status stays red, check:
-- The .NET app is running and port 8765 is not blocked by firewall
-- The extension loaded without errors (`chrome://extensions` → "Errors" button on the card)
-- `voice.google.com` is fully loaded (not still at the login screen)
-
----
-
-## Step 9 — Audio Device Setup on the Pi
-
-The Pi needs a virtual audio loopback so the Chrome tab's audio output can be captured and routed to the RTP stack independently of any physical speakers.
-
-### Install PulseAudio loopback module:
+### Service logs
 
 ```bash
-sudo apt install pulseaudio
-pulseaudio --start
+# RotaryPhone server
+journalctl -u rotary-phone -f
 
-# Load the null sink (virtual output device)
-pactl load-module module-null-sink sink_name=gvbridge_sink sink_properties=device.description=GVBridgeSink
-
-# Load the loopback from null sink monitor to default input
-pactl load-module module-loopback source=gvbridge_sink.monitor
+# GV Bridge Chromium
+journalctl --user -u gv-bridge-chrome -f
 ```
-
-### Configure Chromium to use the virtual device:
-
-Launch Chromium with the virtual device as its audio output:
-
-```bash
-chromium-browser \
-  --audio-output-device=gvbridge_sink \
-  https://voice.google.com
-```
-
-Or set it as default in `chrome://settings/sound` once Chromium is open.
-
-**Make it persistent across reboots** — add to `/etc/pulse/default.pa`:
-
-```
-load-module module-null-sink sink_name=gvbridge_sink sink_properties=device.description=GVBridgeSink
-load-module module-loopback source=gvbridge_sink.monitor
-```
-
----
-
-## Step 10 — Smoke Test
-
-Work through this checklist after initial setup to verify end-to-end function:
-
-### Extension connectivity
-- [ ] Dashboard shows 🟢 Extension Connected
-- [ ] No errors in `chrome://extensions` → extension card → "Errors"
-- [ ] No errors in Chrome DevTools → Background service worker console
-
-### Inbound call
-- [ ] Call the Google Voice number from a cell phone
-- [ ] GV dialog appears in Chrome AND rotary phone rings via HT801 within 3 seconds
-- [ ] Lift handset — GV answers the call
-- [ ] Speak into cell phone — voice heard on rotary phone earpiece
-- [ ] Speak into rotary phone — voice heard on cell phone
-- [ ] Replace handset — call ends cleanly in both Chrome and HT801
-
-### Outbound call
-- [ ] Enter a number in the OutboundDialPanel and click Dial
-- [ ] `voice.google.com` initiates the call
-- [ ] Remote phone rings and answers
-- [ ] Full-duplex audio works in both directions
-- [ ] Hanging up from the rotary phone ends the call
-
-### SMS
-- [ ] Send an SMS to the Google Voice number from a cell phone
-- [ ] SMS notification appears in the dashboard SMS panel within ~60 seconds
-
-### Mode selector
-- [ ] ConnectionModeSelector shows all three modes: Bluetooth, SIP Trunk, GV Browser
-- [ ] GV Browser shows 🟢 Available (extension connected)
-- [ ] Switch to Bluetooth — mode persists on page refresh
-- [ ] Switch back to GV Browser — audio path restored
-
----
 
 ## Troubleshooting
 
-### Extension connects but audio is silent inbound
+### Phone doesn't ring
 
-The Chrome tab's audio output is not being captured. Verify:
-1. PulseAudio null sink is loaded: `pactl list sinks short` — look for `gvbridge_sink`
-2. Chromium is using the null sink as its audio output device
-3. `AudioBridge` is logging "Inbound loop started" at Debug level (enable Serilog Debug output)
+1. **Check HT801 registration**: `curl http://localhost:5004/api/diagnostics/status` → `ht801.isRegistered` should be `true`
+2. **Send test INVITE**: `curl -X POST http://localhost:5004/api/diagnostics/test-ring` and check the SIP log for 100/180/200 responses
+3. **If INVITE times out**: The HT801 may need a factory reset (hidden state blocks incoming SIP). After reset, reconfigure SIP Server, User ID, and registration.
 
-### Audio is choppy or delayed
+### Extension not connected
 
-- Verify `PcmFrameMs` is 20 in config
-- Check Pi CPU usage during a call: `htop` — if above 85%, close other processes
-- Increase `AudioBridge` thread priority: set `Thread.Priority = ThreadPriority.AboveNormal` on the audio loop threads
+1. Check Chromium is running: `systemctl --user status gv-bridge-chrome`
+2. Check the page loaded: `curl -s http://localhost:9224/json` (CDP port)
+3. Restart: `systemctl --user restart gv-bridge-chrome`
 
-### Extension fails to connect to WebSocket
+### GV doesn't ring in the browser
 
-- Confirm the .NET app is running: `curl http://localhost:5000/health` (or whatever port)
-- Confirm port 8765 is not in use: `ss -tlnp | grep 8765`
-- Check firewall: `sudo ufw status` — port 8765 should be allowed on loopback (it binds to 127.0.0.1 only, so external firewall rules don't apply)
-- Check extension background service worker log: `chrome://extensions` → GV Bridge → "Service Worker" → Inspect
+1. Verify notification permission is "Allow" (lock icon → Site settings)
+2. In GV Settings → Calls → Incoming calls → "Web" must be ON
+3. The Chromium window does NOT need to be visible — it works off-screen
 
-### GV UI selectors stopped working after a Google update
+### After reboot
 
-Open `ChromeExtension/content/gv-bridge.js` and update the `SELECTORS` constant at the top of the file. Use Chrome DevTools → Inspector on `voice.google.com` to find the current ARIA labels for the affected buttons. Reload the extension after saving.
+Both services auto-start, but you may need to:
+1. Wait 1-2 minutes for HT801 to re-register
+2. Switch adapter mode: `curl -X PUT http://localhost:5004/api/gvbridge/adapter/mode -H 'Content-Type: application/json' -d '{"mode":"GVBrowser"}'`
 
-### Call log database errors on startup
+## Current Status & Known Limitations
 
-```bash
-# Ensure the directory exists and is writable by the app user
-mkdir -p /home/pi/.local/share/rotaryphone
-chmod 755 /home/pi/.local/share/rotaryphone
+### Working
+- Incoming GV call detection (button polling in content script)
+- SIP INVITE to HT801 → phone rings
+- Phone answer detected (200 OK from HT801)
+- Hook change detection (on-hook/off-hook)
+- SIP diagnostics (message log, INVITE timeout detection, HT801 health)
+- Diagnostics web UI and REST API
 
-# Verify SQLite can create files there
-sqlite3 /home/pi/.local/share/rotaryphone/test.db ".quit"
-rm /home/pi/.local/share/rotaryphone/test.db
-```
-
----
-
-## Running as a systemd Service on the Pi
-
-To have the .NET app start automatically on boot:
-
-```bash
-sudo nano /etc/systemd/system/rotaryphone.service
-```
-
-```ini
-[Unit]
-Description=RotaryPhone Controller
-After=network.target pulseaudio.service
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/RotaryPhone/RotaryPhone
-ExecStart=/usr/bin/dotnet /home/pi/RotaryPhone/RotaryPhone/bin/Release/net8.0/RotaryPhone.dll
-Restart=on-failure
-RestartSec=5
-Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=ASPNETCORE_URLS=http://0.0.0.0:5000
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable rotaryphone
-sudo systemctl start rotaryphone
-sudo systemctl status rotaryphone
-```
-
-**Auto-start Chromium with GV after boot** — add to the Pi's autostart config (`/etc/xdg/lxsession/LXDE-pi/autostart` or equivalent):
-
-```
-@sleep 5
-@chromium-browser --audio-output-device=gvbridge_sink --start-maximized https://voice.google.com
-```
-
-The 5-second delay gives `rotaryphone.service` time to start the WebSocket server before the extension tries to connect.
-
----
-
-## Development Workflow
-
-### Typical change cycle
-
-```bash
-# Backend change (C# service or adapter)
-cd RotaryPhoneController.GVBridge
-# Edit files
-dotnet build
-# Restart the running app (Ctrl+C then dotnet run, or use dotnet watch)
-
-# Extension change (JS content/background/offscreen)
-# Edit ChromeExtension/content/gv-bridge.js or similar
-# chrome://extensions → ↺ refresh → reload voice.google.com
-
-# React component change
-cd RotaryPhone/ClientApp
-npm start   # or the existing hot-reload setup in the project
-```
-
-### Running tests
-
-```bash
-dotnet test RotaryPhoneController.GVBridge.Tests
-```
-
-### Viewing call log directly
-
-```bash
-sqlite3 /home/pi/.local/share/rotaryphone/calllog.db \
-  "SELECT * FROM CallLog ORDER BY StartedAt DESC LIMIT 20;"
-```
-
----
-
-## Notes for Claude Code Session
-
-When starting a Claude Code session with this PRD, open it with:
-
-```
-claude code --context PRD-GVBrowserBridge.md --context SETUP-GVBridge.md
-```
-
-Or paste the contents of both files at the start of the session. Key things to tell Claude Code upfront:
-
-1. **Start with `ICallAdapter` and `ICallAdapterRegistry` in Core** — everything else depends on these interfaces being in place first
-2. **Do `GVBridgeService` (WebSocket server) second** — `GVBrowserAdapter` is a thin wrapper over it and can't be tested without it
-3. **Do `AudioBridge` third** — it has the most unit-testable logic (codec, resampling) and the tests will catch subtle bugs before integration
-4. **Do the Chrome extension last** — it's the hardest to iterate on and requires a running backend to test against
-5. **The `CallManager` change is the only modification to existing code** — confirm with Claude Code that it makes no other changes to existing `.cs` files outside the new projects and Core interfaces
-
----
-
-*This file should live at `RotaryPhone/docs/SETUP-GVBridge.md` in the repo.*
+### Not yet working
+- **Audio bridge**: GVAudioBridgeService is built but not yet tested end-to-end (WebSocket PCM ↔ RTP G.711)
+- **Call state race**: GV extension and SIP events can race, causing premature BYE
+- **Auto mode on boot**: Adapter defaults to BluetoothHfp; needs manual switch to GVBrowser
+- **Audio playback to GV caller**: tabCapture capture works, but playback direction (phone mic → GV) is Phase 2
