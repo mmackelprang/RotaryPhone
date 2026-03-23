@@ -378,8 +378,10 @@ public class SIPSorceryAdapter : ISipAdapter
             var destinationUri = SIPURI.ParseSIPURIRelaxed($"sip:{extensionToRing}@{targetIP}");
 
             // Create local SIP endpoint
-            var fromHeader = new SIPFromHeader(null,
-                new SIPURI(extensionToRing, localIP, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp),
+            // Use a distinct caller ID — NOT the same extension as the target.
+            // If From and To have the same user, the HT801 may drop the INVITE as a loop.
+            var fromHeader = new SIPFromHeader("RotaryPhone Controller",
+                new SIPURI("rotaryphone", localIP, null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp),
                 CallProperties.CreateNewTag());
 
             // Create the INVITE request
