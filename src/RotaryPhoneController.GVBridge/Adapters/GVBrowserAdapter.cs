@@ -31,20 +31,42 @@ public class GVBrowserAdapter : ICallAdapter
     public Task ActivateAsync(CancellationToken ct = default)
     {
         _bridgeService.OnConnectionChanged += connected => OnAvailabilityChanged?.Invoke(connected);
+
+        // Incoming call detection from the Chrome extension — this is the only
+        // event we trust from the browser. It triggers CallManager to send a
+        // SIP INVITE to ring the rotary phone.
         _bridgeService.OnIncomingCall += msg =>
         {
             _activeCallId = msg.CallId;
+            _logger.LogInformation("GVBrowser: incoming call from {From} (callId={CallId})", msg.From, msg.CallId);
             OnIncomingCall?.Invoke(msg.From);
         };
-        _bridgeService.OnCallAnswered += msg => {
-            OnCallAnswered?.Invoke();
-            Task.Run(() => _audioBridge.StartAsync());
+
+        // We intentionally DO NOT forward OnCallAnswered or OnCallEnded from the
+        // Chrome extension to CallManager. The GV browser UI changes for reasons
+        // unrelated to what happens on the rotary phone (e.g., GV auto-answers for
+        // voicemail, the call panel disappears when the call connects). These events
+        // race with the SIP events from the HT801 (200 OK, BYE, hook changes) and
+        // cause premature call termination.
+        //
+        // Instead, the SIP adapter (which is always active) handles:
+        //   - Answer: HT801 sends 200 OK when handset is lifted → CallManager.AnswerCall()
+        //   - Hangup: HT801 sends BYE or on-hook NOTIFY → CallManager.HangUp()
+        //
+        // The audio bridge is started/stopped from those SIP-driven state transitions,
+        // not from the browser extension.
+
+        _bridgeService.OnCallAnswered += msg =>
+        {
+            _logger.LogDebug("GVBrowser: extension reported callAnswered (ignored — SIP is authoritative)");
         };
-        _bridgeService.OnCallEnded += msg => {
+
+        _bridgeService.OnCallEnded += msg =>
+        {
+            _logger.LogDebug("GVBrowser: extension reported callEnded (ignored — SIP is authoritative)");
             _activeCallId = null;
-            OnCallEnded?.Invoke();
-            Task.Run(() => _audioBridge.StopAsync());
         };
+
         _bridgeService.OnDtmfReceived += msg => OnDtmfReceived?.Invoke(msg.Digit);
 
         _logger.LogInformation("GVBrowserAdapter activated");
@@ -79,5 +101,17 @@ public class GVBrowserAdapter : ICallAdapter
         await _bridgeService.SendMessageAsync(new HangupMessage());
         _activeCallId = null;
         _logger.LogInformation("GVBrowser: hanging up");
+    }
+
+    public Task OnCallAnsweredOnRotaryPhoneAsync()
+    {
+        _logger.LogInformation("GVBrowser: starting audio bridge (SIP call answered)");
+        return _audioBridge.StartAsync();
+    }
+
+    public Task OnCallHungUpAsync()
+    {
+        _logger.LogInformation("GVBrowser: stopping audio bridge (call hung up)");
+        return _audioBridge.StopAsync();
     }
 }

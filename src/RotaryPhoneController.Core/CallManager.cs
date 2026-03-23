@@ -421,18 +421,25 @@ public class CallManager
             return;
         }
 
-        // Call answered on rotary phone (handset lifted) - route audio through rotary phone
-        _logger.LogInformation("Call answered on rotary phone - routing audio through rotary phone");
+        // Call answered on rotary phone (handset lifted) - route audio
+        _logger.LogInformation("Call answered on rotary phone");
 
+        // Notify the active adapter (starts GV audio bridge in GVBrowser mode, no-op for others)
+        if (_boundAdapter != null)
+        {
+            _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
+        }
+
+        // Start audio based on active adapter mode
         if (_deviceManager != null && _activeDeviceAddress != null)
         {
-            // Answer via device manager — sends ATA over RFCOMM, SCO opens,
+            // Bluetooth mode: answer via device manager — sends ATA over RFCOMM, SCO opens,
             // HandleScoConnected will start the RTP bridge
             _ = _deviceManager.AnswerCallAsync(_activeDeviceAddress);
         }
         else
         {
-            // Legacy path
+            // Legacy Bluetooth path
             _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
             var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
             _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
@@ -517,10 +524,14 @@ public class CallManager
                 _ = _bluetoothAdapter.TerminateCallAsync();
             }
 
-            // Stop RTP bridge
+            // Stop audio bridges
             if (_rtpBridge.IsActive)
             {
                 _ = _rtpBridge.StopBridgeAsync();
+            }
+            if (_boundAdapter != null)
+            {
+                _ = _boundAdapter.OnCallHungUpAsync();
             }
 
             // Update call history
