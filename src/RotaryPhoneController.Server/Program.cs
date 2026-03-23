@@ -46,7 +46,7 @@ builder.Services.AddSignalR();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Add CORS policy for development and Radio.Web integration
+// Add CORS policies for development, Radio.Web, and GV Bridge extension
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowClients", policy =>
@@ -56,10 +56,18 @@ builder.Services.AddCors(options =>
                 "http://127.0.0.1:5173",
                 "http://localhost:5002",   // Radio.Web local
                 "http://radio:5002",       // Radio.Web on Ubuntu
-                "http://192.168.86.55:5173")
+                "http://192.168.86.55:5173",
+                "https://voice.google.com") // GV Bridge extension content script
               .AllowAnyMethod()
               .AllowAnyHeader()
               .AllowCredentials();
+    });
+    // Permissive policy for GV Bridge HTTP event endpoint (extension content scripts)
+    options.AddPolicy("GVBridge", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
     });
 });
 
@@ -289,6 +297,27 @@ if (!app.Environment.IsDevelopment())
 // Enable Swagger in all environments
 app.UseSwagger();
 app.UseSwaggerUI();
+
+// Handle CORS for GV Bridge event endpoint BEFORE the general CORS middleware
+// (content script on voice.google.com POSTs call events to this endpoint)
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path.Value ?? "";
+    if (path.Contains("gvbridge/event", StringComparison.OrdinalIgnoreCase))
+    {
+        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+        context.Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+        context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+        context.Response.Headers["X-GVBridge-CORS"] = "handled";
+        if (context.Request.Method == "OPTIONS")
+        {
+            context.Response.StatusCode = 204;
+            await context.Response.CompleteAsync();
+            return;
+        }
+    }
+    await next();
+});
 
 // Enable CORS
 app.UseCors("AllowClients");

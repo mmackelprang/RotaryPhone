@@ -77,6 +77,29 @@ public class GVBridgeController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// HTTP POST endpoint for call events from the Chrome extension.
+    /// This is a reliable fallback when the WebSocket connection has issues.
+    /// </summary>
+    [HttpPost("event")]
+    public IActionResult PostCallEvent([FromBody] CallEventRequest request)
+    {
+        _bridge.HandleHttpCallEvent(request.Type, request.From, request.CallId);
+        Response.Headers["Access-Control-Allow-Origin"] = "*";
+        return Ok(new { received = true, type = request.Type });
+    }
+
+    // Handle CORS preflight for the event endpoint
+    [HttpOptions("event")]
+    public IActionResult PreflightEvent()
+    {
+        Response.Headers["Access-Control-Allow-Origin"] = "*";
+        Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+        Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
+        return NoContent();
+    }
+
     public record SendSmsRequest(string To, string Body);
     public record SetModeRequest(string Mode);
+    public record CallEventRequest(string Type, string? From, string? CallId);
 }

@@ -90,6 +90,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
 
+    case 'postCallEvent':
+      // Relay call event to RotaryPhone server via HTTP POST.
+      // Service workers can fetch localhost without mixed-content restrictions.
+      fetch('http://127.0.0.1:5004/api/gvbridge/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(msg.event)
+      }).then(r => {
+        console.log('[GVBridge] HTTP POST:', msg.event.type, r.status);
+        sendResponse({ ok: true, status: r.status });
+      }).catch(e => {
+        console.error('[GVBridge] HTTP POST failed:', e);
+        sendResponse({ ok: false, error: e.message });
+      });
+      return true; // async sendResponse
+
     default:
       return false;
   }

@@ -190,6 +190,13 @@ public class GVBridgeService : IHostedService
                 case "pong":
                     _lastPong = DateTime.UtcNow;
                     break;
+                case "postCallEvent":
+                    // Relayed via chrome.runtime.sendMessage → WS. Extract nested event.
+                    if (doc.RootElement.TryGetProperty("event", out var nestedEvent))
+                    {
+                        HandleMessage(nestedEvent.GetRawText());
+                    }
+                    break;
                 default:
                     _logger.Warning("Unknown extension message type: {Type}", type);
                     break;
@@ -199,6 +206,17 @@ public class GVBridgeService : IHostedService
         {
             _logger.Warning(ex, "Error handling extension message");
         }
+    }
+
+    /// <summary>
+    /// Handle call events received via HTTP POST (fallback when WebSocket has issues).
+    /// Dispatches the same events as WebSocket message handling.
+    /// </summary>
+    public void HandleHttpCallEvent(string type, string? from, string? callId)
+    {
+        _logger.Information("HTTP call event: {Type} from={From} callId={CallId}", type, from, callId);
+        var json = System.Text.Json.JsonSerializer.Serialize(new { type, from, callId });
+        HandleMessage(json);
     }
 
     public async Task SendMessageAsync(ExtensionMessage message)

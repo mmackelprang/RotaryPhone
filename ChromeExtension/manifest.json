@@ -12,15 +12,24 @@
     "storage"
   ],
   "host_permissions": [
-    "https://voice.google.com/*"
+    "https://voice.google.com/*",
+    "http://127.0.0.1:5004/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
-  "content_scripts": [{
-    "matches": ["https://voice.google.com/*"],
-    "js": ["content/gv-bridge.js"],
-    "run_at": "document_idle"
-  }]
+  "content_scripts": [
+    {
+      "matches": ["https://voice.google.com/*"],
+      "js": ["content/gv-permissions.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://voice.google.com/*"],
+      "js": ["content/gv-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }

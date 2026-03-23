@@ -1,0 +1,221 @@
+<h2>SIP & Call Diagnostics Dashboard</h2>
+<p class="subtitle">Real-time instrumentation for debugging HT801 connectivity, SIP signaling, RTP audio, and GV Bridge status</p>
+
+<div class="mockup">
+  <div class="mockup-header">Diagnostics Page — /diagnostics route in React app</div>
+  <div class="mockup-body" style="padding: 16px; background: #0f1117; color: #e0e0e0; font-family: -apple-system, sans-serif; font-size: 13px;">
+
+    <!-- Top Status Bar -->
+    <div style="display: flex; gap: 10px; margin-bottom: 16px;">
+      <div style="flex: 1; background: #1a2332; border-radius: 6px; padding: 10px; border-left: 3px solid #2ecc71;">
+        <div style="color: #888; font-size: 11px; text-transform: uppercase;">HT801</div>
+        <div style="color: #2ecc71; font-weight: bold;">Connected</div>
+        <div style="color: #666; font-size: 11px;">192.168.86.250 · Registered · Last seen 2s ago</div>
+      </div>
+      <div style="flex: 1; background: #1a2332; border-radius: 6px; padding: 10px; border-left: 3px solid #2ecc71;">
+        <div style="color: #888; font-size: 11px; text-transform: uppercase;">SIP Server</div>
+        <div style="color: #2ecc71; font-weight: bold;">Listening :5060</div>
+        <div style="color: #666; font-size: 11px;">0.0.0.0:5060 UDP · Extension 1000</div>
+      </div>
+      <div style="flex: 1; background: #1a2332; border-radius: 6px; padding: 10px; border-left: 3px solid #2ecc71;">
+        <div style="color: #888; font-size: 11px; text-transform: uppercase;">GV Bridge</div>
+        <div style="color: #2ecc71; font-weight: bold;">Extension Connected</div>
+        <div style="color: #666; font-size: 11px;">v1.0.0 · ws://127.0.0.1:8765 · Mode: GVBrowser</div>
+      </div>
+      <div style="flex: 1; background: #1a2332; border-radius: 6px; padding: 10px; border-left: 3px solid #888;">
+        <div style="color: #888; font-size: 11px; text-transform: uppercase;">Call State</div>
+        <div style="color: #fff; font-weight: bold;">Idle</div>
+        <div style="color: #666; font-size: 11px;">Phone on-hook · No active call</div>
+      </div>
+    </div>
+
+    <!-- Two Column Layout -->
+    <div style="display: flex; gap: 12px;">
+
+      <!-- Left: SIP Message Log -->
+      <div style="flex: 3; background: #111827; border-radius: 6px; overflow: hidden;">
+        <div style="padding: 8px 12px; background: #1a2332; border-bottom: 1px solid #2a3442; display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-weight: bold; color: #ccc;">SIP Message Log</span>
+          <div style="display: flex; gap: 6px;">
+            <span style="font-size: 10px; background: #2a3442; padding: 2px 8px; border-radius: 3px; color: #4a9eff; cursor: pointer;">INVITE</span>
+            <span style="font-size: 10px; background: #2a3442; padding: 2px 8px; border-radius: 3px; color: #e67e22; cursor: pointer;">REGISTER</span>
+            <span style="font-size: 10px; background: #2a3442; padding: 2px 8px; border-radius: 3px; color: #2ecc71; cursor: pointer;">NOTIFY</span>
+            <span style="font-size: 10px; background: #2a3442; padding: 2px 8px; border-radius: 3px; color: #e74c3c; cursor: pointer;">BYE</span>
+            <span style="font-size: 10px; background: #2a3442; padding: 2px 8px; border-radius: 3px; color: #888; cursor: pointer;">ALL</span>
+          </div>
+        </div>
+        <div style="padding: 8px; font-family: monospace; font-size: 11px; max-height: 280px; overflow-y: auto;">
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:06:19</span>
+            <span style="color: #e67e22; margin: 0 4px;">←</span>
+            <span style="color: #e67e22; font-weight: bold;">REGISTER</span>
+            <span style="color: #888;"> from 192.168.86.250:5060</span>
+            <span style="color: #2ecc71; margin-left: 8px;">→ 200 OK</span>
+            <span style="color: #666; margin-left: 8px;">expires=3600</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:06:20</span>
+            <span style="color: #2ecc71; margin: 0 4px;">←</span>
+            <span style="color: #2ecc71; font-weight: bold;">NOTIFY</span>
+            <span style="color: #888;"> hook-state: on-hook</span>
+            <span style="color: #2ecc71; margin-left: 8px;">→ 200 OK</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332; background: #1a1a0a;">
+            <span style="color: #666;">12:10:45</span>
+            <span style="color: #4a9eff; margin: 0 4px;">→</span>
+            <span style="color: #4a9eff; font-weight: bold;">INVITE</span>
+            <span style="color: #888;"> sip:1000@192.168.86.250</span>
+            <span style="color: #e74c3c; margin-left: 8px;">← 408 Timeout</span>
+            <span style="color: #e74c3c; font-size: 10px; margin-left: 4px;">⚠ PHONE DID NOT RING</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332; background: #1a0a0a;">
+            <span style="color: #666;">12:10:45</span>
+            <span style="color: #e74c3c; margin: 0 4px;">!</span>
+            <span style="color: #e74c3c; font-weight: bold;">DIAGNOSIS</span>
+            <span style="color: #e74c3c;"> INVITE sent but no 100 Trying/180 Ringing received.</span>
+            <span style="color: #f1c40f; display: block; margin-left: 20px;">Check: HT801 registered? SDP codec match? Correct extension?</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:11:00</span>
+            <span style="color: #4a9eff; margin: 0 4px;">→</span>
+            <span style="color: #4a9eff; font-weight: bold;">INVITE</span>
+            <span style="color: #888;"> sip:1000@192.168.86.250</span>
+            <span style="color: #f1c40f; margin-left: 8px;">← 100 Trying</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:11:00</span>
+            <span style="color: #888; margin: 0 4px;"> </span>
+            <span style="color: #888;"> </span>
+            <span style="color: #888;"> </span>
+            <span style="color: #2ecc71; margin-left: 8px;">← 180 Ringing</span>
+            <span style="color: #2ecc71; font-size: 10px; margin-left: 4px;">✓ PHONE RINGING</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:11:05</span>
+            <span style="color: #888; margin: 0 4px;"> </span>
+            <span style="color: #888;"> </span>
+            <span style="color: #888;"> </span>
+            <span style="color: #2ecc71; margin-left: 8px;">← 200 OK</span>
+            <span style="color: #2ecc71; font-size: 10px; margin-left: 4px;">✓ ANSWERED (hook off)</span>
+          </div>
+          <div style="padding: 4px 0; border-bottom: 1px solid #1a2332;">
+            <span style="color: #666;">12:11:05</span>
+            <span style="color: #4a9eff; margin: 0 4px;">→</span>
+            <span style="color: #4a9eff;">ACK</span>
+            <span style="color: #888;"> sip:1000@192.168.86.250</span>
+            <span style="color: #2ecc71; margin-left: 8px;">RTP bridge started :5070 ↔ :49152</span>
+          </div>
+          <div style="padding: 4px 0;">
+            <span style="color: #666;">12:11:35</span>
+            <span style="color: #e74c3c; margin: 0 4px;">→</span>
+            <span style="color: #e74c3c; font-weight: bold;">BYE</span>
+            <span style="color: #888;"> sip:1000@192.168.86.250</span>
+            <span style="color: #2ecc71; margin-left: 8px;">← 200 OK</span>
+            <span style="color: #888; font-size: 10px; margin-left: 4px;">duration: 30s</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Status Panels -->
+      <div style="flex: 2; display: flex; flex-direction: column; gap: 10px;">
+
+        <!-- HT801 Health -->
+        <div style="background: #111827; border-radius: 6px; overflow: hidden;">
+          <div style="padding: 8px 12px; background: #1a2332; border-bottom: 1px solid #2a3442; font-weight: bold; color: #ccc;">HT801 Device Health</div>
+          <div style="padding: 10px; font-size: 12px;">
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">SIP Registration</span>
+              <span style="color: #2ecc71;">✓ Active (expires in 2847s)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">Last REGISTER</span>
+              <span style="color: #ccc;">12:06:19 (16m ago)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">Network Ping</span>
+              <span style="color: #2ecc71;">✓ 1.2ms</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">Codec</span>
+              <span style="color: #ccc;">PCMU (G.711 µ-law)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">Hook State</span>
+              <span style="color: #ccc;">On-hook</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 3px 0;">
+              <span style="color: #888;">Firmware</span>
+              <span style="color: #ccc;">1.0.43.6</span>
+            </div>
+            <div style="margin-top: 6px; display: flex; gap: 6px;">
+              <button style="font-size: 10px; padding: 4px 10px; background: #2a3442; color: #4a9eff; border: 1px solid #4a9eff; border-radius: 3px; cursor: pointer;">Test Ring</button>
+              <button style="font-size: 10px; padding: 4px 10px; background: #2a3442; color: #e67e22; border: 1px solid #e67e22; border-radius: 3px; cursor: pointer;">Validate Config</button>
+              <button style="font-size: 10px; padding: 4px 10px; background: #2a3442; color: #888; border: 1px solid #555; border-radius: 3px; cursor: pointer;">Read Config</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- RTP Audio Stats -->
+        <div style="background: #111827; border-radius: 6px; overflow: hidden;">
+          <div style="padding: 8px 12px; background: #1a2332; border-bottom: 1px solid #2a3442; font-weight: bold; color: #ccc;">RTP Audio Stream</div>
+          <div style="padding: 10px; font-size: 12px;">
+            <div style="color: #888; margin-bottom: 4px;">No active stream</div>
+            <div style="color: #555; font-size: 11px;">
+              <div>During active calls, shows:</div>
+              <div style="margin-left: 8px;">· Packets sent/received per second</div>
+              <div style="margin-left: 8px;">· Jitter, packet loss %</div>
+              <div style="margin-left: 8px;">· Audio levels (VU meter)</div>
+              <div style="margin-left: 8px;">· Codec / sample rate</div>
+              <div style="margin-left: 8px;">· WebSocket ↔ RTP frame counts</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Call State Timeline -->
+        <div style="background: #111827; border-radius: 6px; overflow: hidden;">
+          <div style="padding: 8px 12px; background: #1a2332; border-bottom: 1px solid #2a3442; font-weight: bold; color: #ccc;">Call State Timeline</div>
+          <div style="padding: 10px; font-size: 11px; font-family: monospace;">
+            <div style="padding: 2px 0;"><span style="color: #666;">12:10:45</span> <span style="color: #f1c40f;">RINGING</span> <span style="color: #888;">← GV incoming +15551234567</span></div>
+            <div style="padding: 2px 0;"><span style="color: #666;">12:10:45</span> <span style="color: #4a9eff;">INVITE→</span> <span style="color: #888;">sent to HT801</span></div>
+            <div style="padding: 2px 0;"><span style="color: #666;">12:11:00</span> <span style="color: #2ecc71;">180 Ringing</span> <span style="color: #888;">phone ringing</span></div>
+            <div style="padding: 2px 0;"><span style="color: #666;">12:11:05</span> <span style="color: #2ecc71;">ANSWERED</span> <span style="color: #888;">hook off → 200 OK</span></div>
+            <div style="padding: 2px 0;"><span style="color: #666;">12:11:05</span> <span style="color: #9b59b6;">AUDIO</span> <span style="color: #888;">RTP bridge started</span></div>
+            <div style="padding: 2px 0;"><span style="color: #666;">12:11:35</span> <span style="color: #e74c3c;">ENDED</span> <span style="color: #888;">hook on → BYE sent</span></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div style="margin-top: 20px;">
+  <h3>Backend Instrumentation</h3>
+  <p style="color: #aaa; font-size: 13px;">New events and data pushed via SignalR in real-time. Same API consumable by Radio.Web Blazor UI later.</p>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px;">
+    <div style="background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px;">
+      <div style="color: #4a9eff; font-weight: bold; margin-bottom: 6px;">New SignalR Events</div>
+      <ul style="color: #ccc; font-size: 12px; margin: 0; padding-left: 16px; line-height: 1.8;">
+        <li>SipMessageReceived (method, from, status, raw)</li>
+        <li>SipMessageSent (method, to, body summary)</li>
+        <li>SipDiagnosis (issue description, suggestions)</li>
+        <li>Ht801HealthUpdate (registration, ping, hook)</li>
+        <li>RtpStreamStats (pkt/s, jitter, loss, levels)</li>
+        <li>CallStateTimeline (timestamped event log)</li>
+        <li>GvBridgeAudioStats (ws frames/s, queue depth)</li>
+      </ul>
+    </div>
+    <div style="background: #1a1a2e; border: 1px solid #333; border-radius: 6px; padding: 12px;">
+      <div style="color: #e67e22; font-weight: bold; margin-bottom: 6px;">New API Endpoints</div>
+      <ul style="color: #ccc; font-size: 12px; margin: 0; padding-left: 16px; line-height: 1.8;">
+        <li>GET /api/diagnostics/status (full snapshot)</li>
+        <li>GET /api/diagnostics/sip-log (recent messages)</li>
+        <li>POST /api/diagnostics/test-ring (send test INVITE)</li>
+        <li>POST /api/diagnostics/test-audio (send RTP test tone)</li>
+        <li>GET /api/diagnostics/ht801 (read device config)</li>
+        <li>POST /api/diagnostics/ht801/validate (check+fix)</li>
+      </ul>
+    </div>
+  </div>
+</div>
