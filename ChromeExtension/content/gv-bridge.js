@@ -165,7 +165,10 @@ function handleBridgeMessage(msg) {
       dial(msg.number);
       break;
     case 'answer':
+      console.log('[GVBridge] Received ANSWER command from server');
       answer();
+      // Also set a DOM flag so the polling instance can pick it up
+      document.documentElement.setAttribute('data-gvbridge-answer', 'true');
       break;
     case 'hangup':
       hangup();
@@ -265,8 +268,20 @@ function dial(number) {
 
 function answer() {
   retryAction(() => {
-    const btn = document.querySelector(SELECTORS.answerButton);
-    if (!btn) return false;
+    // Try the ARIA selector first
+    let btn = document.querySelector(SELECTORS.answerButton);
+    if (!btn) {
+      // Fallback: find any button with "answer" or "accept" in its label/text
+      document.querySelectorAll('button').forEach(b => {
+        const label = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+        if (/\banswer\b|\baccept\b/.test(label)) btn = b;
+      });
+    }
+    if (!btn) {
+      console.log('[GVBridge] Answer button not found');
+      return false;
+    }
+    console.log('[GVBridge] Clicking answer button:', btn.getAttribute('aria-label') || btn.innerText);
     btn.click();
     return true;
   });
@@ -409,6 +424,25 @@ function startCallPolling() {
         sendToServer(msg);
         sendViaHttp(msg);
       }
+
+      // Check if the server requested us to answer (via DOM flag from WebSocket instance)
+      if (hasAnswerBtn && document.documentElement.getAttribute('data-gvbridge-answer') === 'true') {
+        document.documentElement.removeAttribute('data-gvbridge-answer');
+        console.log('[GVBridge] POLL: answer via DOM flag — clicking Answer button');
+        answer();
+      }
+
+      // Also poll the server for pending commands (every 2nd cycle = every 1s)
+      if (hasAnswerBtn && incomingDetected && window.__gvPollCycle % 2 === 0) {
+        chrome.runtime.sendMessage({ type: 'checkPendingCommand' }).then(resp => {
+          if (resp?.command === 'answer') {
+            console.log('[GVBridge] POLL: answer via HTTP command — clicking Answer button');
+            answer();
+          }
+        }).catch(() => {});
+      }
+      if (!window.__gvPollCycle) window.__gvPollCycle = 0;
+      window.__gvPollCycle++;
     } catch (e) {
       // Don't let polling errors crash the script
     }

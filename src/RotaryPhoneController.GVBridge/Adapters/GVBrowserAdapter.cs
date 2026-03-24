@@ -103,10 +103,89 @@ public class GVBrowserAdapter : ICallAdapter
         _logger.LogInformation("GVBrowser: hanging up");
     }
 
-    public Task OnCallAnsweredOnRotaryPhoneAsync()
+    public async Task OnCallAnsweredOnRotaryPhoneAsync()
     {
-        _logger.LogInformation("GVBrowser: starting audio bridge (SIP call answered)");
-        return _audioBridge.StartAsync();
+        _logger.LogInformation("GVBrowser: rotary phone answered — answering GV call and starting audio bridge");
+
+        // Click the Answer button on the GV web page via CDP (Chrome DevTools Protocol).
+        // This is the most reliable path — it directly executes JS in the page context,
+        // bypassing all the WebSocket/extension messaging issues.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ClickGvAnswerViaCdpAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CDP answer click failed");
+            }
+        });
+
+        // Start the audio bridge (WebSocket PCM ↔ RTP G.711)
+        await _audioBridge.StartAsync();
+    }
+
+    /// <summary>
+    /// Click the Answer button on the GV page via Chrome DevTools Protocol.
+    /// Connects to Chromium's CDP port (9224) and evaluates JS to find and click the button.
+    /// </summary>
+    private async Task ClickGvAnswerViaCdpAsync()
+    {
+        using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var tabsJson = await http.GetStringAsync("http://127.0.0.1:9224/json");
+        var tabs = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement[]>(tabsJson);
+
+        string? wsUrl = null;
+        foreach (var tab in tabs!)
+        {
+            var url = tab.GetProperty("url").GetString() ?? "";
+            var type = tab.GetProperty("type").GetString() ?? "";
+            if (type == "page" && url.Contains("voice.google.com"))
+            {
+                wsUrl = tab.GetProperty("webSocketDebuggerUrl").GetString();
+                break;
+            }
+        }
+
+        if (wsUrl == null)
+        {
+            _logger.LogWarning("CDP: No voice.google.com tab found");
+            return;
+        }
+
+        using var ws = new System.Net.WebSockets.ClientWebSocket();
+        await ws.ConnectAsync(new Uri(wsUrl), CancellationToken.None);
+
+        var clickJs = @"(function() {
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                var label = (btns[i].getAttribute('aria-label') || btns[i].innerText || '').toLowerCase();
+                if (/\banswer\b|\baccept\b/.test(label)) {
+                    btns[i].click();
+                    return 'clicked: ' + label;
+                }
+            }
+            return 'no answer button found';
+        })()";
+
+        var msg = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            id = 1,
+            method = "Runtime.evaluate",
+            @params = new { expression = clickJs }
+        });
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(msg);
+        await ws.SendAsync(bytes, System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+
+        var buffer = new byte[4096];
+        var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+        var response = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+
+        _logger.LogInformation("CDP answer click result: {Response}", response.Length > 200 ? response[..200] : response);
+
+        await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
     }
 
     public Task OnCallHungUpAsync()

@@ -90,6 +90,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return false;
 
+    case 'checkPendingCommand':
+      fetch('http://127.0.0.1:5004/api/gvbridge/pending-command')
+        .then(r => r.json())
+        .then(data => {
+          sendResponse({ command: data.command || null });
+        })
+        .catch(e => {
+          sendResponse({ command: null });
+        });
+      return true; // async sendResponse
+
     case 'postCallEvent':
       // Relay call event to RotaryPhone server via HTTP POST.
       // Service workers can fetch localhost without mixed-content restrictions.

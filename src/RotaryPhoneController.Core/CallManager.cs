@@ -302,10 +302,13 @@ public class CallManager
             }
         }, TaskScheduler.Default);
 
-        // Send INVITE to HT801 to trigger ring
-        _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP}",
-            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+        // Send INVITE to HT801 to trigger ring.
+        // In GVBrowser mode, use the GV audio bridge's RTP port (5070) in the SDP
+        // so the HT801 sends audio to the right place.
+        var rtpPortForSdp = _boundAdapter?.Mode == CallAdapterMode.GVBrowser ? 5070 : _rtpPort;
+        _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP} (SDP RTP port {Port})",
+            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
+        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
 
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
@@ -449,7 +452,9 @@ public class CallManager
         // Call answered on rotary phone (handset lifted) - route audio
         _logger.LogInformation("Call answered on rotary phone");
 
-        // Notify the active adapter (starts GV audio bridge in GVBrowser mode, no-op for others)
+        // Notify the active adapter:
+        // - In GVBrowser mode: starts audio bridge AND answers the call on the GV web page
+        // - In other modes: no-op (default interface implementation)
         if (_boundAdapter != null)
         {
             _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();

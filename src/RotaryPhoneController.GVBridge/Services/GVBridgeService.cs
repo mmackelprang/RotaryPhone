@@ -18,6 +18,7 @@ public class GVBridgeService : IHostedService
     private CancellationTokenSource? _cts;
     private WebSocket? _extensionSocket;
     private readonly ConcurrentQueue<byte[]> _inboundAudioQueue = new();
+    private readonly ConcurrentQueue<string> _pendingCommands = new();
     private DateTime _lastPong = DateTime.UtcNow;
 
     public bool IsExtensionConnected => _extensionSocket?.State == WebSocketState.Open;
@@ -217,6 +218,25 @@ public class GVBridgeService : IHostedService
         _logger.Information("HTTP call event: {Type} from={From} callId={CallId}", type, from, callId);
         var json = System.Text.Json.JsonSerializer.Serialize(new { type, from, callId });
         HandleMessage(json);
+    }
+
+    /// <summary>
+    /// Queue a command for the Chrome extension to pick up via polling.
+    /// Used instead of WebSocket when the polling content script instance
+    /// doesn't have the WebSocket connection.
+    /// </summary>
+    public void QueueCommand(string command)
+    {
+        _pendingCommands.Enqueue(command);
+        _logger.Information("Queued command for extension: {Command}", command);
+    }
+
+    /// <summary>
+    /// Consume the next pending command (called by the HTTP polling endpoint).
+    /// </summary>
+    public string? ConsumePendingCommand()
+    {
+        return _pendingCommands.TryDequeue(out var cmd) ? cmd : null;
     }
 
     public async Task SendMessageAsync(ExtensionMessage message)

@@ -99,6 +99,28 @@ public class GVBridgeController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Returns pending commands for the Chrome extension (e.g., "answer").
+    /// The content script polls this endpoint since WebSocket is unreliable
+    /// due to dual content script instances.
+    /// </summary>
+    [HttpGet("pending-command")]
+    public IActionResult GetPendingCommand()
+    {
+        Response.Headers["Access-Control-Allow-Origin"] = "*";
+        var cmd = _bridge.ConsumePendingCommand();
+        return Ok(new { command = cmd });
+    }
+
+    // Handle CORS preflight for pending-command
+    [HttpOptions("pending-command")]
+    public IActionResult PreflightPendingCommand()
+    {
+        Response.Headers["Access-Control-Allow-Origin"] = "*";
+        Response.Headers["Access-Control-Allow-Methods"] = "GET, OPTIONS";
+        return NoContent();
+    }
+
     public record SendSmsRequest(string To, string Body);
     public record SetModeRequest(string Mode);
     public record CallEventRequest(string Type, string? From, string? CallId);
