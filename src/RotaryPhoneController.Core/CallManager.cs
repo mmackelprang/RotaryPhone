@@ -17,6 +17,7 @@ public class CallManager
     private readonly ICallAdapterRegistry? _adapterRegistry;
     private ICallAdapter? _boundAdapter;
     private readonly int _rtpPort;
+    private CancellationTokenSource? _ringingTimeoutCts;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
@@ -281,10 +282,31 @@ public class CallManager
 
         IncomingPhoneNumber = phoneNumber;
         CurrentState = CallState.Ringing;
-        
+
+        // Start a ringing timeout — if the call isn't answered or cancelled within 60s,
+        // reset to Idle. This prevents the state machine from getting stuck if the
+        // SIP INVITE times out or the HT801 doesn't respond.
+        _ringingTimeoutCts?.Cancel();
+        _ringingTimeoutCts = new CancellationTokenSource();
+        var cts = _ringingTimeoutCts;
+        _ = Task.Delay(TimeSpan.FromSeconds(60), cts.Token).ContinueWith(t =>
+        {
+            if (!t.IsCanceled && CurrentState == CallState.Ringing)
+            {
+                _logger.LogWarning("Ringing timeout (60s) — resetting to Idle");
+                _sipAdapter.CancelPendingInvite();
+                CurrentState = CallState.Idle;
+                IncomingPhoneNumber = null;
+                _currentCallHistory = null;
+                StateChanged?.Invoke();
+            }
+        }, TaskScheduler.Default);
+
         // Send INVITE to HT801 to trigger ring
+        _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP}",
+            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
         _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
-        
+
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
         {
@@ -414,12 +436,15 @@ public class CallManager
     public void AnswerCall()
     {
         _logger.LogInformation("Answering call");
-        
+
         if (CurrentState != CallState.Ringing)
         {
             _logger.LogWarning("Cannot answer call - not in Ringing state. Current state: {State}", CurrentState);
             return;
         }
+
+        // Cancel the ringing timeout
+        _ringingTimeoutCts?.Cancel();
 
         // Call answered on rotary phone (handset lifted) - route audio
         _logger.LogInformation("Call answered on rotary phone");
@@ -506,6 +531,7 @@ public class CallManager
         }
 
         _isHangingUp = true;
+        _ringingTimeoutCts?.Cancel();
         _logger.LogInformation("Hanging up");
         var previousState = CurrentState;
 
