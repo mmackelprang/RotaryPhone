@@ -12,7 +12,9 @@ using RotaryPhoneController.GVTrunk.Extensions;
 using RotaryPhoneController.GVTrunk.Interfaces;
 using RotaryPhoneController.GVBridge.Extensions;
 using RotaryPhoneController.GVBridge.Adapters;
+using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.Core.Diagnostics;
+using Microsoft.Extensions.Options;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -125,8 +127,13 @@ builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
     // Register GV Browser adapter (if GVBridge is configured)
     var gvAdapter = sp.GetRequiredService<GVBrowserAdapter>();
     registry.Register(gvAdapter);
-    // Default to Bluetooth mode
-    registry.SwitchModeAsync(CallAdapterMode.BluetoothHfp).GetAwaiter().GetResult();
+    // Set default adapter mode from config (GVBridge.DefaultMode or fallback to BluetoothHfp)
+    var gvConfig = sp.GetRequiredService<IOptions<GVBridgeConfig>>().Value;
+    var defaultMode = Enum.TryParse<CallAdapterMode>(gvConfig.DefaultMode, true, out var mode)
+        ? mode : CallAdapterMode.BluetoothHfp;
+    registry.SwitchModeAsync(defaultMode).GetAwaiter().GetResult();
+    sp.GetRequiredService<ILogger<CallAdapterRegistry>>()
+        .LogInformation("Default call adapter mode: {Mode}", defaultMode);
     return registry;
 });
 
