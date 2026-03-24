@@ -460,19 +460,24 @@ public class CallManager
             _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
         }
 
-        // Start audio based on active adapter mode
-        if (_deviceManager != null && _activeDeviceAddress != null)
+        // Start audio based on active adapter mode.
+        // In GVBrowser mode, audio is handled by GVAudioBridgeService (started above).
+        // Only start Bluetooth/SCO audio for non-GV modes.
+        if (_boundAdapter?.Mode != CallAdapterMode.GVBrowser)
         {
-            // Bluetooth mode: answer via device manager — sends ATA over RFCOMM, SCO opens,
-            // HandleScoConnected will start the RTP bridge
-            _ = _deviceManager.AnswerCallAsync(_activeDeviceAddress);
-        }
-        else
-        {
-            // Legacy Bluetooth path
-            _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
-            var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
-            _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
+            if (_deviceManager != null && _activeDeviceAddress != null)
+            {
+                // Bluetooth mode: answer via device manager — sends ATA over RFCOMM, SCO opens,
+                // HandleScoConnected will start the RTP bridge
+                _ = _deviceManager.AnswerCallAsync(_activeDeviceAddress);
+            }
+            else
+            {
+                // Legacy Bluetooth path
+                _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
+                var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
+                _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
+            }
         }
 
         // Update call history
