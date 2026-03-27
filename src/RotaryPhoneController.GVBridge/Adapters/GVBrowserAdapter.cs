@@ -108,17 +108,18 @@ public class GVBrowserAdapter : ICallAdapter
         _logger.LogInformation("GVBrowser: rotary phone answered — answering GV call and starting audio bridge");
 
         // Click the Answer button on the GV web page via CDP (Chrome DevTools Protocol).
-        // This is the most reliable path — it directly executes JS in the page context,
-        // bypassing all the WebSocket/extension messaging issues.
+        // Also mute the tab so GV's WebRTC audio doesn't play through the speakers.
         _ = Task.Run(async () =>
         {
             try
             {
-                await ClickGvAnswerViaCdpAsync();
+                await ClickGvButtonViaCdpAsync("answer", "accept");
+                // Mute the GV tab so call audio goes through RTP bridge, not speakers
+                await MuteGvTabViaCdpAsync(true);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "CDP answer click failed");
+                _logger.LogWarning(ex, "CDP answer/mute failed");
             }
         });
 
@@ -126,11 +127,84 @@ public class GVBrowserAdapter : ICallAdapter
         await _audioBridge.StartAsync();
     }
 
+    public async Task OnCallHungUpAsync()
+    {
+        _logger.LogInformation("GVBrowser: stopping audio bridge and ending GV call");
+
+        // Stop the audio bridge
+        await _audioBridge.StopAsync();
+
+        // Click the End Call button and unmute the tab
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ClickGvButtonViaCdpAsync("end call", "hang up");
+                await MuteGvTabViaCdpAsync(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CDP end-call/unmute failed");
+            }
+        });
+    }
+
     /// <summary>
-    /// Click the Answer button on the GV page via Chrome DevTools Protocol.
-    /// Connects to Chromium's CDP port (9224) and evaluates JS to find and click the button.
+    /// Mute or unmute the GV tab via CDP so WebRTC audio doesn't play through speakers.
+    /// Audio should flow through the GVAudioBridge RTP path instead.
     /// </summary>
-    private async Task ClickGvAnswerViaCdpAsync()
+    private async Task MuteGvTabViaCdpAsync(bool mute)
+    {
+        using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var tabsJson = await http.GetStringAsync("http://127.0.0.1:9224/json");
+        var tabs = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement[]>(tabsJson);
+
+        string? wsUrl = null;
+        foreach (var tab in tabs!)
+        {
+            var url = tab.GetProperty("url").GetString() ?? "";
+            var type = tab.GetProperty("type").GetString() ?? "";
+            if (type == "page" && url.Contains("voice.google.com"))
+            {
+                wsUrl = tab.GetProperty("webSocketDebuggerUrl").GetString();
+                break;
+            }
+        }
+
+        if (wsUrl == null) return;
+
+        using var ws = new System.Net.WebSockets.ClientWebSocket();
+        await ws.ConnectAsync(new Uri(wsUrl), CancellationToken.None);
+
+        // Use Page.setWebLifecycleState or Runtime.evaluate to mute all audio
+        var muteJs = mute
+            ? "document.querySelectorAll('audio,video').forEach(e => e.muted = true); " +
+              "var ctx = new (window.AudioContext || window.webkitAudioContext)(); " +
+              "if (ctx.state === 'running') ctx.suspend(); 'muted'"
+            : "document.querySelectorAll('audio,video').forEach(e => e.muted = false); 'unmuted'";
+
+        var msg = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            id = 1,
+            method = "Runtime.evaluate",
+            @params = new { expression = muteJs }
+        });
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(msg);
+        await ws.SendAsync(bytes, System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+
+        var buffer = new byte[4096];
+        var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
+        var response = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+        _logger.LogInformation("CDP tab mute ({Mute}): {Response}", mute, response.Length > 200 ? response[..200] : response);
+
+        await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Click a button on the GV page via CDP, matching any of the given labels.
+    /// </summary>
+    private async Task ClickGvButtonViaCdpAsync(params string[] labelPatterns)
     {
         using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         var tabsJson = await http.GetStringAsync("http://127.0.0.1:9224/json");
@@ -154,20 +228,24 @@ public class GVBrowserAdapter : ICallAdapter
             return;
         }
 
+        // Build regex pattern from labels. Double-escape \b for JS string context.
+        var pattern = string.Join("|", labelPatterns.Select(l => @"\\b" + l.Replace(" ", @"\\s+") + @"\\b"));
+
         using var ws = new System.Net.WebSockets.ClientWebSocket();
         await ws.ConnectAsync(new Uri(wsUrl), CancellationToken.None);
 
-        var clickJs = @"(function() {
+        var clickJs = $@"(function() {{
+            var re = new RegExp('{pattern}', 'i');
             var btns = document.querySelectorAll('button');
-            for (var i = 0; i < btns.length; i++) {
+            for (var i = 0; i < btns.length; i++) {{
                 var label = (btns[i].getAttribute('aria-label') || btns[i].innerText || '').toLowerCase();
-                if (/\banswer\b|\baccept\b/.test(label)) {
+                if (re.test(label)) {{
                     btns[i].click();
                     return 'clicked: ' + label;
-                }
-            }
-            return 'no answer button found';
-        })()";
+                }}
+            }}
+            return 'no matching button found';
+        }})()";
 
         var msg = System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -183,14 +261,8 @@ public class GVBrowserAdapter : ICallAdapter
         var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
         var response = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
 
-        _logger.LogInformation("CDP answer click result: {Response}", response.Length > 200 ? response[..200] : response);
+        _logger.LogInformation("CDP button click result: {Response}", response.Length > 200 ? response[..200] : response);
 
         await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
-    }
-
-    public Task OnCallHungUpAsync()
-    {
-        _logger.LogInformation("GVBrowser: stopping audio bridge (call hung up)");
-        return _audioBridge.StopAsync();
     }
 }
