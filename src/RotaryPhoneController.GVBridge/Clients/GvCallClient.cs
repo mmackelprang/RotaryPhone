@@ -37,11 +37,11 @@ public class GvCallClient
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to initiate call to {Number}", e164Number);
-            return null;
+            throw;
         }
     }
 
-    public async Task<bool> HangupAsync(string callId, CancellationToken ct = default)
+    public async Task HangupAsync(string callId, CancellationToken ct = default)
     {
         try
         {
@@ -51,12 +51,11 @@ public class GvCallClient
             var response = await _http.PostAsync(url, content, ct);
             response.EnsureSuccessStatusCode();
             _logger.LogInformation("Call {CallId} hung up", callId);
-            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to hangup call {CallId}", callId);
-            return false;
+            throw;
         }
     }
 }

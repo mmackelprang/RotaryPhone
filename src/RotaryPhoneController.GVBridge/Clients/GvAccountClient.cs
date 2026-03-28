@@ -42,6 +42,11 @@ public class GvAccountClient
         }
     }
 
+    /// <summary>
+    /// Get account info (phone numbers, settings).
+    /// Returns the raw JsonDocument for the caller to extract what they need.
+    /// Caller is responsible for disposing the returned JsonDocument.
+    /// </summary>
     public async Task<JsonDocument?> GetAccountAsync(CancellationToken ct = default)
     {
         try

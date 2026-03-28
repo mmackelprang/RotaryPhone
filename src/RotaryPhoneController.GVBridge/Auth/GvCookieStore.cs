@@ -55,6 +55,8 @@ public class GvCookieStore
 
     private byte[] Decrypt(byte[] encrypted)
     {
+        if (encrypted.Length < 17)
+            throw new CryptographicException("Encrypted data too short");
         using var aes = Aes.Create();
         aes.Key = _key;
         aes.IV = encrypted[..16];
