@@ -124,8 +124,8 @@ builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
     var registry = new CallAdapterRegistry(sp.GetRequiredService<ILogger<CallAdapterRegistry>>());
     registry.Register(sp.GetRequiredService<BluetoothCallAdapter>());
     registry.Register(sp.GetRequiredService<SipTrunkCallAdapter>());
-    // Register GV Browser adapter (if GVBridge is configured)
-    var gvAdapter = sp.GetRequiredService<GVBrowserAdapter>();
+    // Register GV API adapter (direct HTTP API, no CDP)
+    var gvAdapter = sp.GetRequiredService<GVApiAdapter>();
     registry.Register(gvAdapter);
     // Set default adapter mode from config (GVBridge.DefaultMode or fallback to BluetoothHfp)
     var gvConfig = sp.GetRequiredService<IOptions<GVBridgeConfig>>().Value;
