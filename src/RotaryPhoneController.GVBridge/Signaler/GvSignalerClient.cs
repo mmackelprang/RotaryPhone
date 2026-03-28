@@ -98,66 +98,74 @@ public class GvSignalerClient
         var retryDelay = TimeSpan.FromSeconds(1);
         var maxRetryDelay = TimeSpan.FromSeconds(30);
 
-        while (!ct.IsCancellationRequested)
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                var url = $"{serverUrl}/punctual/multi-watch/channel" +
-                    $"?VER=8&CVER=22&RID=rpc&SID={_sid}&gsessionid={_gsessionId}" +
-                    $"&AID={_lastAid}&TYPE=xmlhttp&CI=0";
-
-                using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-
-                if (!response.IsSuccessStatusCode)
+                try
                 {
-                    _logger.LogWarning("Signaler poll returned {Status}", response.StatusCode);
-                    if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
-                        response.StatusCode == System.Net.HttpStatusCode.Gone)
-                    {
-                        _logger.LogInformation("Signaler session expired, reconnecting");
-                        await CreateChannelAsync(serverUrl, ct);
-                    }
-                    await Task.Delay(retryDelay, ct);
-                    retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, maxRetryDelay.TotalSeconds));
-                    continue;
-                }
+                    var url = $"{serverUrl}/punctual/multi-watch/channel" +
+                        $"?VER=8&CVER=22&RID=rpc&SID={_sid}&gsessionid={_gsessionId}" +
+                        $"&AID={_lastAid}&TYPE=xmlhttp&CI=0";
 
-                retryDelay = TimeSpan.FromSeconds(1);
-                var body = await response.Content.ReadAsStringAsync(ct);
+                    using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
 
-                if (!string.IsNullOrWhiteSpace(body))
-                {
-                    var events = ParseSignalerResponse(body);
-                    foreach (var evt in events)
+                    if (!response.IsSuccessStatusCode)
                     {
-                        switch (evt)
+                        _logger.LogWarning("Signaler poll returned {Status}", response.StatusCode);
+                        if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
+                            response.StatusCode == System.Net.HttpStatusCode.Gone)
                         {
-                            case IncomingCallEvent ic:
-                                _logger.LogInformation("Signaler: incoming call from {Number}", ic.CallerNumber);
-                                OnIncomingCall?.Invoke(ic);
-                                break;
-                            case CallEndedEvent ce:
-                                _logger.LogInformation("Signaler: call {CallId} ended", ce.CallId);
-                                OnCallEnded?.Invoke(ce);
-                                break;
-                            case SmsReceivedEvent sms:
-                                _logger.LogInformation("Signaler: SMS from {From}", sms.From);
-                                OnSmsReceived?.Invoke(sms);
-                                break;
+                            _logger.LogInformation("Signaler session expired, reconnecting");
+                            await CreateChannelAsync(serverUrl, ct);
+                        }
+                        await Task.Delay(retryDelay, ct);
+                        retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, maxRetryDelay.TotalSeconds));
+                        continue;
+                    }
+
+                    retryDelay = TimeSpan.FromSeconds(1);
+                    var body = await response.Content.ReadAsStringAsync(ct);
+
+                    if (!string.IsNullOrWhiteSpace(body))
+                    {
+                        var events = ParseSignalerResponse(body);
+                        foreach (var evt in events)
+                        {
+                            switch (evt)
+                            {
+                                case IncomingCallEvent ic:
+                                    _logger.LogInformation("Signaler: incoming call from {Number}", ic.CallerNumber);
+                                    OnIncomingCall?.Invoke(ic);
+                                    break;
+                                case CallEndedEvent ce:
+                                    _logger.LogInformation("Signaler: call {CallId} ended", ce.CallId);
+                                    OnCallEnded?.Invoke(ce);
+                                    break;
+                                case SmsReceivedEvent sms:
+                                    _logger.LogInformation("Signaler: SMS from {From}", sms.From);
+                                    OnSmsReceived?.Invoke(sms);
+                                    break;
+                            }
                         }
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Signaler poll error, retrying in {Delay}", retryDelay);
+                    await Task.Delay(retryDelay, ct);
+                    retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, maxRetryDelay.TotalSeconds));
+                }
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Signaler poll error, retrying in {Delay}", retryDelay);
-                await Task.Delay(retryDelay, ct);
-                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, maxRetryDelay.TotalSeconds));
-            }
+        }
+        finally
+        {
+            IsConnected = false;
+            _logger.LogInformation("Signaler poll loop exited");
         }
     }
 
@@ -171,7 +179,7 @@ public class GvSignalerClient
             {
                 if (!line.StartsWith('['))
                     continue;
-                var doc = JsonDocument.Parse(line);
+                using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
                 if (root.ValueKind != JsonValueKind.Array)
                     continue;
@@ -201,23 +209,37 @@ public class GvSignalerClient
 
     private SignalerEvent? ClassifyEvent(JsonElement item)
     {
+        // Serialize once for pattern matching
         var text = item.ToString();
-        if (text.Contains("o=xavier") || text.Contains("incoming_call", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrEmpty(text) || text.Length < 5)
+            return null;
+
+        // Incoming call: SDP offer from Google's "xavier" SIP UA
+        if (text.Contains("o=xavier", StringComparison.Ordinal))
         {
+            var callerNumber = ExtractCallerNumber(item) ?? "Unknown";
             return new IncomingCallEvent(
                 CallId: $"gv-{Guid.NewGuid():N}",
-                CallerNumber: ExtractCallerNumber(item) ?? "Unknown");
+                CallerNumber: callerNumber);
         }
-        if (text.Contains("call_ended", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("hangup", StringComparison.OrdinalIgnoreCase))
+
+        // Only match specific GV event type indicators, not generic words
+        // TODO: Refine with actual signaler payloads from live API testing
+        if (text.Contains("\"call_ended\"", StringComparison.OrdinalIgnoreCase))
         {
-            return new CallEndedEvent(CallId: "");
+            var callId = ExtractCallerNumber(item) ?? "";
+            return new CallEndedEvent(CallId: callId);
         }
-        if (text.Contains("sms", StringComparison.OrdinalIgnoreCase) &&
-            text.Contains("message", StringComparison.OrdinalIgnoreCase))
+
+        if (text.Contains("\"sms_received\"", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("\"INCOMING_TEXT\"", StringComparison.Ordinal))
         {
-            return new SmsReceivedEvent(From: "", Body: "", ThreadId: "");
+            return new SmsReceivedEvent(
+                From: ExtractCallerNumber(item) ?? "Unknown",
+                Body: "(content pending live API format discovery)",
+                ThreadId: "");
         }
+
         return null;
     }
 
