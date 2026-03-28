@@ -17,6 +17,8 @@ namespace RotaryPhoneController.GVBridge.Models;
 [JsonDerivedType(typeof(HangupMessage), "hangup")]
 [JsonDerivedType(typeof(SendSmsMessage), "sendSms")]
 [JsonDerivedType(typeof(PingMessage), "ping")]
+[JsonDerivedType(typeof(MuteTabMessage), "muteTab")]
+[JsonDerivedType(typeof(UnmuteTabMessage), "unmuteTab")]
 public abstract class ExtensionMessage { }
 
 // Extension -> Bridge
@@ -36,3 +38,5 @@ public class AnswerMessage : ExtensionMessage { }
 public class HangupMessage : ExtensionMessage { }
 public class SendSmsMessage : ExtensionMessage { public string To { get; set; } = ""; public string Body { get; set; } = ""; }
 public class PingMessage : ExtensionMessage { }
+public class MuteTabMessage : ExtensionMessage { }
+public class UnmuteTabMessage : ExtensionMessage { }
