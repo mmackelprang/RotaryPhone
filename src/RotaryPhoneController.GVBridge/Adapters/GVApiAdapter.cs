@@ -25,6 +25,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     // Internal components created during ActivateAsync
     private GvCookieStore? _cookieStore;
+    private GvCookieRotationService? _rotationService;
     private GvCookieJar? _cookieJar;
     private HttpClient? _httpClient;
     private GvAccountClient? _accountClient;
@@ -81,14 +82,20 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 2. Create authenticated HttpClient
-        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieJar));
+        // 2. Start cookie rotation service (refreshes PSIDTS every 5 min)
+        _rotationService = new GvCookieRotationService(
+            _cookieStore, _loggerFactory.CreateLogger<GvCookieRotationService>());
+        _cookieJar = await _rotationService.StartAsync(ct) ?? _cookieJar;
+
+        // 3. Create authenticated HttpClient (reads from rotation service's live jar)
+        var handler = new GvHttpClientHandler(() =>
+            Task.FromResult(_rotationService.CurrentJar ?? _cookieJar!));
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        // 3. Create API clients with typed loggers
+        // 4. Create API clients with typed loggers
         _accountClient = new GvAccountClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
             _loggerFactory.CreateLogger<GvAccountClient>());
@@ -101,7 +108,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
             _loggerFactory.CreateLogger<GvSmsClient>());
 
-        // 4. Health check to verify cookies work
+        // 5. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
         if (!healthy)
         {
@@ -110,7 +117,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 5. Connect signaler for incoming call notifications
+        // 6. Connect signaler for incoming call notifications
         _signalerClient = new GvSignalerClient(
             _httpClient, _config.SignalerBaseUrl,
             _loggerFactory.CreateLogger<GvSignalerClient>());
@@ -138,7 +145,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _logger.LogWarning(ex, "GVApi: Failed to connect signaler — will retry on next health check");
         }
 
-        // 6. Start periodic health check timer
+        // 7. Start periodic health check timer
         var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
         _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
 
@@ -156,6 +163,9 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             await _healthCheckTimer.DisposeAsync();
             _healthCheckTimer = null;
         }
+
+        // Stop cookie rotation
+        _rotationService?.Stop();
 
         // Disconnect signaler
         if (_signalerClient != null)

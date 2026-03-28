@@ -27,7 +27,8 @@ public class GvCookieStoreTests : IDisposable
         {
             Sapisid = "SAP123", Sid = "SID456", Hsid = "HSID789",
             Ssid = "SSID012", Apisid = "API345",
-            Secure1Psid = "SEC1_678", Secure3Psid = "SEC3_901"
+            Secure1Psid = "SEC1_678", Secure3Psid = "SEC3_901",
+            Secure1Psidts = "PSIDTS1", Secure3Psidts = "PSIDTS3"
         };
 
         await store.SaveAsync(cookies);

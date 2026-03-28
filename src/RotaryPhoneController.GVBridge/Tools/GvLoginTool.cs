@@ -9,7 +9,8 @@ namespace RotaryPhoneController.GVBridge.Tools;
 public static class GvLoginTool
 {
     private static readonly string[] RequiredCookieNames =
-        ["SAPISID", "SID", "HSID", "SSID", "APISID", "__Secure-1PSID", "__Secure-3PSID"];
+        ["SAPISID", "SID", "HSID", "SSID", "APISID", "__Secure-1PSID", "__Secure-3PSID",
+         "__Secure-1PSIDTS", "__Secure-3PSIDTS", "__Secure-1PAPISID", "__Secure-3PAPISID", "SIDCC"];
 
     public static async Task<bool> LoginAndSaveAsync(
         string cookieFilePath, string encryptionKey,
@@ -36,7 +37,7 @@ public static class GvLoginTool
         try
         {
             await page.WaitForURLAsync("**/voice.google.com/u/**",
-                new() { Timeout = 120_000 });
+                new() { Timeout = 300_000 }); // 5 minutes for login + 2FA
         }
         catch (TimeoutException)
         {
@@ -45,6 +46,22 @@ public static class GvLoginTool
         }
 
         await page.WaitForTimeoutAsync(3000);
+
+        // Extract the GV API key from the page source (embedded in JS)
+        string? apiKey = null;
+        try
+        {
+            apiKey = await page.EvaluateAsync<string?>(
+                "(() => { const m = document.documentElement.innerHTML.match(/\"AIzaSy[A-Za-z0-9_-]{33}\"/); return m ? m[0].replace(/\"/g, '') : null; })()");
+            if (apiKey != null)
+                logger.LogInformation("Extracted GV API key: {Key}", apiKey[..12] + "...");
+            else
+                logger.LogWarning("Could not extract GV API key from page — you may need to set it manually in appsettings.json");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to extract API key from page");
+        }
 
         var allCookies = await context.CookiesAsync(["https://voice.google.com", "https://google.com"]);
         var jar = new GvCookieJar();
@@ -60,6 +77,11 @@ public static class GvLoginTool
                 case "APISID": jar.Apisid = cookie.Value; break;
                 case "__Secure-1PSID": jar.Secure1Psid = cookie.Value; break;
                 case "__Secure-3PSID": jar.Secure3Psid = cookie.Value; break;
+                case "__Secure-1PSIDTS": jar.Secure1Psidts = cookie.Value; break;
+                case "__Secure-3PSIDTS": jar.Secure3Psidts = cookie.Value; break;
+                case "__Secure-1PAPISID": jar.Secure1Papisid = cookie.Value; break;
+                case "__Secure-3PAPISID": jar.Secure3Papisid = cookie.Value; break;
+                case "SIDCC": jar.Sidcc = cookie.Value; break;
             }
         }
 
@@ -75,10 +97,26 @@ public static class GvLoginTool
         await store.SaveAsync(jar);
         logger.LogInformation("Cookies saved to {Path}", cookieFilePath);
 
-        // Verify with health check
+        // Save API key if extracted
+        if (apiKey != null)
+        {
+            var keyPath = Path.Combine(Path.GetDirectoryName(cookieFilePath) ?? "data", "gv-api-key.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
+            await File.WriteAllTextAsync(keyPath, apiKey, ct);
+            logger.LogInformation("API key saved to {Path}", keyPath);
+        }
+
+        // Verify with health check (use extracted key if available)
+        var effectiveKey = apiKey ?? gvApiKey;
+        if (string.IsNullOrEmpty(effectiveKey))
+        {
+            logger.LogWarning("No API key available — skipping health check. Set GvApiKey in appsettings.json.");
+            return true; // cookies saved successfully even without health check
+        }
+
         var handler = new GvHttpClientHandler(() => Task.FromResult(jar), new HttpClientHandler());
         using var http = new HttpClient(handler);
-        var account = new GvAccountClient(http, gvApiBaseUrl, gvApiKey,
+        var account = new GvAccountClient(http, gvApiBaseUrl, effectiveKey,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<GvAccountClient>.Instance);
         var healthy = await account.IsHealthyAsync(ct);
         logger.LogInformation(healthy ? "Health check passed — cookies are valid" : "Health check failed");
