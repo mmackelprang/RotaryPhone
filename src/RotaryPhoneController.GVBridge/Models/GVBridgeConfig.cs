@@ -14,4 +14,12 @@ public class GVBridgeConfig
     public int ExtensionConnectTimeoutSeconds { get; set; } = 30;
     public string CallLogDbPath { get; set; } = "data/gvbridge-calllog.db";
     public string DefaultMode { get; set; } = "GVBrowser";
+
+    // GV API settings (used by GVApiAdapter)
+    public string GvApiBaseUrl { get; set; } = "https://clients6.google.com/voice/v1/voiceclient";
+    public string GvApiKey { get; set; } = "";  // Google API key from voice.google.com page source
+    public string CookieFilePath { get; set; } = "data/gv-cookies.enc";
+    public string CookieEncryptionKey { get; set; } = "";  // AES-256 key, base64-encoded
+    public int CookieHealthCheckIntervalMinutes { get; set; } = 30;
+    public string SignalerBaseUrl { get; set; } = "https://signaler-pa.clients6.google.com";
 }

@@ -4,5 +4,6 @@ public enum CallAdapterMode
 {
     BluetoothHfp,
     SipTrunk,
-    GVBrowser
+    GVBrowser,
+    GVApi
 }
