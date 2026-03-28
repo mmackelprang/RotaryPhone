@@ -31,8 +31,6 @@ const SELECTORS = {
   callDurationTimer: '[data-call-duration], [aria-label*="call duration"]',
 };
 
-let callActive = false;
-let incomingDetected = false;
 let audioCaptureActive = false;
 
 // --- WebSocket Connection ---
@@ -90,16 +88,6 @@ function sendToServer(msg) {
   } else {
     console.warn('[GVBridge] WS not connected, ws:', ws?.readyState);
   }
-}
-
-// HTTP POST via service worker — content scripts on HTTPS pages can't fetch HTTP localhost
-// (mixed content), so we relay through the service worker which has no such restriction.
-function sendViaHttp(msg) {
-  chrome.runtime.sendMessage({ type: 'postCallEvent', event: msg }).then(r => {
-    console.log('[GVBridge] HTTP POST via SW:', msg.type, r?.ok ? 'OK' : r?.error);
-  }).catch(e => {
-    console.error('[GVBridge] HTTP POST relay failed:', e);
-  });
 }
 
 // --- Audio Bridge Control ---
@@ -165,6 +153,7 @@ function handleBridgeMessage(msg) {
       dial(msg.number);
       break;
     case 'answer':
+      console.log('[GVBridge] Received ANSWER command from server');
       answer();
       break;
     case 'hangup':
@@ -172,6 +161,18 @@ function handleBridgeMessage(msg) {
       break;
     case 'sendSms':
       sendSms(msg.to, msg.body);
+      break;
+    case 'muteTab':
+      document.querySelectorAll('audio,video').forEach(e => e.muted = true);
+      try {
+        const contexts = window.__audioContexts || [];
+        contexts.forEach(ctx => { if (ctx.state === 'running') ctx.suspend(); });
+      } catch(e) {}
+      console.log('[GV Bridge] Tab muted');
+      break;
+    case 'unmuteTab':
+      document.querySelectorAll('audio,video').forEach(e => e.muted = false);
+      console.log('[GV Bridge] Tab unmuted');
       break;
     case 'ping':
       if (ws?.readyState === WebSocket.OPEN) {
@@ -265,8 +266,20 @@ function dial(number) {
 
 function answer() {
   retryAction(() => {
-    const btn = document.querySelector(SELECTORS.answerButton);
-    if (!btn) return false;
+    // Try the ARIA selector first
+    let btn = document.querySelector(SELECTORS.answerButton);
+    if (!btn) {
+      // Fallback: find any button with "answer" or "accept" in its label/text
+      document.querySelectorAll('button').forEach(b => {
+        const label = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+        if (/\banswer\b|\baccept\b/.test(label)) btn = b;
+      });
+    }
+    if (!btn) {
+      console.log('[GVBridge] Answer button not found');
+      return false;
+    }
+    console.log('[GVBridge] Clicking answer button:', btn.getAttribute('aria-label') || btn.innerText);
     btn.click();
     return true;
   });
@@ -277,8 +290,6 @@ function hangup() {
     const btn = document.querySelector(SELECTORS.hangupButton);
     if (!btn) return false;
     btn.click();
-    callActive = false;
-    incomingDetected = false;
     return true;
   });
 }
@@ -286,36 +297,6 @@ function hangup() {
 function sendSms(to, body) {
   console.log('[GVBridge] sendSms not fully implemented — requires thread navigation');
 }
-
-// --- fetch() interceptor for SMS data ---
-
-const _fetch = window.fetch;
-window.fetch = async function(url, opts) {
-  const resp = await _fetch.apply(this, arguments);
-
-  try {
-    if (typeof url === 'string' && url.includes('/voice/v1/voiceclient/conversation')) {
-      resp.clone().json().then(data => {
-        if (data?.conversation?.message) {
-          for (const msg of data.conversation.message) {
-            if (msg.type === 'INCOMING_TEXT') {
-              sendToServer({
-                type: 'smsReceived',
-                from: msg.sender || 'Unknown',
-                body: msg.text || '',
-                threadId: data.conversation.id || ''
-              });
-            }
-          }
-        }
-      }).catch(() => {});
-    }
-  } catch (e) {
-    // Don't break GV's own fetch flow
-  }
-
-  return resp;
-};
 
 // --- Extension message listener (receives audioFrames relayed from offscreen via background) ---
 
@@ -328,96 +309,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// --- Call Detection via Polling ---
-// GV renders incoming call UI in the main content area (replaces dial pad).
-// The panel shows caller info + "Incoming Call" text + red/green accept/reject buttons.
-// We poll every 500ms — more reliable than MutationObserver for text detection.
-
-let callPollInterval = null;
-
-function startCallPolling() {
-  if (callPollInterval) return;
-  callPollInterval = setInterval(() => {
-    try {
-      // Detect active call UI by checking for specific buttons.
-      // DO NOT use document.body.innerText for "Incoming call" — the call history
-      // list also contains that text, causing false positives.
-      let hasAnswerBtn = false;
-      let hasDeclineBtn = false;
-      let hasEndCallBtn = false;
-      let hasMuteBtn = false;
-      let hasHoldBtn = false;
-      document.querySelectorAll('button').forEach(btn => {
-        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-        const text = (btn.innerText || '').toLowerCase();
-        const combined = label + ' ' + text;
-        if (/\banswer\b|\baccept\b/.test(combined)) hasAnswerBtn = true;
-        if (/\bdecline\b|\breject\b/.test(combined)) hasDeclineBtn = true;
-        if (/\bend call\b|\bhang up\b/.test(combined)) hasEndCallBtn = true;
-        if (/\bmute\b/.test(combined)) hasMuteBtn = true;
-        if (/\bhold\b/.test(combined)) hasHoldBtn = true;
-      });
-
-      // Active incoming call = answer + decline buttons visible (from the screenshot)
-      // Also check for Hold/Mute/Keypad which appear in the call panel
-      const hasActiveCallPanel = (hasAnswerBtn || hasDeclineBtn) || (hasMuteBtn && hasHoldBtn);
-      const hasIncomingCall = hasAnswerBtn || hasDeclineBtn;
-
-      // Debug: write poll state to DOM attribute
-      document.documentElement.setAttribute('data-gvbridge-poll',
-        Date.now() + '|ws=' + (ws ? ws.readyState : 'null') + '|answer=' + hasAnswerBtn + '|decline=' + hasDeclineBtn + '|endcall=' + hasEndCallBtn + '|mute=' + hasMuteBtn + '|detected=' + incomingDetected + '|active=' + callActive);
-
-      // Incoming call: answer/decline buttons visible
-      if (hasIncomingCall && !incomingDetected && !callActive) {
-        incomingDetected = true;
-        const callerInfo = extractCallerInfo();
-        console.log('[GVBridge] INCOMING CALL DETECTED:', callerInfo);
-        // Send via BOTH WebSocket (if connected) and HTTP POST (reliable fallback)
-        const msg = { type: 'incomingCall', from: callerInfo || 'Unknown', callId: `gv-${Date.now()}` };
-        sendToServer(msg);
-        sendViaHttp(msg);
-      }
-
-      // Call answered: mute/end-call buttons visible but answer button GONE
-      // (GV shows answer+endcall+mute together during ringing; when user clicks
-      // answer, the answer button disappears but endcall+mute remain)
-      if (hasMuteBtn && !hasAnswerBtn && !hasDeclineBtn && incomingDetected && !callActive) {
-        callActive = true;
-        incomingDetected = false;
-        console.log('[GVBridge] CALL ANSWERED');
-        const msg = { type: 'callAnswered', callId: `gv-${Date.now()}` };
-        sendToServer(msg);
-        sendViaHttp(msg);
-        startAudioCapture();
-      }
-
-      // Call ended: was in call but no more end-call/mute buttons
-      if (callActive && !hasEndCallBtn && !hasMuteBtn) {
-        callActive = false;
-        console.log('[GVBridge] CALL ENDED');
-        const msg = { type: 'callEnded', callId: `gv-${Date.now()}` };
-        sendToServer(msg);
-        sendViaHttp(msg);
-        stopAudioCapture();
-      }
-
-      // Incoming call missed/declined: was ringing but buttons gone
-      if (incomingDetected && !callActive && !hasAnswerBtn && !hasDeclineBtn) {
-        incomingDetected = false;
-        console.log('[GVBridge] INCOMING CALL ENDED (missed/declined)');
-        const msg = { type: 'callEnded', callId: `gv-${Date.now()}` };
-        sendToServer(msg);
-        sendViaHttp(msg);
-      }
-    } catch (e) {
-      // Don't let polling errors crash the script
-    }
-  }, 500);
-  console.log('[GVBridge] Call polling started (500ms interval)');
-}
-
 // --- Init ---
 setupObserver();
 connect();
-startCallPolling();
 console.log('[GVBridge] Content script loaded on', window.location.href);

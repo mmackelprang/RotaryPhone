@@ -155,7 +155,7 @@ The GVBridge section (update IPs for your network):
     "WebSocketHost": "127.0.0.1",
     "LocalRtpPort": 5070,
     "LocalIp": "0.0.0.0",
-    "HT801Ip": "192.168.86.250",
+    "HT801Ip": "192.168.86.22",
     "HT801RtpPort": 5004,
     "AudioSampleRateHz": 16000,
     "AudioChannels": 1,
@@ -245,16 +245,21 @@ Both services auto-start, but you may need to:
 
 ## Current Status & Known Limitations
 
-### Working
-- Incoming GV call detection (button polling in content script)
-- SIP INVITE to HT801 → phone rings
-- Phone answer detected (200 OK from HT801)
-- Hook change detection (on-hook/off-hook)
-- SIP diagnostics (message log, INVITE timeout detection, HT801 health)
-- Diagnostics web UI and REST API
+### Working (verified 2026-03-24)
+- **Full incoming call flow**: GV call → extension detects → SIP INVITE → HT801 → phone rings → user answers (200 OK) → InCall → user hangs up (BYE) → Idle
+- **Call state machine**: SIP events are authoritative (not browser extension events). 60-second ringing timeout prevents stuck state.
+- **Incoming call detection**: Content script polls for Answer/Decline/Mute/EndCall buttons every 500ms
+- **SIP diagnostics**: Real-time message log, INVITE timeout detection, HT801 health, call timeline
+- **Diagnostics web UI** at `/diagnostics` and REST API
 
 ### Not yet working
-- **Audio bridge**: GVAudioBridgeService is built but not yet tested end-to-end (WebSocket PCM ↔ RTP G.711)
-- **Call state race**: GV extension and SIP events can race, causing premature BYE
-- **Auto mode on boot**: Adapter defaults to BluetoothHfp; needs manual switch to GVBrowser
+- **Audio bridge**: GVAudioBridgeService is built but not yet tested with live calls (WebSocket PCM ↔ RTP G.711)
+- **BYE handling**: HT801's BYE after a test-ring gets 481 response, leaving the device stuck. Workaround: reboot HT801 after using test-ring.
+- **Auto mode on boot**: Adapter defaults to BluetoothHfp; needs manual switch to GVBrowser after each service restart
+- **Outgoing calls**: Rotary dial → GV not yet implemented
 - **Audio playback to GV caller**: tabCapture capture works, but playback direction (phone mic → GV) is Phase 2
+
+### HT801 Quirks
+- **Factory reset required** if incoming SIP stops working. Only configure 3 settings: SIP Server, SIP User ID, SIP Registration. Changing other settings (Register Expiration, NOTIFY Auth, etc.) can silently break incoming SIP.
+- **Re-registration delay**: After service restart, HT801 won't re-register until its timer fires (up to 60 min). Reboot the HT801 to force immediate re-registration.
+- **Test-ring caution**: The test-ring endpoint auto-answers after 4s and the BYE response (481) leaves the HT801 stuck. Always reboot HT801 after using test-ring.

@@ -1,0 +1,49 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using RotaryPhoneController.GVBridge.Adapters;
+using RotaryPhoneController.GVBridge.Models;
+using RotaryPhoneController.Core;
+using Xunit;
+
+namespace RotaryPhoneController.GVBridge.Tests.Adapters;
+
+public class GVApiAdapterTests
+{
+    [Fact]
+    public void Mode_IsGVApi()
+    {
+        var adapter = CreateAdapter();
+        Assert.Equal(CallAdapterMode.GVApi, adapter.Mode);
+    }
+
+    [Fact]
+    public void IsAvailable_DefaultsFalse()
+    {
+        var adapter = CreateAdapter();
+        Assert.False(adapter.IsAvailable);
+    }
+
+    [Fact]
+    public async Task PlaceCallAsync_ThrowsWhenNotAvailable()
+    {
+        var adapter = CreateAdapter();
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => adapter.PlaceCallAsync("+15551234567"));
+    }
+
+    private static GVApiAdapter CreateAdapter()
+    {
+        var config = Options.Create(new GVBridgeConfig
+        {
+            GvApiBaseUrl = "https://clients6.google.com/voice/v1/voiceclient",
+            GvApiKey = "test",
+            CookieFilePath = "test.enc",
+            CookieEncryptionKey = Convert.ToBase64String(new byte[32]),
+        });
+
+        return new GVApiAdapter(
+            config,
+            NullLogger<GVApiAdapter>.Instance,
+            NullLoggerFactory.Instance);
+    }
+}

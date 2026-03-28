@@ -24,8 +24,18 @@ public static class GVBridgeServiceExtensions
         services.AddHostedService(sp => sp.GetRequiredService<GVBridgeService>());
         services.AddSingleton<GVAudioBridgeService>();
 
-        services.AddSingleton<GVBrowserAdapter>();
-        services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVBrowserAdapter>());
+        // GV API adapter (direct HTTP API, no CDP)
+        services.AddSingleton<GVApiAdapter>();
+        services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVApiAdapter>());
+
+        services.AddHostedService(sp =>
+        {
+            var apiAdapter = sp.GetRequiredService<GVApiAdapter>();
+            var bridgeService = sp.GetRequiredService<GVBridgeService>();
+            var audioBridge = sp.GetRequiredService<GVAudioBridgeService>();
+            apiAdapter.SetServices(bridgeService, audioBridge);
+            return new GvApiAdapterSetup();
+        });
 
         services.AddSingleton<GVSmsService>();
 
@@ -39,6 +49,12 @@ public static class GVBridgeServiceExtensions
         endpoints.MapHub<GVBridgeHub>("/hubs/gvbridge");
         endpoints.MapControllers();
         return endpoints;
+    }
+
+    private class GvApiAdapterSetup : IHostedService
+    {
+        public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken ct) => Task.CompletedTask;
     }
 }
 

@@ -17,6 +17,7 @@ public class CallManager
     private readonly ICallAdapterRegistry? _adapterRegistry;
     private ICallAdapter? _boundAdapter;
     private readonly int _rtpPort;
+    private CancellationTokenSource? _ringingTimeoutCts;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
@@ -281,10 +282,34 @@ public class CallManager
 
         IncomingPhoneNumber = phoneNumber;
         CurrentState = CallState.Ringing;
-        
-        // Send INVITE to HT801 to trigger ring
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
-        
+
+        // Start a ringing timeout — if the call isn't answered or cancelled within 60s,
+        // reset to Idle. This prevents the state machine from getting stuck if the
+        // SIP INVITE times out or the HT801 doesn't respond.
+        _ringingTimeoutCts?.Cancel();
+        _ringingTimeoutCts = new CancellationTokenSource();
+        var cts = _ringingTimeoutCts;
+        _ = Task.Delay(TimeSpan.FromSeconds(60), cts.Token).ContinueWith(t =>
+        {
+            if (!t.IsCanceled && CurrentState == CallState.Ringing)
+            {
+                _logger.LogWarning("Ringing timeout (60s) — resetting to Idle");
+                _sipAdapter.CancelPendingInvite();
+                CurrentState = CallState.Idle;
+                IncomingPhoneNumber = null;
+                _currentCallHistory = null;
+                StateChanged?.Invoke();
+            }
+        }, TaskScheduler.Default);
+
+        // Send INVITE to HT801 to trigger ring.
+        // In GVBrowser mode, use the GV audio bridge's RTP port (5070) in the SDP
+        // so the HT801 sends audio to the right place.
+        var rtpPortForSdp = _boundAdapter?.Mode == CallAdapterMode.GVBrowser ? 5070 : _rtpPort;
+        _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP} (SDP RTP port {Port})",
+            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
+        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
+
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
         {
@@ -414,28 +439,45 @@ public class CallManager
     public void AnswerCall()
     {
         _logger.LogInformation("Answering call");
-        
+
         if (CurrentState != CallState.Ringing)
         {
             _logger.LogWarning("Cannot answer call - not in Ringing state. Current state: {State}", CurrentState);
             return;
         }
 
-        // Call answered on rotary phone (handset lifted) - route audio through rotary phone
-        _logger.LogInformation("Call answered on rotary phone - routing audio through rotary phone");
+        // Cancel the ringing timeout
+        _ringingTimeoutCts?.Cancel();
 
-        if (_deviceManager != null && _activeDeviceAddress != null)
+        // Call answered on rotary phone (handset lifted) - route audio
+        _logger.LogInformation("Call answered on rotary phone");
+
+        // Notify the active adapter:
+        // - In GVBrowser mode: starts audio bridge AND answers the call on the GV web page
+        // - In other modes: no-op (default interface implementation)
+        if (_boundAdapter != null)
         {
-            // Answer via device manager — sends ATA over RFCOMM, SCO opens,
-            // HandleScoConnected will start the RTP bridge
-            _ = _deviceManager.AnswerCallAsync(_activeDeviceAddress);
+            _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
         }
-        else
+
+        // Start audio based on active adapter mode.
+        // In GVBrowser mode, audio is handled by GVAudioBridgeService (started above).
+        // Only start Bluetooth/SCO audio for non-GV modes.
+        if (_boundAdapter?.Mode != CallAdapterMode.GVBrowser)
         {
-            // Legacy path
-            _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
-            var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
-            _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
+            if (_deviceManager != null && _activeDeviceAddress != null)
+            {
+                // Bluetooth mode: answer via device manager — sends ATA over RFCOMM, SCO opens,
+                // HandleScoConnected will start the RTP bridge
+                _ = _deviceManager.AnswerCallAsync(_activeDeviceAddress);
+            }
+            else
+            {
+                // Legacy Bluetooth path
+                _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
+                var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
+                _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
+            }
         }
 
         // Update call history
@@ -499,6 +541,7 @@ public class CallManager
         }
 
         _isHangingUp = true;
+        _ringingTimeoutCts?.Cancel();
         _logger.LogInformation("Hanging up");
         var previousState = CurrentState;
 
@@ -517,10 +560,14 @@ public class CallManager
                 _ = _bluetoothAdapter.TerminateCallAsync();
             }
 
-            // Stop RTP bridge
+            // Stop audio bridges
             if (_rtpBridge.IsActive)
             {
                 _ = _rtpBridge.StopBridgeAsync();
+            }
+            if (_boundAdapter != null)
+            {
+                _ = _boundAdapter.OnCallHungUpAsync();
             }
 
             // Update call history
