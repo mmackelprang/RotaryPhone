@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.GVBridge.Auth;
@@ -18,6 +17,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 {
     private readonly GVBridgeConfig _config;
     private readonly ILogger<GVApiAdapter> _logger;
+    private readonly ILoggerFactory _loggerFactory;
 
     // Set via SetServices() to avoid circular DI
     private GVBridgeService? _bridgeService;
@@ -47,10 +47,12 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     public GVApiAdapter(
         IOptions<GVBridgeConfig> config,
-        ILogger<GVApiAdapter> logger)
+        ILogger<GVApiAdapter> logger,
+        ILoggerFactory loggerFactory)
     {
         _config = config.Value;
         _logger = logger;
+        _loggerFactory = loggerFactory;
     }
 
     /// <summary>
@@ -86,18 +88,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        // 3. Create API clients (using NullLogger — DI wiring improved in Task 13)
+        // 3. Create API clients with typed loggers
         _accountClient = new GvAccountClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            NullLogger<GvAccountClient>.Instance);
+            _loggerFactory.CreateLogger<GvAccountClient>());
 
         _callClient = new GvCallClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            NullLogger<GvCallClient>.Instance);
+            _loggerFactory.CreateLogger<GvCallClient>());
 
         _smsClient = new GvSmsClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            NullLogger<GvSmsClient>.Instance);
+            _loggerFactory.CreateLogger<GvSmsClient>());
 
         // 4. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
@@ -111,11 +113,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         // 5. Connect signaler for incoming call notifications
         _signalerClient = new GvSignalerClient(
             _httpClient, _config.SignalerBaseUrl,
-            NullLogger<GvSignalerClient>.Instance);
+            _loggerFactory.CreateLogger<GvSignalerClient>());
 
         _signalerClient.OnIncomingCall += evt =>
         {
-            _activeCallId = evt.CallId;
+            Interlocked.Exchange(ref _activeCallId, evt.CallId);
             _logger.LogInformation("GVApi: incoming call from {From} (callId={CallId})",
                 evt.CallerNumber, evt.CallId);
             OnIncomingCall?.Invoke(evt.CallerNumber);
@@ -124,7 +126,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _signalerClient.OnCallEnded += evt =>
         {
             _logger.LogDebug("GVApi: signaler reported callEnded (ignored — SIP is authoritative)");
-            _activeCallId = null;
+            Interlocked.Exchange(ref _activeCallId, null);
         };
 
         try
@@ -171,7 +173,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _smsClient = null;
         _cookieJar = null;
         _cookieStore = null;
-        _activeCallId = null;
+        Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
         _logger.LogInformation("GVApiAdapter deactivated");
@@ -180,12 +182,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     public async Task<string> PlaceCallAsync(string e164Number, CancellationToken ct = default)
     {
         if (!IsAvailable)
-            throw new InvalidOperationException("GV API adapter not available");
+            throw new InvalidOperationException("GVApiAdapter is not available");
 
         var result = await _callClient!.InitiateAsync(e164Number, ct);
-        _activeCallId = $"gv-{Guid.NewGuid():N}";
-        _logger.LogInformation("GVApi: dialing {Number} (callId={CallId})", e164Number, _activeCallId);
-        return _activeCallId;
+        if (result == null)
+            throw new InvalidOperationException($"Failed to initiate call to {e164Number}");
+
+        // TODO: Extract real call ID from Google's protobuf-JSON response once format is confirmed via live testing
+        var callId = $"gv-{Guid.NewGuid():N}";
+        Interlocked.Exchange(ref _activeCallId, callId);
+        _logger.LogInformation("Placed call {CallId} to {Number}", callId, e164Number);
+        result.Dispose();
+        return callId;
     }
 
     public Task AnswerCallAsync(CancellationToken ct = default)
@@ -198,41 +206,40 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     public async Task HangUpAsync(CancellationToken ct = default)
     {
-        if (_callClient != null && _activeCallId != null)
+        var callId = Interlocked.Exchange(ref _activeCallId, null);
+        if (_callClient != null && callId != null)
         {
-            await _callClient.HangupAsync(_activeCallId, ct);
+            try
+            {
+                await _callClient.HangupAsync(callId, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "API hangup failed for call {CallId}", callId);
+            }
         }
-        _activeCallId = null;
         _logger.LogInformation("GVApi: hanging up");
     }
 
     public async Task OnCallAnsweredOnRotaryPhoneAsync()
     {
-        _logger.LogInformation("GVApi: rotary phone answered — sending answer to extension and starting audio bridge");
+        _logger.LogInformation("GVApi: rotary phone answered");
 
-        // Tell the Chrome extension to click answer and mute the tab
-        // (extension is still used for WebRTC audio transport)
         if (_bridgeService != null)
         {
-            _ = Task.Run(async () =>
+            try
             {
-                try
-                {
-                    await _bridgeService.SendMessageAsync(new AnswerMessage());
-                    await _bridgeService.SendMessageAsync(new MuteTabMessage());
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to send answer/mute to extension");
-                }
-            });
+                await _bridgeService.SendMessageAsync(new AnswerMessage());
+                await _bridgeService.SendMessageAsync(new MuteTabMessage());
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send answer/mute to extension");
+            }
         }
 
-        // Start the audio bridge (WebSocket PCM <-> RTP G.711)
         if (_audioBridge != null)
-        {
             await _audioBridge.StartAsync();
-        }
     }
 
     public async Task OnCallHungUpAsync()
@@ -263,19 +270,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         }
 
         // Also hangup via API in case the extension is disconnected
-        if (_callClient != null && _activeCallId != null)
+        var callId = Interlocked.Exchange(ref _activeCallId, null);
+        if (_callClient != null && callId != null)
         {
             try
             {
-                await _callClient.HangupAsync(_activeCallId);
+                await _callClient.HangupAsync(callId);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "API hangup failed for call {CallId}", _activeCallId);
+                _logger.LogWarning(ex, "API hangup failed for call {CallId}", callId);
             }
         }
-
-        _activeCallId = null;
     }
 
     private void OnHealthCheckTimer(object? state)

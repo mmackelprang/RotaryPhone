@@ -43,6 +43,7 @@ public class GVApiAdapterTests
 
         return new GVApiAdapter(
             config,
-            NullLogger<GVApiAdapter>.Instance);
+            NullLogger<GVApiAdapter>.Instance,
+            NullLoggerFactory.Instance);
     }
 }
