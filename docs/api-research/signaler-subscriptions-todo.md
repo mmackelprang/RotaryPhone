@@ -33,6 +33,24 @@ req4: [[[5,[null,null,null,[9,5],null,[null,[null,1],[[["2"]]]],null,null,1],nul
 req5: [[[6,[null,null,null,[9,5],null,[null,[null,1],[[["3"]]]],null,null,1],null,3]]]
 ```
 
+## Key Finding (2026-03-28)
+
+The channel SURVIVES after the subscription error. Poll 2 returns `noop` heartbeats.
+The `close` events close individual subscriptions, not the whole channel.
+But without working subscriptions, no GV events are delivered.
+
+The browser sends the EXACT SAME subscription format (verified via Playwright interception)
+and it works for the browser but not for our curl/Python requests. This suggests the
+subscription processing on Google's backend checks something about the session context
+(perhaps a session cookie like COMPASS, or the user agent, or the `zx` cache buster).
+
+## Alternative Approach: Playwright-as-Signaler
+
+Instead of reverse-engineering the subscription format, use Playwright headless as the
+signaler client. The browser handles the protocol natively, and we intercept events
+by evaluating JavaScript in the page context. This is Phase 1 compatible (browser
+still needed for audio anyway) and gives us working incoming call detection immediately.
+
 ## Next Steps
 
 1. **Capture a WORKING subscription from the browser** — use the Playwright capture script
