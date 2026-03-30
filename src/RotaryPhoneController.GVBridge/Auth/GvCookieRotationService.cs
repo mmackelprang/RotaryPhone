@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text;
 using Microsoft.Extensions.Logging;
 
@@ -19,7 +18,7 @@ public class GvCookieRotationService : IDisposable
     private readonly TimeSpan _interval;
 
     private Timer? _timer;
-    private GvCookieJar? _jar;
+    private GvCookieSet? _cookieSet;
     private DateTime _lastRotation = DateTime.MinValue;
 
     public GvCookieRotationService(
@@ -33,13 +32,13 @@ public class GvCookieRotationService : IDisposable
     }
 
     /// <summary>
-    /// Start periodic rotation. Loads the cookie jar from disk.
-    /// Returns the initial cookie jar for use by API clients.
+    /// Start periodic rotation. Loads the cookie set from disk.
+    /// Returns the initial cookie set for use by API clients.
     /// </summary>
-    public async Task<GvCookieJar?> StartAsync(CancellationToken ct = default)
+    public async Task<GvCookieSet?> StartAsync(CancellationToken ct = default)
     {
-        _jar = await _store.LoadAsync();
-        if (_jar == null || !_jar.IsComplete)
+        _cookieSet = await _store.LoadAsync();
+        if (_cookieSet == null)
         {
             _logger.LogError("Cannot start rotation — no valid cookies on disk");
             return null;
@@ -55,7 +54,7 @@ public class GvCookieRotationService : IDisposable
             _interval);
 
         _logger.LogInformation("Cookie rotation started (every {Interval})", _interval);
-        return _jar;
+        return _cookieSet;
     }
 
     public void Stop()
@@ -65,12 +64,12 @@ public class GvCookieRotationService : IDisposable
         _logger.LogInformation("Cookie rotation stopped");
     }
 
-    /// <summary>Get the current (freshest) cookie jar.</summary>
-    public GvCookieJar? CurrentJar => _jar;
+    /// <summary>Get the current (freshest) cookie set.</summary>
+    public GvCookieSet? CurrentCookieSet => _cookieSet;
 
     private async Task RotateAsync()
     {
-        if (_jar == null) return;
+        if (_cookieSet == null) return;
 
         // Rate limit: no more than once per 60 seconds
         var elapsed = DateTime.UtcNow - _lastRotation;
@@ -88,12 +87,8 @@ public class GvCookieRotationService : IDisposable
             };
             using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
 
-            var cookieHeader = $"__Secure-1PSID={_jar.Secure1Psid}; " +
-                               $"__Secure-3PSID={_jar.Secure3Psid}; " +
-                               $"__Secure-1PSIDTS={_jar.Secure1Psidts}; " +
-                               $"__Secure-3PSIDTS={_jar.Secure3Psidts}; " +
-                               $"SID={_jar.Sid}; HSID={_jar.Hsid}; SSID={_jar.Ssid}; " +
-                               $"SIDCC={_jar.Sidcc}";
+            // Use the raw header if available; otherwise fall back to individual fields
+            var cookieHeader = _cookieSet.ToCookieHeader();
 
             var request = new HttpRequestMessage(HttpMethod.Post, "https://accounts.google.com/RotateCookies")
             {
@@ -114,44 +109,81 @@ public class GvCookieRotationService : IDisposable
                 return;
             }
 
-            // Extract refreshed cookies from Set-Cookie headers
-            var updated = false;
+            // Extract refreshed cookies from Set-Cookie headers and patch the raw header
             if (response.Headers.TryGetValues("Set-Cookie", out var setCookies))
             {
+                var updatedHeader = _cookieSet.RawCookieHeader ?? cookieHeader;
+                var updated = false;
+
                 foreach (var sc in setCookies)
                 {
                     var (name, value) = ParseSetCookie(sc);
+                    if (string.IsNullOrEmpty(name)) continue;
+
                     switch (name)
                     {
                         case "SIDCC":
-                            _jar.Sidcc = value; updated = true; break;
                         case "__Secure-1PSIDTS":
-                            _jar.Secure1Psidts = value; updated = true;
-                            _logger.LogInformation("PSIDTS rotated");
-                            break;
                         case "__Secure-3PSIDTS":
-                            _jar.Secure3Psidts = value; updated = true; break;
                         case "__Secure-1PSIDCC":
-                            // Track but don't store separately — SIDCC is enough
+                            updatedHeader = UpdateCookieInHeader(updatedHeader, name, value);
+                            updated = true;
+                            if (name == "__Secure-1PSIDTS")
+                                _logger.LogInformation("PSIDTS rotated");
                             break;
                     }
                 }
-            }
 
-            if (updated)
-            {
-                await _store.SaveAsync(_jar);
-                _logger.LogDebug("Cookies rotated and saved to disk");
-            }
-            else
-            {
-                _logger.LogDebug("RotateCookies returned no new cookies to update");
+                if (updated)
+                {
+                    // Rebuild the GvCookieSet with the updated raw header (init-only properties)
+                    _cookieSet = new GvCookieSet
+                    {
+                        Sapisid = _cookieSet.Sapisid,
+                        Sid = _cookieSet.Sid,
+                        Hsid = _cookieSet.Hsid,
+                        Ssid = _cookieSet.Ssid,
+                        Apisid = _cookieSet.Apisid,
+                        Secure1Psid = _cookieSet.Secure1Psid,
+                        Secure3Psid = _cookieSet.Secure3Psid,
+                        RawCookieHeader = updatedHeader,
+                    };
+
+                    await _store.SaveAsync(_cookieSet);
+                    _logger.LogDebug("Cookies rotated and saved to disk");
+                }
+                else
+                {
+                    _logger.LogDebug("RotateCookies returned no new cookies to update");
+                }
             }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Cookie rotation failed");
         }
+    }
+
+    /// <summary>
+    /// Replace an existing cookie value in a raw Cookie header string.
+    /// If the cookie is not present, appends it.
+    /// </summary>
+    private static string UpdateCookieInHeader(string header, string name, string value)
+    {
+        // Try to find "name=..." in the header (handles start, middle, end positions)
+        var prefix = name + "=";
+        var idx = header.IndexOf(prefix, StringComparison.Ordinal);
+        if (idx < 0)
+        {
+            // Not found — append
+            return header.Length > 0 ? $"{header}; {name}={value}" : $"{name}={value}";
+        }
+
+        var valueStart = idx + prefix.Length;
+        var valueEnd = header.IndexOf(';', valueStart);
+        var oldValue = valueEnd < 0 ? header[valueStart..] : header[valueStart..valueEnd];
+
+        return header.Replace($"{name}={oldValue}", $"{name}={value}", StringComparison.Ordinal);
     }
 
     private static (string name, string value) ParseSetCookie(string header)

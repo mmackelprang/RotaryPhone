@@ -4,15 +4,15 @@ namespace RotaryPhoneController.GVBridge.Auth;
 
 public class GvHttpClientHandler : DelegatingHandler
 {
-    private readonly Func<Task<GvCookieJar>> _getCookies;
+    private readonly Func<Task<GvCookieSet>> _getCookies;
 
-    public GvHttpClientHandler(Func<Task<GvCookieJar>> getCookies, HttpMessageHandler inner)
+    public GvHttpClientHandler(Func<Task<GvCookieSet>> getCookies, HttpMessageHandler inner)
         : base(inner)
     {
         _getCookies = getCookies;
     }
 
-    public GvHttpClientHandler(Func<Task<GvCookieJar>> getCookies)
+    public GvHttpClientHandler(Func<Task<GvCookieSet>> getCookies)
     {
         _getCookies = getCookies;
     }

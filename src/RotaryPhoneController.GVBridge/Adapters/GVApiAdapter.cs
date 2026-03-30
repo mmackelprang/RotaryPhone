@@ -26,7 +26,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     // Internal components created during ActivateAsync
     private GvCookieStore? _cookieStore;
     private GvCookieRotationService? _rotationService;
-    private GvCookieJar? _cookieJar;
+    private GvCookieSet? _cookieSet;
     private HttpClient? _httpClient;
     private GvAccountClient? _accountClient;
     private GvCallClient? _callClient;
@@ -72,9 +72,9 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         // 1. Load cookies from encrypted store
         _cookieStore = new GvCookieStore(_config.CookieFilePath, _config.CookieEncryptionKey);
-        _cookieJar = await _cookieStore.LoadAsync();
+        _cookieSet = await _cookieStore.LoadAsync();
 
-        if (_cookieJar == null || !_cookieJar.IsComplete)
+        if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
             _logger.LogWarning("GVApi: No valid cookies found at {Path} — adapter unavailable. " +
                 "Run the cookie extraction tool to import cookies.", _config.CookieFilePath);
@@ -85,11 +85,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         // 2. Start cookie rotation service (refreshes PSIDTS every 5 min)
         _rotationService = new GvCookieRotationService(
             _cookieStore, _loggerFactory.CreateLogger<GvCookieRotationService>());
-        _cookieJar = await _rotationService.StartAsync(ct) ?? _cookieJar;
+        _cookieSet = await _rotationService.StartAsync(ct) ?? _cookieSet;
 
-        // 3. Create authenticated HttpClient (reads from rotation service's live jar)
+        // 3. Create authenticated HttpClient (reads from rotation service's live set)
         var handler = new GvHttpClientHandler(() =>
-            Task.FromResult(_rotationService.CurrentJar ?? _cookieJar!));
+            Task.FromResult(_rotationService.CurrentCookieSet ?? _cookieSet!));
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30)
@@ -181,7 +181,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _accountClient = null;
         _callClient = null;
         _smsClient = null;
-        _cookieJar = null;
+        _cookieSet = null;
         _cookieStore = null;
         Interlocked.Exchange(ref _activeCallId, null);
 
