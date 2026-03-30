@@ -64,7 +64,10 @@ public class GVAudioBridgeService : IDisposable
             bindPort: _config.LocalRtpPort);
 
         // Add a PCMU (G.711 µ-law) audio track.
-        var pcmuTrack = new MediaStreamTrack(SDPWellKnownMediaFormatsEnum.PCMU);
+        var pcmuTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            false,
+            new List<SDPAudioVideoMediaFormat> { new(SDPWellKnownMediaFormatsEnum.PCMU) });
         _rtpSession.addTrack(pcmuTrack);
 
         // Set the remote RTP destination (HT801 ATA).
