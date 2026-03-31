@@ -48,12 +48,14 @@ public class GVBridgeService : IHostedService
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        const string wsHost = "127.0.0.1";
+        const int wsPort = 8765;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _httpListener = new HttpListener();
-        _httpListener.Prefixes.Add($"http://{_config.WebSocketHost}:{_config.WebSocketPort}/");
+        _httpListener.Prefixes.Add($"http://{wsHost}:{wsPort}/");
         _httpListener.Start();
         _logger.Information("GVBridgeService: WebSocket server listening on ws://{Host}:{Port}",
-            _config.WebSocketHost, _config.WebSocketPort);
+            wsHost, wsPort);
 
         _ = AcceptLoopAsync(_cts.Token);
         _ = HeartbeatLoopAsync(_cts.Token);
