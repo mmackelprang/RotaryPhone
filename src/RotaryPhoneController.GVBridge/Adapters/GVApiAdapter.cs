@@ -65,8 +65,27 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     {
         _logger.LogInformation("GVApiAdapter activating...");
 
-        // 1. Load cookies from encrypted store
-        _cookieStore = new GvCookieStore(_config.CookieFilePath, _config.CookieEncryptionKey);
+        // 1. Load encryption key: prefer key file (written by CookieRetriever), fallback to config
+        string encryptionKeyBase64;
+        var keyFilePath = _config.CookieKeyFilePath;
+        if (!string.IsNullOrEmpty(keyFilePath) && File.Exists(keyFilePath))
+        {
+            var keyBytes = await File.ReadAllBytesAsync(keyFilePath);
+            encryptionKeyBase64 = Convert.ToBase64String(keyBytes);
+            _logger.LogDebug("Loaded encryption key from {Path}", keyFilePath);
+        }
+        else if (!string.IsNullOrEmpty(_config.CookieEncryptionKey))
+        {
+            encryptionKeyBase64 = _config.CookieEncryptionKey;
+        }
+        else
+        {
+            _logger.LogError("No cookie encryption key found. Run 'gv-login' first.");
+            SetAvailable(false);
+            return;
+        }
+
+        _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
         _cookieSet = await _cookieStore.LoadAsync();
 
         if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))

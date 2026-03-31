@@ -77,6 +77,7 @@ public sealed class GvSipWebSocketChannel : IDisposable
     private async Task ReceiveLoopAsync(CancellationToken ct)
     {
         var buffer = new byte[16384];
+        var messageBuffer = new MemoryStream();
 
         while (!ct.IsCancellationRequested && _ws?.State == WebSocketState.Open)
         {
@@ -93,15 +94,25 @@ public sealed class GvSipWebSocketChannel : IDisposable
                     break;
                 }
 
+                messageBuffer.Write(buffer, 0, result.Count);
+
+                if (!result.EndOfMessage)
+                {
+                    continue; // accumulate until complete message
+                }
+
+                // Process complete message
+                var messageBytes = messageBuffer.ToArray();
+                messageBuffer.SetLength(0); // reset for next message
+
 #pragma warning disable CA1848, CA1873
-                _logger.LogInformation("WebSocket received: type={Type} count={Count} endOfMessage={End}",
-                    result.MessageType, result.Count, result.EndOfMessage);
+                _logger.LogDebug("WebSocket received: type={Type} size={Size} bytes",
+                    result.MessageType, messageBytes.Length);
 #pragma warning restore CA1848, CA1873
 
-                if (result.MessageType == WebSocketMessageType.Text ||
-                    result.MessageType == WebSocketMessageType.Binary)
+                var message = Encoding.UTF8.GetString(messageBytes);
+                if (!string.IsNullOrEmpty(message))
                 {
-                    var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                     MessageReceived?.Invoke(this, new SipMessageEventArgs(message));
                 }
             }

@@ -56,15 +56,14 @@ public sealed class GvSipCredentialProvider
         if (!response.IsSuccessStatusCode)
         {
 #pragma warning disable CA1848, CA1873 // Debug logging for troubleshooting
-            _logger.LogError("sipregisterinfo/get failed: {Status} body={Body}",
-                (int)response.StatusCode, json.Length > 500 ? json[..500] : json);
+            _logger.LogError("sipregisterinfo/get failed: {Status} ({Length} chars)",
+                (int)response.StatusCode, json.Length);
 #pragma warning restore CA1848, CA1873
             response.EnsureSuccessStatusCode(); // throws
         }
 
 #pragma warning disable CA1848, CA1873
-        _logger.LogInformation("sipregisterinfo/get response ({Length} chars): {Body}",
-            json.Length, json[..Math.Min(500, json.Length)]);
+        _logger.LogDebug("sipregisterinfo/get succeeded ({Length} chars)", json.Length);
 #pragma warning restore CA1848, CA1873
         // Response format: [["sipToken",expiry],null,null,["authToken","cryptoKey"]]
         // Or possibly more complex — parse defensively
