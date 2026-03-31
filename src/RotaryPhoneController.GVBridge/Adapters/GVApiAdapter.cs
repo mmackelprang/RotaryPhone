@@ -101,7 +101,8 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             Task.FromResult(_cookieSet!));
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
-            Timeout = TimeSpan.FromSeconds(30)
+            Timeout = TimeSpan.FromSeconds(30),
+            BaseAddress = new Uri("https://clients6.google.com/")
         };
 
         // 3. Create account client for health checks
@@ -138,7 +139,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
                 OnCallEnded?.Invoke();
         };
 
-        // 6. Start periodic health check timer
+        // 6. Register SIP transport with Google Voice (enables incoming + outgoing calls)
+        try
+        {
+            await _sipTransport.EnsureRegisteredAsync(ct);
+            _logger.LogInformation("GVApi: SIP registered with Google Voice");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: SIP registration failed — will retry on first call");
+        }
+
+        // 7. Start periodic health check timer
         var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
         _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
 

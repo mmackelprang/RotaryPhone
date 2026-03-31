@@ -85,15 +85,22 @@ public sealed class GvSipTransport : IAsyncDisposable
             SIPSorcery.LogFactory.Set(loggerFactory);
     }
 
+    /// <summary>
+    /// Register with Google Voice SIP infrastructure. Must be called before
+    /// placing or receiving calls. Safe to call multiple times (no-op if already registered).
+    /// </summary>
+    public async Task EnsureRegisteredAsync(CancellationToken ct = default)
+    {
+        if (!_registered)
+            await RegisterAsync(ct).ConfigureAwait(false);
+    }
+
     public async Task<TransportCallResult> InitiateAsync(string toNumber, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(toNumber);
 
         // Ensure registered
-        if (!_registered)
-        {
-            await RegisterAsync(ct).ConfigureAwait(false);
-        }
+        await EnsureRegisteredAsync(ct).ConfigureAwait(false);
 
         var callId = Guid.NewGuid().ToString("D").ToUpperInvariant();
 
