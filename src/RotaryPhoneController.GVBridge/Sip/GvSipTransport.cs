@@ -24,7 +24,7 @@ namespace RotaryPhoneController.GVBridge.Sip;
 ///   8. 200 OK (INVITE) -> ACK -> audio flows
 ///   9. BYE to hangup
 /// </summary>
-public sealed class GvSipTransport
+public sealed class GvSipTransport : IAsyncDisposable
 {
     private const string SipDomain = "web.c.pbx.voice.sip.google.com";
     private const string WssUrl = "wss://web.voice.telephony.goog/websocket";
@@ -59,13 +59,13 @@ public sealed class GvSipTransport
     private string? _serviceRoute;
     private string? _regContactUser;
     private string? _regWsHost;
-    private int _inviteCSeq;
-    private int _prackCSeq;
     private bool _registered;
 
     public event EventHandler<IncomingCallEventArgs>? IncomingCallReceived;
 
     public event EventHandler<AudioDataEventArgs>? AudioReceived;
+
+    public event EventHandler<CallStatusChangedEventArgs>? CallStatusChanged;
 
     /// <param name="logger">Logger</param>
     /// <param name="getCredentials">Async factory that calls sipregisterinfo/get and returns credentials</param>
@@ -244,9 +244,9 @@ public sealed class GvSipTransport
             var offer = pc.createOffer();
             await pc.setLocalDescription(offer).ConfigureAwait(false);
 
-            // Use a random CSeq like the browser does
-            _inviteCSeq = System.Security.Cryptography.RandomNumberGenerator.GetInt32(1000, 9999);
-            _prackCSeq = _inviteCSeq + 1;
+            // Use a random CSeq like the browser does — stored per-call to avoid corruption with overlapping calls
+            session.InviteCSeq = System.Security.Cryptography.RandomNumberGenerator.GetInt32(1000, 9999);
+            session.PrackCSeq = session.InviteCSeq + 1;
 
             var invTag = CallProperties.CreateNewTag();
             var sipUsernameEncoded = Uri.EscapeDataString(_credentials.SipUsername);
@@ -257,7 +257,7 @@ public sealed class GvSipTransport
                 $"From: <sip:{sipUsernameEncoded}@{SipDomain}>;tag={invTag}\r\n" +
                 $"To: <sip:{destNumber}@{SipDomain}>\r\n" +
                 $"Call-ID: {callId}\r\n" +
-                $"CSeq: {_inviteCSeq} INVITE\r\n" +
+                $"CSeq: {session.InviteCSeq} INVITE\r\n" +
                 $"Contact: <sip:{_regContactUser}@{_regWsHost};transport=wss>\r\n" +
                 $"Content-Type: application/sdp\r\n" +
                 $"Session-Expires: 90\r\n" +
@@ -321,7 +321,7 @@ public sealed class GvSipTransport
                     $"To: {session.ToHeader}\r\n" +
                     $"From: {session.FromHeader}\r\n" +
                     $"Call-ID: {callId}\r\n" +
-                    $"CSeq: {_inviteCSeq + 10} BYE\r\n" +
+                    $"CSeq: {session.InviteCSeq + 10} BYE\r\n" +
                     $"User-Agent: {UserAgent}\r\n" +
                     $"Content-Length: 0\r\n" +
                     $"\r\n";
@@ -329,7 +329,9 @@ public sealed class GvSipTransport
                 await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
             }
 
+            var oldStatus = session.Status;
             session.Status = CallStatusType.Completed;
+            CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Completed));
             session.Dispose();
         }
     }
@@ -416,7 +418,7 @@ public sealed class GvSipTransport
             $"User-Agent: {UserAgent}\r\n" +
             $"Content-Length: 0\r\n" +
             $"\r\n";
-        _ = _wsChannel.SendAsync(ringing);
+        _ = SendSipMessageAsync(ringing);
 
         // Create peer connection for incoming media
         var pc = new RTCPeerConnection(new RTCConfiguration
@@ -520,7 +522,7 @@ public sealed class GvSipTransport
             $"\r\n" +
             answer.sdp;
 
-        _ = _wsChannel.SendAsync(ok200);
+        _ = SendSipMessageAsync(ok200);
 
 #pragma warning disable CA1848, CA1873
         _logger.LogInformation("Answered incoming call from {Caller}, Call-ID={CallId}", callerNumber, invCallId);
@@ -538,7 +540,7 @@ public sealed class GvSipTransport
             session.RemoteContactUri is null)
             return;
 
-        var refreshCSeq = Interlocked.Increment(ref _prackCSeq);
+        var refreshCSeq = Interlocked.Increment(ref session.PrackCSeq);
 
         var reInvite = $"INVITE {session.RemoteContactUri} SIP/2.0\r\n";
 
@@ -568,7 +570,22 @@ public sealed class GvSipTransport
         _logger.LogInformation("Sending session refresh re-INVITE for call {CallId}", callId);
 #pragma warning restore CA1848, CA1873
 
-        _ = _wsChannel.SendAsync(reInvite);
+        _ = SendSipMessageAsync(reInvite);
+    }
+
+    private async Task SendSipMessageAsync(string message, CancellationToken ct = default)
+    {
+        try
+        {
+            if (_wsChannel != null)
+                await _wsChannel.SendAsync(message, ct);
+        }
+#pragma warning disable CA1031
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send SIP message");
+        }
+#pragma warning restore CA1031
     }
 
     private async Task RegisterAsync(CancellationToken ct)
@@ -665,7 +682,7 @@ public sealed class GvSipTransport
                                 _logger.LogInformation("Sending SIP REGISTER with Digest auth...");
 #pragma warning restore CA1848, CA1873
 
-                                _ = _wsChannel!.SendAsync(reg2);
+                                _ = SendSipMessageAsync(reg2);
                             }
                         }
                         else
@@ -732,10 +749,12 @@ public sealed class GvSipTransport
                             var recordRoutes = ExtractAllHeaders(message, "Record-Route");
 
                             if (rseqValue is not null && contactUri is not null
+                                && callIdValue is not null
+                                && _activeCalls.TryGetValue(callIdValue, out var prackSession)
                                 && prackedRSeqs.Add(rseqValue)) // Only PRACK each RSeq once
                             {
                                 var contactSipUri = ExtractSipUri(contactUri);
-                                var currentPrackCSeq = Interlocked.Increment(ref _prackCSeq);
+                                var currentPrackCSeq = Interlocked.Increment(ref prackSession.PrackCSeq);
 
                                 // Build PRACK matching browser's exact format:
                                 // 1. Route order: REVERSED from Record-Route (non-econt first)
@@ -761,7 +780,7 @@ public sealed class GvSipTransport
                                     $"Call-ID: {callIdValue}\r\n" +
                                     $"CSeq: {currentPrackCSeq} PRACK\r\n" +
                                     $"{XGoogleClientInfo}\r\n" +
-                                    $"RAck: {rseqValue} {_inviteCSeq} INVITE\r\n" +
+                                    $"RAck: {rseqValue} {prackSession.InviteCSeq} INVITE\r\n" +
                                     $"Allow: INVITE,ACK,CANCEL,BYE,UPDATE,MESSAGE,OPTIONS,REFER,INFO,PRACK\r\n" +
                                     $"Supported: outbound,record-aware\r\n" +
                                     $"User-Agent: {UserAgent}\r\n" +
@@ -773,7 +792,7 @@ public sealed class GvSipTransport
                                     statusCode, rseqValue, contactSipUri, prack[..Math.Min(500, prack.Length)]);
 #pragma warning restore CA1848, CA1873
 
-                                _ = _wsChannel!.SendAsync(prack);
+                                _ = SendSipMessageAsync(prack);
                             }
                         }
                         else if (statusCode == 200)
@@ -788,7 +807,8 @@ public sealed class GvSipTransport
                             // Extract CSeq number from response — needed for ACK
                             // (re-INVITE 200 OK has different CSeq than original INVITE)
                             var respCSeqFull = ExtractHeaderValue(message, "CSeq");
-                            var respCSeqNum = _inviteCSeq; // fallback
+                            var respCSeqNum = (callIdValue is not null && _activeCalls.TryGetValue(callIdValue, out var ackSession))
+                                ? ackSession.InviteCSeq : 1; // fallback
                             if (respCSeqFull is not null)
                             {
                                 var spaceIdx = respCSeqFull.IndexOf(' ', StringComparison.Ordinal);
@@ -812,7 +832,9 @@ public sealed class GvSipTransport
                                 // Reverse Record-Route for Route set
                                 invSession.RouteSet = [.. recordRoutes];
                                 invSession.RouteSet.Reverse();
+                                var oldInvStatus = invSession.Status;
                                 invSession.Status = CallStatusType.Active;
+                                CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callIdValue, oldInvStatus, CallStatusType.Active));
                             }
 
                             var ack = $"ACK {contactSipUri} SIP/2.0\r\n";
@@ -837,7 +859,7 @@ public sealed class GvSipTransport
                             _logger.LogInformation("INVITE 200 OK — sending ACK, call CONNECTED!");
 #pragma warning restore CA1848, CA1873
 
-                            _ = _wsChannel!.SendAsync(ack);
+                            _ = SendSipMessageAsync(ack); // ACK is critical but we're in an event handler
 
                             // Session timer: parse Session-Expires and schedule re-INVITE
                             if (callIdValue is not null &&
@@ -908,14 +930,16 @@ public sealed class GvSipTransport
                         $"Content-Length: 0\r\n" +
                         $"\r\n";
 
-                    _ = _wsChannel!.SendAsync(byeOk);
+                    _ = SendSipMessageAsync(byeOk); // 200 OK to BYE is critical but we're in an event handler
 
                     // Clean up the call session (only on first BYE, ignore retransmissions)
 #pragma warning disable CA2000
                     if (_activeCalls.TryRemove(byeCallId, out var byeSession))
 #pragma warning restore CA2000
                     {
+                        var oldByeStatus = byeSession.Status;
                         byeSession.Status = CallStatusType.Completed;
+                        CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(byeCallId, oldByeStatus, CallStatusType.Completed));
                         byeSession.Dispose();
                         LogCallEnded(_logger, byeCallId, null);
                     }
@@ -1072,6 +1096,10 @@ internal sealed class SipCallSession : IDisposable
     public Concentus.IOpusEncoder? OpusEncoder { get; set; }
     public Concentus.IOpusDecoder? OpusDecoder { get; set; }
     public CallStatusType Status { get; set; } = CallStatusType.Unknown;
+
+    // Per-call CSeq tracking (fields, not properties, to support Interlocked.Increment)
+    public int InviteCSeq;
+    public int PrackCSeq;
 
     // Dialog state for BYE
     public string? RemoteContactUri { get; set; }

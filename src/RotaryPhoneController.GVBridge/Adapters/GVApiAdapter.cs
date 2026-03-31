@@ -130,6 +130,13 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _loggerFactory);
 
         _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
+        _sipTransport.CallStatusChanged += (_, e) =>
+        {
+            if (e.NewStatus == CallStatusType.Active)
+                OnCallAnswered?.Invoke();
+            else if (e.NewStatus == CallStatusType.Completed)
+                OnCallEnded?.Invoke();
+        };
 
         // 6. Start periodic health check timer
         var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
@@ -150,10 +157,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _healthCheckTimer = null;
         }
 
-        // Disconnect SIP transport
+        // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
         if (_sipTransport != null)
         {
             _sipTransport.IncomingCallReceived -= HandleSipIncomingCall;
+            await _sipTransport.DisposeAsync();
             _sipTransport = null;
         }
 
