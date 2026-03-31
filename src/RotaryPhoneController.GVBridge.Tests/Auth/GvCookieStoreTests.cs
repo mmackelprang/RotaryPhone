@@ -23,12 +23,11 @@ public class GvCookieStoreTests : IDisposable
     public async Task SaveAndLoad_RoundTrips()
     {
         var store = new GvCookieStore(_tempFile, _encryptionKey);
-        var cookies = new GvCookieJar
+        var cookies = new GvCookieSet
         {
             Sapisid = "SAP123", Sid = "SID456", Hsid = "HSID789",
             Ssid = "SSID012", Apisid = "API345",
             Secure1Psid = "SEC1_678", Secure3Psid = "SEC3_901",
-            Secure1Psidts = "PSIDTS1", Secure3Psidts = "PSIDTS3"
         };
 
         await store.SaveAsync(cookies);
@@ -37,7 +36,6 @@ public class GvCookieStoreTests : IDisposable
         Assert.NotNull(loaded);
         Assert.Equal("SAP123", loaded!.Sapisid);
         Assert.Equal("SID456", loaded.Sid);
-        Assert.True(loaded.IsComplete);
     }
 
     [Fact]
@@ -52,7 +50,10 @@ public class GvCookieStoreTests : IDisposable
     public async Task Load_WithWrongKey_ReturnsNull()
     {
         var store = new GvCookieStore(_tempFile, _encryptionKey);
-        await store.SaveAsync(new GvCookieJar { Sapisid = "test" });
+        await store.SaveAsync(new GvCookieSet
+        {
+            Sapisid = "test", Sid = "s", Hsid = "h", Ssid = "ss", Apisid = "a"
+        });
 
         var wrongKey = new byte[32];
         System.Security.Cryptography.RandomNumberGenerator.Fill(wrongKey);

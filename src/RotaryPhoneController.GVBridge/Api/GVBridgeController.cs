@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using RotaryPhoneController.Core;
-using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Adapters;
 
 namespace RotaryPhoneController.GVBridge.Api;
 
@@ -8,15 +8,13 @@ namespace RotaryPhoneController.GVBridge.Api;
 [Route("api/gvbridge")]
 public class GVBridgeController : ControllerBase
 {
-    private readonly GVBridgeService _bridge;
-    private readonly GVSmsService _sms;
     private readonly ICallAdapterRegistry _registry;
+    private readonly GVApiAdapter _adapter;
 
-    public GVBridgeController(GVBridgeService bridge, GVSmsService sms, ICallAdapterRegistry registry)
+    public GVBridgeController(ICallAdapterRegistry registry, GVApiAdapter adapter)
     {
-        _bridge = bridge;
-        _sms = sms;
         _registry = registry;
+        _adapter = adapter;
     }
 
     [HttpGet("status")]
@@ -24,25 +22,9 @@ public class GVBridgeController : ControllerBase
     {
         return Ok(new
         {
-            extensionConnected = _bridge.IsExtensionConnected,
-            extensionVersion = _bridge.ExtensionVersion,
+            available = _adapter.IsAvailable,
             activeMode = _registry.ActiveMode.ToString()
         });
-    }
-
-    [HttpGet("sms")]
-    public IActionResult GetSms()
-    {
-        return Ok(_sms.GetRecent(20));
-    }
-
-    [HttpPost("sms/send")]
-    public async Task<IActionResult> SendSms([FromBody] SendSmsRequest request)
-    {
-        if (string.IsNullOrWhiteSpace(request.To) || string.IsNullOrWhiteSpace(request.Body))
-            return BadRequest(new { error = "To and body required" });
-        await _sms.SendSmsAsync(request.To, request.Body);
-        return Ok(new { status = "sent" });
     }
 
     [HttpGet("adapter/mode")]
@@ -77,51 +59,5 @@ public class GVBridgeController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// HTTP POST endpoint for call events from the Chrome extension.
-    /// This is a reliable fallback when the WebSocket connection has issues.
-    /// </summary>
-    [HttpPost("event")]
-    public IActionResult PostCallEvent([FromBody] CallEventRequest request)
-    {
-        _bridge.HandleHttpCallEvent(request.Type, request.From, request.CallId);
-        Response.Headers["Access-Control-Allow-Origin"] = "*";
-        return Ok(new { received = true, type = request.Type });
-    }
-
-    // Handle CORS preflight for the event endpoint
-    [HttpOptions("event")]
-    public IActionResult PreflightEvent()
-    {
-        Response.Headers["Access-Control-Allow-Origin"] = "*";
-        Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
-        Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
-        return NoContent();
-    }
-
-    /// <summary>
-    /// Returns pending commands for the Chrome extension (e.g., "answer").
-    /// The content script polls this endpoint since WebSocket is unreliable
-    /// due to dual content script instances.
-    /// </summary>
-    [HttpGet("pending-command")]
-    public IActionResult GetPendingCommand()
-    {
-        Response.Headers["Access-Control-Allow-Origin"] = "*";
-        var cmd = _bridge.ConsumePendingCommand();
-        return Ok(new { command = cmd });
-    }
-
-    // Handle CORS preflight for pending-command
-    [HttpOptions("pending-command")]
-    public IActionResult PreflightPendingCommand()
-    {
-        Response.Headers["Access-Control-Allow-Origin"] = "*";
-        Response.Headers["Access-Control-Allow-Methods"] = "GET, OPTIONS";
-        return NoContent();
-    }
-
-    public record SendSmsRequest(string To, string Body);
     public record SetModeRequest(string Mode);
-    public record CallEventRequest(string Type, string? From, string? CallId);
 }

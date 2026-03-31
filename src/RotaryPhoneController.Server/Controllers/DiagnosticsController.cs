@@ -3,6 +3,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
+using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Services;
 
 namespace RotaryPhoneController.Server.Controllers;
@@ -14,7 +15,7 @@ public class DiagnosticsController : ControllerBase
     private readonly SipDiagnosticService _diagnostics;
     private readonly IHT801ConfigService _ht801Service;
     private readonly ISipAdapter _sipAdapter;
-    private readonly GVBridgeService _gvBridge;
+    private readonly GVApiAdapter _gvAdapter;
     private readonly GVAudioBridgeService _gvAudioBridge;
     private readonly AppConfiguration _config;
     private readonly ILogger<DiagnosticsController> _logger;
@@ -23,7 +24,7 @@ public class DiagnosticsController : ControllerBase
         SipDiagnosticService diagnostics,
         IHT801ConfigService ht801Service,
         ISipAdapter sipAdapter,
-        GVBridgeService gvBridge,
+        GVApiAdapter gvAdapter,
         GVAudioBridgeService gvAudioBridge,
         AppConfiguration config,
         ILogger<DiagnosticsController> logger)
@@ -31,7 +32,7 @@ public class DiagnosticsController : ControllerBase
         _diagnostics = diagnostics;
         _ht801Service = ht801Service;
         _sipAdapter = sipAdapter;
-        _gvBridge = gvBridge;
+        _gvAdapter = gvAdapter;
         _gvAudioBridge = gvAudioBridge;
         _config = config;
         _logger = logger;
@@ -58,8 +59,7 @@ public class DiagnosticsController : ControllerBase
             Ht801 = ht801Health,
             GVBridge = new
             {
-                IsExtensionConnected = _gvBridge.IsExtensionConnected,
-                ExtensionVersion = _gvBridge.ExtensionVersion
+                IsAvailable = _gvAdapter.IsAvailable,
             },
             GVAudioBridge = new
             {

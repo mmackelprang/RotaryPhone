@@ -25,7 +25,6 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     // Internal components created during ActivateAsync
     private GvCookieStore? _cookieStore;
-    private GvCookieRotationService? _rotationService;
     private GvCookieSet? _cookieSet;
     private HttpClient? _httpClient;
     private GvAccountClient? _accountClient;
@@ -78,25 +77,20 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 2. Start cookie rotation service (refreshes PSIDTS every 5 min)
-        _rotationService = new GvCookieRotationService(
-            _cookieStore, _loggerFactory.CreateLogger<GvCookieRotationService>());
-        _cookieSet = await _rotationService.StartAsync(ct) ?? _cookieSet;
-
-        // 3. Create authenticated HttpClient (reads from rotation service's live set)
+        // 2. Create authenticated HttpClient (cookies loaded from store)
         var handler = new GvHttpClientHandler(() =>
-            Task.FromResult(_rotationService.CurrentCookieSet ?? _cookieSet!));
+            Task.FromResult(_cookieSet!));
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        // 4. Create account client for health checks
+        // 3. Create account client for health checks
         _accountClient = new GvAccountClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
             _loggerFactory.CreateLogger<GvAccountClient>());
 
-        // 5. Health check to verify cookies work
+        // 4. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
         if (!healthy)
         {
@@ -105,7 +99,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 6. Create SIP transport for call signaling + DTLS-SRTP audio
+        // 5. Create SIP transport for call signaling + DTLS-SRTP audio
         var httpClientFactory = new SingleHttpClientFactory(_httpClient);
         var credProvider = new GvSipCredentialProvider(
             httpClientFactory, _config,
@@ -118,7 +112,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
 
-        // 7. Start periodic health check timer
+        // 6. Start periodic health check timer
         var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
         _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
 
@@ -136,9 +130,6 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             await _healthCheckTimer.DisposeAsync();
             _healthCheckTimer = null;
         }
-
-        // Stop cookie rotation
-        _rotationService?.Stop();
 
         // Disconnect SIP transport
         if (_sipTransport != null)
