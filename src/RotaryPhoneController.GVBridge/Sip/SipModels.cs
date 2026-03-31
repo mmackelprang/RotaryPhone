@@ -30,3 +30,10 @@ public sealed class IncomingCallEventArgs(IncomingCallInfo callInfo) : EventArgs
 }
 
 public sealed record IncomingCallInfo(string CallId, string CallerNumber);
+
+public sealed class CallStatusChangedEventArgs(string callId, CallStatusType oldStatus, CallStatusType newStatus) : EventArgs
+{
+    public string CallId { get; } = callId;
+    public CallStatusType OldStatus { get; } = oldStatus;
+    public CallStatusType NewStatus { get; } = newStatus;
+}

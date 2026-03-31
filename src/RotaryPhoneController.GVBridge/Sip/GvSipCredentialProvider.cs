@@ -97,7 +97,7 @@ public sealed class GvSipCredentialProvider
         return new SipCredentials(
             SipUsername: sipUsername,
             BearerToken: sipPassword, // The crypto key is the Digest auth password
-            PhoneNumber: "+19196706660", // TODO: get from account/get
+            PhoneNumber: _config.GvPhoneNumber,
             ExpirySeconds: expiry);
     }
 }

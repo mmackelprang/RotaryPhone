@@ -22,6 +22,9 @@ public class GVBridgeConfig
     // Signaler (kept for potential future use)
     public string SignalerBaseUrl { get; set; } = "https://signaler-pa.clients6.google.com";
 
+    // Google Voice phone number (E.164 format, e.g. "+19196706660")
+    public string GvPhoneNumber { get; set; } = "";
+
     // Call adapter
     public string DefaultMode { get; set; } = "GVApi";
     public string CallLogDbPath { get; set; } = "data/gvbridge-calllog.db";

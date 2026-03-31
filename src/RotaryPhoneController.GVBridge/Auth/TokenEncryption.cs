@@ -4,65 +4,64 @@ using System.Text;
 namespace RotaryPhoneController.GVBridge.Auth;
 
 /// <summary>
-/// AES-256 encrypt/decrypt helpers. The IV (16 bytes) is prepended to the ciphertext.
+/// AES-256-GCM authenticated encrypt/decrypt helpers.
+/// Format: nonce (12 bytes) || tag (16 bytes) || ciphertext.
+///
+/// NOTE: Changed from AES-CBC (IV || ciphertext) to AES-GCM in March 2026.
+/// Existing encrypted cookie files from the old format will be unreadable;
+/// users must re-run 'gv-login' to re-encrypt with the new format.
 /// </summary>
 public static class TokenEncryption
 {
-    private const int IvSize = 16;
+    private const int NonceSize = 12; // AesGcm.NonceByteSizes.MaxSize
+    private const int TagSize = 16;   // AesGcm.TagByteSizes.MaxSize
 
     /// <summary>
-    /// Encrypts <paramref name="plaintext"/> with AES-256 using <paramref name="key"/>.
-    /// A fresh random IV is generated per call; the result is IV || ciphertext.
+    /// Encrypts <paramref name="plaintext"/> with AES-256-GCM using <paramref name="key"/>.
+    /// A fresh random nonce is generated per call; the result is nonce || tag || ciphertext.
     /// </summary>
     public static byte[] Encrypt(string plaintext, byte[] key)
     {
         ArgumentNullException.ThrowIfNull(plaintext);
         ArgumentNullException.ThrowIfNull(key);
 
-        using var aes = Aes.Create();
-        aes.KeySize = 256;
-        aes.Key = key;
-        aes.GenerateIV();
-
-        var iv = aes.IV;
         var plaintextBytes = Encoding.UTF8.GetBytes(plaintext);
+        var nonce = new byte[NonceSize];
+        RandomNumberGenerator.Fill(nonce);
+        var tag = new byte[TagSize];
+        var ciphertext = new byte[plaintextBytes.Length];
 
-        using var encryptor = aes.CreateEncryptor();
-        var encrypted = encryptor.TransformFinalBlock(plaintextBytes, 0, plaintextBytes.Length);
+        using var aes = new AesGcm(key, TagSize);
+        aes.Encrypt(nonce, plaintextBytes, ciphertext, tag);
 
-        var result = new byte[IvSize + encrypted.Length];
-        Buffer.BlockCopy(iv, 0, result, 0, IvSize);
-        Buffer.BlockCopy(encrypted, 0, result, IvSize, encrypted.Length);
+        // Format: nonce || tag || ciphertext
+        var result = new byte[NonceSize + TagSize + ciphertext.Length];
+        nonce.CopyTo(result, 0);
+        tag.CopyTo(result, NonceSize);
+        ciphertext.CopyTo(result, NonceSize + TagSize);
         return result;
     }
 
     /// <summary>
-    /// Decrypts a byte array produced by <see cref="Encrypt"/>. Extracts the IV from
-    /// the first 16 bytes and decrypts the remainder.
+    /// Decrypts a byte array produced by <see cref="Encrypt"/>. Extracts the nonce and
+    /// authentication tag, then decrypts and verifies the ciphertext.
     /// </summary>
-    public static string Decrypt(byte[] ciphertext, byte[] key)
+    public static string Decrypt(byte[] encrypted, byte[] key)
     {
-        ArgumentNullException.ThrowIfNull(ciphertext);
+        ArgumentNullException.ThrowIfNull(encrypted);
         ArgumentNullException.ThrowIfNull(key);
 
-        if (ciphertext.Length < IvSize)
-        {
-            throw new CryptographicException("Ciphertext is too short to contain an IV.");
-        }
+        if (encrypted.Length < NonceSize + TagSize + 1)
+            throw new CryptographicException("Data too short to contain nonce, tag, and ciphertext.");
 
-        var iv = new byte[IvSize];
-        Buffer.BlockCopy(ciphertext, 0, iv, 0, IvSize);
+        var nonce = encrypted[..NonceSize];
+        var tag = encrypted[NonceSize..(NonceSize + TagSize)];
+        var ciphertext = encrypted[(NonceSize + TagSize)..];
+        var plaintext = new byte[ciphertext.Length];
 
-        var encryptedBytes = new byte[ciphertext.Length - IvSize];
-        Buffer.BlockCopy(ciphertext, IvSize, encryptedBytes, 0, encryptedBytes.Length);
+        using var aes = new AesGcm(key, TagSize);
+        aes.Decrypt(nonce, ciphertext, tag, plaintext);
 
-        using var aes = Aes.Create();
-        aes.KeySize = 256;
-        aes.Key = key;
-        aes.IV = iv;
-
-        using var decryptor = aes.CreateDecryptor();
-        var plaintext = decryptor.TransformFinalBlock(encryptedBytes, 0, encryptedBytes.Length);
         return Encoding.UTF8.GetString(plaintext);
     }
 }
