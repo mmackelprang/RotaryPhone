@@ -13,6 +13,7 @@ public class GvHttpClientHandler : DelegatingHandler
     }
 
     public GvHttpClientHandler(Func<Task<GvCookieSet>> getCookies)
+        : base(new HttpClientHandler())
     {
         _getCookies = getCookies;
     }
