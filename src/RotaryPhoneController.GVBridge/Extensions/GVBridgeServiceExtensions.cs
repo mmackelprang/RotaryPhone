@@ -31,9 +31,8 @@ public static class GVBridgeServiceExtensions
         services.AddHostedService(sp =>
         {
             var apiAdapter = sp.GetRequiredService<GVApiAdapter>();
-            var bridgeService = sp.GetRequiredService<GVBridgeService>();
             var audioBridge = sp.GetRequiredService<GVAudioBridgeService>();
-            apiAdapter.SetServices(bridgeService, audioBridge);
+            apiAdapter.SetAudioBridge(audioBridge);
             return new GvApiAdapterSetup();
         });
 
