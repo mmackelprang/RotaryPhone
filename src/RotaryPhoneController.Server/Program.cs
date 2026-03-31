@@ -17,7 +17,7 @@ using RotaryPhoneController.Core.Diagnostics;
 using Microsoft.Extensions.Options;
 using Serilog;
 
-// CLI command: gv-login — extract GV cookies via Playwright, then exit
+// CLI command: gv-login — extract GV cookies via Chrome CDP, then exit
 if (args.Contains("gv-login"))
 {
     using var loggerFactory = LoggerFactory.Create(b => b.AddConsole());
@@ -29,22 +29,16 @@ if (args.Contains("gv-login"))
     var gvConfig = config.GetSection("GVBridge");
 
     var cookiePath = gvConfig["CookieFilePath"] ?? "data/gv-cookies.enc";
-    var encKey = gvConfig["CookieEncryptionKey"] ?? "";
-    var apiBaseUrl = gvConfig["GvApiBaseUrl"] ?? "https://clients6.google.com/voice/v1/voiceclient";
-    var apiKey = gvConfig["GvApiKey"] ?? "";
+    var keyPath = gvConfig["CookieKeyFilePath"] ?? "data/gv-key.bin";
 
-    if (string.IsNullOrEmpty(encKey))
-    {
-        // Auto-generate and tell user to save it
-        var keyBytes = new byte[32];
-        System.Security.Cryptography.RandomNumberGenerator.Fill(keyBytes);
-        encKey = Convert.ToBase64String(keyBytes);
-        logger.LogWarning("No CookieEncryptionKey configured. Generated: {Key}", encKey);
-        logger.LogWarning("Add this to appsettings.json GVBridge.CookieEncryptionKey before running the server.");
-    }
+    var result = await RotaryPhoneController.GVBridge.Auth.CookieRetriever.RetrieveAndSaveAsync(
+        cookiePath, keyPath,
+        msg => logger.LogInformation("{Message}", msg));
 
-    var result = await RotaryPhoneController.GVBridge.Tools.GvLoginTool.LoginAndSaveAsync(
-        cookiePath, encKey, apiBaseUrl, apiKey, logger);
+    if (result)
+        logger.LogInformation("Cookie extraction successful. Start the server normally.");
+    else
+        logger.LogError("Cookie extraction failed. Ensure Chrome/Chromium is running and you are logged into voice.google.com.");
 
     return;
 }

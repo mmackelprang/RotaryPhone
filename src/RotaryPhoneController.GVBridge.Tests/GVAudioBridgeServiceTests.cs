@@ -12,10 +12,8 @@ public class GVAudioBridgeServiceTests
     private GVAudioBridgeService CreateService()
     {
         var config = Options.Create(new GVBridgeConfig { LocalRtpPort = 0 });
-        var serilogLogger = new Mock<Serilog.ILogger>().Object;
-        var bridgeService = new GVBridgeService(config, serilogLogger);
         var logger = new Mock<ILogger<GVAudioBridgeService>>().Object;
-        return new GVAudioBridgeService(bridgeService, Options.Create(new GVBridgeConfig { LocalRtpPort = 0 }), logger);
+        return new GVAudioBridgeService(config, logger);
     }
 
     [Fact]
@@ -26,31 +24,12 @@ public class GVAudioBridgeServiceTests
     }
 
     [Fact]
-    public async Task StartAsync_SetsIsActiveTrue()
+    public async Task StartAsync_WithoutSipTransport_DoesNotSetActive()
     {
         using var service = CreateService();
         await service.StartAsync();
-        Assert.True(service.IsActive);
-        await service.StopAsync();
-    }
-
-    [Fact]
-    public async Task StopAsync_SetsIsActiveFalse()
-    {
-        using var service = CreateService();
-        await service.StartAsync();
-        await service.StopAsync();
+        // Without calling SetSipTransport first, StartAsync logs error and returns
         Assert.False(service.IsActive);
-    }
-
-    [Fact]
-    public async Task StartAsync_WhenAlreadyActive_IsNoOp()
-    {
-        using var service = CreateService();
-        await service.StartAsync();
-        await service.StartAsync(); // second start — should not throw
-        Assert.True(service.IsActive);
-        await service.StopAsync();
     }
 
     [Fact]

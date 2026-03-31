@@ -5,13 +5,14 @@ using RotaryPhoneController.GVBridge.Auth;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
-using RotaryPhoneController.GVBridge.Signaler;
+using RotaryPhoneController.GVBridge.Sip;
 
 namespace RotaryPhoneController.GVBridge.Adapters;
 
 /// <summary>
-/// ICallAdapter implementation that uses the Google Voice HTTP API
-/// (authenticated via SAPISIDHASH cookies) instead of CDP browser automation.
+/// ICallAdapter implementation that uses SIP-over-WebSocket transport
+/// (RFC 7118) to Google Voice for call signaling and DTLS-SRTP for audio.
+/// Cookie-authenticated HTTP API is used only for health checks and SIP credential retrieval.
 /// </summary>
 public class GVApiAdapter : ICallAdapter, IDisposable
 {
@@ -19,19 +20,15 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     private readonly ILogger<GVApiAdapter> _logger;
     private readonly ILoggerFactory _loggerFactory;
 
-    // Set via SetServices() to avoid circular DI
-    private GVBridgeService? _bridgeService;
+    // Set via SetAudioBridge() to avoid circular DI
     private GVAudioBridgeService? _audioBridge;
 
     // Internal components created during ActivateAsync
     private GvCookieStore? _cookieStore;
-    private GvCookieRotationService? _rotationService;
-    private GvCookieJar? _cookieJar;
+    private GvCookieSet? _cookieSet;
     private HttpClient? _httpClient;
     private GvAccountClient? _accountClient;
-    private GvCallClient? _callClient;
-    private GvSmsClient? _smsClient;
-    private GvSignalerClient? _signalerClient;
+    private GvSipTransport? _sipTransport;
     private Timer? _healthCheckTimer;
 
     private string? _activeCallId;
@@ -57,12 +54,10 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     }
 
     /// <summary>
-    /// Inject services that may cause circular DI if passed via constructor.
-    /// Called after construction by the DI wiring layer.
+    /// Inject audio bridge to avoid circular DI. Called after construction by the DI wiring layer.
     /// </summary>
-    public void SetServices(GVBridgeService bridgeService, GVAudioBridgeService audioBridge)
+    public void SetAudioBridge(GVAudioBridgeService audioBridge)
     {
-        _bridgeService = bridgeService;
         _audioBridge = audioBridge;
     }
 
@@ -70,11 +65,30 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     {
         _logger.LogInformation("GVApiAdapter activating...");
 
-        // 1. Load cookies from encrypted store
-        _cookieStore = new GvCookieStore(_config.CookieFilePath, _config.CookieEncryptionKey);
-        _cookieJar = await _cookieStore.LoadAsync();
+        // 1. Load encryption key: prefer key file (written by CookieRetriever), fallback to config
+        string encryptionKeyBase64;
+        var keyFilePath = _config.CookieKeyFilePath;
+        if (!string.IsNullOrEmpty(keyFilePath) && File.Exists(keyFilePath))
+        {
+            var keyBytes = await File.ReadAllBytesAsync(keyFilePath);
+            encryptionKeyBase64 = Convert.ToBase64String(keyBytes);
+            _logger.LogDebug("Loaded encryption key from {Path}", keyFilePath);
+        }
+        else if (!string.IsNullOrEmpty(_config.CookieEncryptionKey))
+        {
+            encryptionKeyBase64 = _config.CookieEncryptionKey;
+        }
+        else
+        {
+            _logger.LogError("No cookie encryption key found. Run 'gv-login' first.");
+            SetAvailable(false);
+            return;
+        }
 
-        if (_cookieJar == null || !_cookieJar.IsComplete)
+        _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
+        _cookieSet = await _cookieStore.LoadAsync();
+
+        if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
             _logger.LogWarning("GVApi: No valid cookies found at {Path} — adapter unavailable. " +
                 "Run the cookie extraction tool to import cookies.", _config.CookieFilePath);
@@ -82,33 +96,20 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 2. Start cookie rotation service (refreshes PSIDTS every 5 min)
-        _rotationService = new GvCookieRotationService(
-            _cookieStore, _loggerFactory.CreateLogger<GvCookieRotationService>());
-        _cookieJar = await _rotationService.StartAsync(ct) ?? _cookieJar;
-
-        // 3. Create authenticated HttpClient (reads from rotation service's live jar)
+        // 2. Create authenticated HttpClient (cookies loaded from store)
         var handler = new GvHttpClientHandler(() =>
-            Task.FromResult(_rotationService.CurrentJar ?? _cookieJar!));
+            Task.FromResult(_cookieSet!));
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        // 4. Create API clients with typed loggers
+        // 3. Create account client for health checks
         _accountClient = new GvAccountClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
             _loggerFactory.CreateLogger<GvAccountClient>());
 
-        _callClient = new GvCallClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvCallClient>());
-
-        _smsClient = new GvSmsClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvSmsClient>());
-
-        // 5. Health check to verify cookies work
+        // 4. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
         if (!healthy)
         {
@@ -117,40 +118,32 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 6. Connect signaler for incoming call notifications
-        _signalerClient = new GvSignalerClient(
-            _httpClient, _config.SignalerBaseUrl,
-            _loggerFactory.CreateLogger<GvSignalerClient>());
+        // 5. Create SIP transport for call signaling + DTLS-SRTP audio
+        var httpClientFactory = new SingleHttpClientFactory(_httpClient);
+        var credProvider = new GvSipCredentialProvider(
+            httpClientFactory, _config,
+            _loggerFactory.CreateLogger<GvSipCredentialProvider>());
 
-        _signalerClient.OnIncomingCall += evt =>
+        _sipTransport = new GvSipTransport(
+            _loggerFactory.CreateLogger<GvSipTransport>(),
+            () => credProvider.GetCredentialsAsync(),
+            _loggerFactory);
+
+        _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
+        _sipTransport.CallStatusChanged += (_, e) =>
         {
-            Interlocked.Exchange(ref _activeCallId, evt.CallId);
-            _logger.LogInformation("GVApi: incoming call from {From} (callId={CallId})",
-                evt.CallerNumber, evt.CallId);
-            OnIncomingCall?.Invoke(evt.CallerNumber);
+            if (e.NewStatus == CallStatusType.Active)
+                OnCallAnswered?.Invoke();
+            else if (e.NewStatus == CallStatusType.Completed)
+                OnCallEnded?.Invoke();
         };
 
-        _signalerClient.OnCallEnded += evt =>
-        {
-            _logger.LogDebug("GVApi: signaler reported callEnded (ignored — SIP is authoritative)");
-            Interlocked.Exchange(ref _activeCallId, null);
-        };
-
-        try
-        {
-            await _signalerClient.ConnectAsync(ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "GVApi: Failed to connect signaler — will retry on next health check");
-        }
-
-        // 7. Start periodic health check timer
+        // 6. Start periodic health check timer
         var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
         _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
 
         SetAvailable(true);
-        _logger.LogInformation("GVApiAdapter activated — API ready");
+        _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
     }
 
     public async Task DeactivateAsync(CancellationToken ct = default)
@@ -164,14 +157,12 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _healthCheckTimer = null;
         }
 
-        // Stop cookie rotation
-        _rotationService?.Stop();
-
-        // Disconnect signaler
-        if (_signalerClient != null)
+        // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
+        if (_sipTransport != null)
         {
-            await _signalerClient.DisconnectAsync();
-            _signalerClient = null;
+            _sipTransport.IncomingCallReceived -= HandleSipIncomingCall;
+            await _sipTransport.DisposeAsync();
+            _sipTransport = null;
         }
 
         // Dispose HttpClient
@@ -179,9 +170,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _httpClient = null;
 
         _accountClient = null;
-        _callClient = null;
-        _smsClient = null;
-        _cookieJar = null;
+        _cookieSet = null;
         _cookieStore = null;
         Interlocked.Exchange(ref _activeCallId, null);
 
@@ -194,104 +183,64 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         if (!IsAvailable)
             throw new InvalidOperationException("GVApiAdapter is not available");
 
-        var result = await _callClient!.InitiateAsync(e164Number, ct);
-        if (result == null)
-            throw new InvalidOperationException($"Failed to initiate call to {e164Number}");
+        var result = await _sipTransport!.InitiateAsync(e164Number, ct);
+        if (!result.Success)
+            throw new InvalidOperationException($"SIP INVITE failed: {result.ErrorMessage}");
 
-        // TODO: Extract real call ID from Google's protobuf-JSON response once format is confirmed via live testing
-        var callId = $"gv-{Guid.NewGuid():N}";
-        Interlocked.Exchange(ref _activeCallId, callId);
-        _logger.LogInformation("Placed call {CallId} to {Number}", callId, e164Number);
-        result.Dispose();
-        return callId;
+        Interlocked.Exchange(ref _activeCallId, result.CallId);
+        _logger.LogInformation("Placed call {CallId} to {Number}", result.CallId, e164Number);
+        return result.CallId;
     }
 
     public Task AnswerCallAsync(CancellationToken ct = default)
     {
         // No-op: answering is SIP-driven. The actual answer happens in
         // OnCallAnsweredOnRotaryPhoneAsync when the handset is lifted.
-        _logger.LogDebug("GVApi: AnswerCallAsync called (no-op — SIP is authoritative)");
+        _logger.LogDebug("AnswerCallAsync called (no-op, SIP-driven)");
         return Task.CompletedTask;
     }
 
     public async Task HangUpAsync(CancellationToken ct = default)
     {
         var callId = Interlocked.Exchange(ref _activeCallId, null);
-        if (_callClient != null && callId != null)
+        if (callId != null && _sipTransport != null)
         {
-            try
-            {
-                await _callClient.HangupAsync(callId, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "API hangup failed for call {CallId}", callId);
-            }
+            try { await _sipTransport.HangupAsync(callId, ct); }
+            catch (Exception ex) { _logger.LogWarning(ex, "SIP BYE failed"); }
         }
-        _logger.LogInformation("GVApi: hanging up");
     }
 
     public async Task OnCallAnsweredOnRotaryPhoneAsync()
     {
-        _logger.LogInformation("GVApi: rotary phone answered");
+        _logger.LogInformation("Rotary phone answered — starting audio bridge");
 
-        if (_bridgeService != null)
+        if (_audioBridge != null && _sipTransport != null && _activeCallId != null)
         {
-            try
-            {
-                await _bridgeService.SendMessageAsync(new AnswerMessage());
-                await _bridgeService.SendMessageAsync(new MuteTabMessage());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to send answer/mute to extension");
-            }
-        }
-
-        if (_audioBridge != null)
+            _audioBridge.SetSipTransport(_sipTransport, _activeCallId);
             await _audioBridge.StartAsync();
+        }
     }
 
     public async Task OnCallHungUpAsync()
     {
-        _logger.LogInformation("GVApi: stopping audio bridge and ending call");
+        _logger.LogInformation("Call hung up — stopping audio bridge");
 
-        // Stop the audio bridge
         if (_audioBridge != null)
-        {
             await _audioBridge.StopAsync();
-        }
 
-        // Tell the extension to hangup and unmute
-        if (_bridgeService != null)
-        {
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _bridgeService.SendMessageAsync(new HangupMessage());
-                    await _bridgeService.SendMessageAsync(new UnmuteTabMessage());
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to send hangup/unmute to extension");
-                }
-            });
-        }
-
-        // Also hangup via API in case the extension is disconnected
         var callId = Interlocked.Exchange(ref _activeCallId, null);
-        if (_callClient != null && callId != null)
+        if (callId != null && _sipTransport != null)
         {
-            try
-            {
-                await _callClient.HangupAsync(callId);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "API hangup failed for call {CallId}", callId);
-            }
+            try { await _sipTransport.HangupAsync(callId); }
+            catch (Exception ex) { _logger.LogWarning(ex, "SIP BYE on hangup failed"); }
         }
+    }
+
+    private void HandleSipIncomingCall(object? sender, IncomingCallEventArgs e)
+    {
+        Interlocked.Exchange(ref _activeCallId, e.CallInfo.CallId);
+        _logger.LogInformation("SIP incoming call from {Number}", e.CallInfo.CallerNumber);
+        OnIncomingCall?.Invoke(e.CallInfo.CallerNumber);
     }
 
     private void OnHealthCheckTimer(object? state)
@@ -310,31 +259,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             {
                 _logger.LogWarning("GVApi: periodic health check failed — marking unavailable");
                 SetAvailable(false);
-
-                // Try to reconnect signaler on next successful health check
-                if (_signalerClient is { IsConnected: false })
-                {
-                    _logger.LogInformation("GVApi: signaler disconnected, will retry on next health check");
-                }
             }
             else if (!IsAvailable)
             {
                 _logger.LogInformation("GVApi: health check recovered — marking available");
                 SetAvailable(true);
-
-                // Reconnect signaler if needed
-                if (_signalerClient is { IsConnected: false })
-                {
-                    try
-                    {
-                        await _signalerClient.ConnectAsync();
-                        _logger.LogInformation("GVApi: signaler reconnected");
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "GVApi: signaler reconnect failed");
-                    }
-                }
             }
         }
         catch (Exception ex)
@@ -360,5 +289,15 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _healthCheckTimer?.Dispose();
         _httpClient?.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Minimal IHttpClientFactory adapter that returns a pre-built HttpClient.
+    /// Used to bridge the existing cookie-authenticated HttpClient into the
+    /// GvSipCredentialProvider which expects IHttpClientFactory.
+    /// </summary>
+    private sealed class SingleHttpClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
     }
 }

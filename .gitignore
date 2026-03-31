@@ -68,6 +68,7 @@ ScaffoldingReadMe.txt
 
 # NuGet Packages
 *.nupkg
+!local-packages/*.nupkg
 *.snupkg
 **/packages/*
 

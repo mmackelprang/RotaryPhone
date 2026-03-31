@@ -1,6 +1,3 @@
-using System.Security.Cryptography;
-using System.Text.Json;
-
 namespace RotaryPhoneController.GVBridge.Auth;
 
 public class GvCookieStore
@@ -16,51 +13,28 @@ public class GvCookieStore
             throw new ArgumentException("Encryption key must be 32 bytes (AES-256).");
     }
 
-    public async Task SaveAsync(GvCookieJar cookies)
+    public async Task SaveAsync(GvCookieSet cookies)
     {
-        var json = JsonSerializer.SerializeToUtf8Bytes(cookies);
-        var encrypted = Encrypt(json);
+        var json = cookies.Serialize();
+        var encrypted = TokenEncryption.Encrypt(json, _key);
         var dir = Path.GetDirectoryName(_filePath);
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
         await File.WriteAllBytesAsync(_filePath, encrypted);
     }
 
-    public async Task<GvCookieJar?> LoadAsync()
+    public async Task<GvCookieSet?> LoadAsync()
     {
         if (!File.Exists(_filePath))
             return null;
         try
         {
             var encrypted = await File.ReadAllBytesAsync(_filePath);
-            var json = Decrypt(encrypted);
-            return JsonSerializer.Deserialize<GvCookieJar>(json);
+            var json = TokenEncryption.Decrypt(encrypted, _key);
+            return GvCookieSet.Deserialize(json);
         }
-        catch (CryptographicException) { return null; }
-        catch (JsonException) { return null; }
-    }
-
-    private byte[] Encrypt(byte[] plaintext)
-    {
-        using var aes = Aes.Create();
-        aes.Key = _key;
-        aes.GenerateIV();
-        using var encryptor = aes.CreateEncryptor();
-        var ciphertext = encryptor.TransformFinalBlock(plaintext, 0, plaintext.Length);
-        var result = new byte[aes.IV.Length + ciphertext.Length];
-        aes.IV.CopyTo(result, 0);
-        ciphertext.CopyTo(result, aes.IV.Length);
-        return result;
-    }
-
-    private byte[] Decrypt(byte[] encrypted)
-    {
-        if (encrypted.Length < 17)
-            throw new CryptographicException("Encrypted data too short");
-        using var aes = Aes.Create();
-        aes.Key = _key;
-        aes.IV = encrypted[..16];
-        using var decryptor = aes.CreateDecryptor();
-        return decryptor.TransformFinalBlock(encrypted, 16, encrypted.Length - 16);
+        catch (System.Security.Cryptography.CryptographicException) { return null; }
+        catch (System.Text.Json.JsonException) { return null; }
+        catch (InvalidOperationException) { return null; }
     }
 }

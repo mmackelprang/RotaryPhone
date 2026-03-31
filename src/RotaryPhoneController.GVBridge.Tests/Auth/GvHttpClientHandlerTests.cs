@@ -6,7 +6,7 @@ namespace RotaryPhoneController.GVBridge.Tests.Auth;
 
 public class GvHttpClientHandlerTests
 {
-    private static GvCookieJar TestCookies => new()
+    private static GvCookieSet TestCookies => new()
     {
         Sapisid = "SAP_TEST", Sid = "SID_TEST", Hsid = "HSID_TEST",
         Ssid = "SSID_TEST", Apisid = "API_TEST",

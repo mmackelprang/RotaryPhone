@@ -22,7 +22,7 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
-    <PackageReference Include="SIPSorcery" Version="8.0.23" />
+    <PackageReference Include="SIPSorcery" Version="10.0.6-diag" />
     <PackageReference Include="Google.Apis.Gmail.v1" Version="1.68.*" />
     <PackageReference Include="Google.Apis.Auth" Version="1.68.*" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.*" />

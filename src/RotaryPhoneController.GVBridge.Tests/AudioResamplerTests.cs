@@ -59,4 +59,56 @@ public class AudioResamplerTests
         Assert.Empty(AudioResampler.Resample16kTo8k(Array.Empty<byte>()));
         Assert.Empty(AudioResampler.Resample8kTo16k(Array.Empty<byte>()));
     }
+
+    [Fact]
+    public void Resample48kTo8k_ReducesSampleCountBySix()
+    {
+        // 48 samples at 48kHz = 1ms, should produce 8 samples at 8kHz
+        var pcm48k = new byte[48 * 2]; // 48 samples * 2 bytes each
+        for (int i = 0; i < 48; i++)
+        {
+            var sample = (short)(i * 100);
+            pcm48k[i * 2] = (byte)(sample & 0xFF);
+            pcm48k[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
+        }
+
+        var result = AudioResampler.Resample48kTo8k(pcm48k);
+        Assert.Equal(8 * 2, result.Length); // 8 samples * 2 bytes
+    }
+
+    [Fact]
+    public void Resample8kTo48k_IncreasesSampleCountBySix()
+    {
+        var pcm8k = new byte[8 * 2]; // 8 samples
+        for (int i = 0; i < 8; i++)
+        {
+            var sample = (short)(i * 1000);
+            pcm8k[i * 2] = (byte)(sample & 0xFF);
+            pcm8k[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
+        }
+
+        var result = AudioResampler.Resample8kTo48k(pcm8k);
+        Assert.Equal(48 * 2, result.Length); // 48 samples * 2 bytes
+    }
+
+    [Fact]
+    public void Resample48kTo8k_PreservesAudioContent()
+    {
+        // Constant signal should survive resampling
+        var pcm48k = new byte[960 * 2]; // 960 samples = 20ms at 48kHz
+        for (int i = 0; i < 960; i++)
+        {
+            short sample = 1000; // constant
+            pcm48k[i * 2] = (byte)(sample & 0xFF);
+            pcm48k[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
+        }
+
+        var result = AudioResampler.Resample48kTo8k(pcm48k);
+        // All output samples should be ~1000
+        for (int i = 0; i < result.Length / 2; i++)
+        {
+            short s = (short)(result[i * 2] | (result[i * 2 + 1] << 8));
+            Assert.InRange(s, 990, 1010);
+        }
+    }
 }

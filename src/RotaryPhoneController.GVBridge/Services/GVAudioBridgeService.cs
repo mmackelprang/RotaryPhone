@@ -3,27 +3,27 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RotaryPhoneController.GVBridge.Audio;
 using RotaryPhoneController.GVBridge.Models;
+using RotaryPhoneController.GVBridge.Sip;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 
 namespace RotaryPhoneController.GVBridge.Services;
 
 /// <summary>
-/// Bridges audio between the GVBridgeService WebSocket (16 kHz PCM) and
+/// Bridges audio between GvSipTransport (48 kHz PCM via Opus/WebRTC) and
 /// the HT801 ATA (8 kHz G.711 µ-law over RTP).
 /// </summary>
 public class GVAudioBridgeService : IDisposable
 {
-    private readonly GVBridgeService _bridgeService;
     private readonly GVBridgeConfig _config;
     private readonly ILogger<GVAudioBridgeService> _logger;
 
+    private GvSipTransport? _sipTransport;
+    private string? _activeCallId;
     private RTPSession? _rtpSession;
-    private CancellationTokenSource? _cts;
-    private Task? _inboundLoopTask;
 
     /// <summary>
-    /// Indicates whether the audio bridge is currently active (RTP session open and loop running).
+    /// Indicates whether the audio bridge is currently active (RTP session open).
     /// </summary>
     public bool IsActive { get; private set; }
 
@@ -33,17 +33,25 @@ public class GVAudioBridgeService : IDisposable
     public AudioBridgeStats Stats { get; } = new();
 
     public GVAudioBridgeService(
-        GVBridgeService bridgeService,
         IOptions<GVBridgeConfig> config,
         ILogger<GVAudioBridgeService> logger)
     {
-        _bridgeService = bridgeService;
         _config = config.Value;
         _logger = logger;
     }
 
     /// <summary>
-    /// Start the RTP session and begin draining the inbound audio queue.
+    /// Set the SIP transport and call ID for the current call.
+    /// Must be called before StartAsync().
+    /// </summary>
+    public void SetSipTransport(GvSipTransport sipTransport, string callId)
+    {
+        _sipTransport = sipTransport;
+        _activeCallId = callId;
+    }
+
+    /// <summary>
+    /// Start the RTP session and subscribe to SIP audio events.
     /// </summary>
     public async Task StartAsync()
     {
@@ -53,7 +61,11 @@ public class GVAudioBridgeService : IDisposable
             return;
         }
 
-        _cts = new CancellationTokenSource();
+        if (_sipTransport == null || _activeCallId == null)
+        {
+            _logger.LogError("GVAudioBridge StartAsync called without SIP transport — call SetSipTransport first");
+            return;
+        }
 
         // Create RTP session bound to the configured local port (0 = OS-assigned).
         _rtpSession = new RTPSession(
@@ -64,7 +76,10 @@ public class GVAudioBridgeService : IDisposable
             bindPort: _config.LocalRtpPort);
 
         // Add a PCMU (G.711 µ-law) audio track.
-        var pcmuTrack = new MediaStreamTrack(SDPWellKnownMediaFormatsEnum.PCMU);
+        var pcmuTrack = new MediaStreamTrack(
+            SDPMediaTypesEnum.audio,
+            false,
+            new List<SDPAudioVideoMediaFormat> { new(SDPWellKnownMediaFormatsEnum.PCMU) });
         _rtpSession.addTrack(pcmuTrack);
 
         // Set the remote RTP destination (HT801 ATA).
@@ -76,22 +91,22 @@ public class GVAudioBridgeService : IDisposable
         _rtpSession.AcceptRtpFromAny = true;
 
         // Subscribe to inbound RTP packets from the HT801.
-        _rtpSession.OnRtpPacketReceived += OnRtpPacketReceived;
+        _rtpSession.OnRtpPacketReceived += OnHt801RtpReceived;
+
+        // Subscribe to audio from the SIP transport (Google Voice side).
+        _sipTransport.AudioReceived += OnSipAudioReceived;
 
         // Start the RTP session (begins RTCP reporting).
         await _rtpSession.Start();
 
-        // Start the inbound audio loop (WebSocket PCM -> RTP G.711).
-        _inboundLoopTask = InboundLoopAsync(_cts.Token);
-
         IsActive = true;
         _logger.LogInformation(
-            "GVAudioBridge started — local RTP port {Port}, destination {Dest}:{DestPort}",
-            _config.LocalRtpPort, _config.HT801Ip, _config.HT801RtpPort);
+            "GVAudioBridge started — local RTP port {Port}, destination {Dest}:{DestPort}, callId {CallId}",
+            _config.LocalRtpPort, _config.HT801Ip, _config.HT801RtpPort, _activeCallId);
     }
 
     /// <summary>
-    /// Stop the inbound loop and close the RTP session.
+    /// Stop the bridge: unsubscribe events and close the RTP session.
     /// </summary>
     public async Task StopAsync()
     {
@@ -103,77 +118,83 @@ public class GVAudioBridgeService : IDisposable
 
         IsActive = false;
 
-        // Cancel the inbound loop.
-        _cts?.Cancel();
-        if (_inboundLoopTask != null)
+        // Unsubscribe from SIP audio.
+        if (_sipTransport != null)
         {
-            try { await _inboundLoopTask; }
-            catch (OperationCanceledException) { }
+            _sipTransport.AudioReceived -= OnSipAudioReceived;
         }
 
         // Unsubscribe and close the RTP session.
         if (_rtpSession != null)
         {
-            _rtpSession.OnRtpPacketReceived -= OnRtpPacketReceived;
+            _rtpSession.OnRtpPacketReceived -= OnHt801RtpReceived;
             _rtpSession.Close("GVAudioBridge stopped");
             _rtpSession.Dispose();
             _rtpSession = null;
         }
 
-        _cts?.Dispose();
-        _cts = null;
-        _inboundLoopTask = null;
+        // Clear per-call state.
+        _sipTransport = null;
+        _activeCallId = null;
 
         _logger.LogInformation("GVAudioBridge stopped");
+        await Task.CompletedTask;
     }
 
     /// <summary>
-    /// Drains the GVBridgeService inbound audio queue (16 kHz PCM from Chrome extension),
+    /// Handles audio from the SIP transport (48 kHz 16-bit mono PCM from Google Voice),
     /// resamples to 8 kHz, encodes to G.711 µ-law, and sends via RTP to the HT801.
     /// </summary>
-    private async Task InboundLoopAsync(CancellationToken ct)
+    private void OnSipAudioReceived(object? sender, AudioDataEventArgs e)
     {
-        // At 8 kHz with 20ms frames, each RTP packet carries 160 samples = 160 bytes of G.711.
-        // The RTP timestamp increment per frame is 160.
-        const uint timestampIncrement = 160;
+        // Only process audio for the active call.
+        if (e.CallId != _activeCallId)
+            return;
 
-        while (!ct.IsCancellationRequested)
+        try
         {
-            if (_bridgeService.InboundAudioQueue.TryDequeue(out var pcm16k))
+            // 48 kHz PCM from SIP transport.
+            var pcm48k = e.PcmData.ToArray();
+
+            // Resample 48 kHz -> 8 kHz
+            var pcm8k = AudioResampler.Resample48kTo8k(pcm48k);
+
+            // Encode PCM 8 kHz (16-bit signed) -> G.711 µ-law
+            var mulaw = MuLawEncoder.Encode(pcm8k);
+
+            // Send via RTP in 160-sample (20ms) frames.
+            const uint timestampIncrement = 160;
+            int offset = 0;
+            while (offset + 160 <= mulaw.Length)
             {
-                try
-                {
-                    // Resample 16 kHz -> 8 kHz
-                    var pcm8k = AudioResampler.Resample16kTo8k(pcm16k);
-
-                    // Encode PCM 8 kHz (16-bit signed) -> G.711 µ-law
-                    var mulaw = MuLawEncoder.Encode(pcm8k);
-
-                    // Send via RTP
-                    _rtpSession?.SendAudio(timestampIncrement, mulaw);
-
-                    Stats.RecordInboundSent();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error processing inbound audio frame");
-                    Stats.RecordInboundError();
-                }
+                var frame = new byte[160];
+                Buffer.BlockCopy(mulaw, offset, frame, 0, 160);
+                _rtpSession?.SendAudio(timestampIncrement, frame);
+                offset += 160;
             }
-            else
+
+            // If there's a remainder smaller than 160 bytes, send it too.
+            if (offset < mulaw.Length)
             {
-                // No frames available; yield briefly to avoid busy-wait.
-                try { await Task.Delay(1, ct); }
-                catch (OperationCanceledException) { break; }
+                var remainder = new byte[mulaw.Length - offset];
+                Buffer.BlockCopy(mulaw, offset, remainder, 0, remainder.Length);
+                _rtpSession?.SendAudio(timestampIncrement, remainder);
             }
+
+            Stats.RecordInboundSent();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error processing SIP audio frame for HT801");
+            Stats.RecordInboundError();
         }
     }
 
     /// <summary>
     /// Handles inbound RTP packets from the HT801 (G.711 µ-law), decodes to PCM,
-    /// resamples 8 kHz -> 16 kHz, and forwards to the Chrome extension via WebSocket.
+    /// resamples 8 kHz -> 48 kHz, and forwards to Google Voice via SIP transport.
     /// </summary>
-    private void OnRtpPacketReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
+    private void OnHt801RtpReceived(IPEndPoint remoteEndPoint, SDPMediaTypesEnum mediaType, RTPPacket rtpPacket)
     {
         if (mediaType != SDPMediaTypesEnum.audio)
             return;
@@ -185,17 +206,20 @@ public class GVAudioBridgeService : IDisposable
             // Decode G.711 µ-law -> PCM 8 kHz (16-bit signed)
             var pcm8k = MuLawEncoder.Decode(mulaw);
 
-            // Resample 8 kHz -> 16 kHz
-            var pcm16k = AudioResampler.Resample8kTo16k(pcm8k);
+            // Resample 8 kHz -> 48 kHz
+            var pcm48k = AudioResampler.Resample8kTo48k(pcm8k);
 
-            // Send to Chrome extension via WebSocket
-            _ = _bridgeService.SendAudioFrameAsync(pcm16k);
+            // Send to Google Voice via SIP transport.
+            if (_sipTransport != null && _activeCallId != null)
+            {
+                _sipTransport.SendAudio(_activeCallId, pcm48k, 48000);
+            }
 
             Stats.RecordOutboundReceived();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Error processing outbound RTP packet");
+            _logger.LogWarning(ex, "Error processing HT801 RTP packet for SIP");
             Stats.RecordOutboundError();
         }
     }
@@ -314,16 +338,16 @@ public class AudioBridgeStats
     private long _inboundErrors;
     private long _outboundErrors;
 
-    /// <summary>Number of PCM frames from WebSocket successfully encoded and sent as RTP.</summary>
+    /// <summary>Number of PCM frames from SIP successfully encoded and sent as RTP.</summary>
     public long InboundFramesSent => Interlocked.Read(ref _inboundFramesSent);
 
-    /// <summary>Number of RTP frames received from HT801 and forwarded to WebSocket.</summary>
+    /// <summary>Number of RTP frames received from HT801 and forwarded via SIP.</summary>
     public long OutboundFramesReceived => Interlocked.Read(ref _outboundFramesReceived);
 
-    /// <summary>Number of errors during inbound (WebSocket -> RTP) processing.</summary>
+    /// <summary>Number of errors during inbound (SIP -> RTP) processing.</summary>
     public long InboundErrors => Interlocked.Read(ref _inboundErrors);
 
-    /// <summary>Number of errors during outbound (RTP -> WebSocket) processing.</summary>
+    /// <summary>Number of errors during outbound (RTP -> SIP) processing.</summary>
     public long OutboundErrors => Interlocked.Read(ref _outboundErrors);
 
     public void RecordInboundSent() => Interlocked.Increment(ref _inboundFramesSent);
