@@ -25,3 +25,19 @@ public record SetCookiesRequest(
   string? Secure1Psid,
   string? Secure3Psid,
   string? RawCookieHeader);
+
+/// <summary>
+/// Payload for POST /api/gvbridge/cookies/refresh-from-browser.
+/// All parameters are optional with sensible defaults.
+/// </summary>
+public record RefreshFromBrowserRequest(
+  int CdpPort = 9224,
+  string? TargetUrl = null);
+
+/// <summary>
+/// Response from POST /api/gvbridge/cookies/refresh-from-browser on success.
+/// </summary>
+public record RefreshFromBrowserResponse(
+  bool Refreshed,
+  int CookieCount,
+  string? SapisidPrefix);

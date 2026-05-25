@@ -6,7 +6,7 @@
 > adapter, profiles, or WirePlumber configs without updating this document.
 >
 > **Canonical location:** `D:\prj\RotaryPhone\docs\prompts\RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`
-> **Last updated:** 2026-05-25 by RotaryPhone session (Phase B PR2)
+> **Last updated:** 2026-05-25 by RotaryPhone session (Phase B PR3)
 >
 > **If you need to change any boundary (adapter assignment, WP config, profile ownership),
 > update this document first, then coordinate with the other session.**
@@ -134,6 +134,7 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | PUT | `/api/gvbridge/adapter/mode` | Switch active adapter mode | A (existing) |
 | GET | `/api/gvbridge/cookies` | Cookie status metadata (no secrets) | B (PR2) |
 | POST | `/api/gvbridge/cookies` | Replace cookie set from paste | B (PR2) |
+| POST | `/api/gvbridge/cookies/refresh-from-browser` | Extract cookies from Chrome CDP and activate | B (PR3) |
 | GET | `/api/gvtrunk/status` | VoIP.ms SIP trunk registration state | A (existing) |
 | GET | `/api/gvtrunk/calls` | Call history (last 50) | A (existing) |
 | GET | `/api/gvtrunk/sms` | SMS history (last 20, in-memory) | A (existing) |
@@ -293,3 +294,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-03-21 | RotaryPhone session | GV Bridge feature complete (PRs #12-#15). New `gv-bridge-chrome.service` runs a second Chrome instance (separate profile, off-screen) for `voice.google.com`. WebSocket server on `ws://127.0.0.1:8765`. No BT/audio boundary impact. **ACTION for Radio Console:** Integrate GV Bridge Blazor components into kiosk UI. See prompt at `D:\prj\RTest\RTest\docs\2026-03-21-gvbridge-kiosk-integration.md`. Key component: `<ConnectionModeSelector />` for switching between BT/SIP/GV call paths. |
 | 2026-05-24 | RotaryPhone session | Phase B PR1 merged: `/api/gvbridge/status` now returns `sipRegistered` + `cookiesValid` fields; new `/api/diagnostics/audio-bridge` and `/api/diagnostics/ht801` endpoints. REST endpoints table added to Integration Points section. RTest Phase C can now consume these for two-badge GV status + audio-bridge dashboard + HT801 dashboard card. |
 | 2026-05-25 | RotaryPhone session | Phase B PR2: cookie management endpoints `GET /api/gvbridge/cookies` (status metadata, no secrets) and `POST /api/gvbridge/cookies` (paste-in from browser DevTools). Accepts RawCookieHeader or individual fields. LAN-only, no auth -- see Cookie Management Security note. `GvCookieManager` service extracts cookie lifecycle. `GVApiAdapter` gains `LoadedAt`, `LastValidatedAt`, `ReloadCookiesAsync`. |
+| 2026-05-25 | RotaryPhone session | Phase B PR3: `POST /api/gvbridge/cookies/refresh-from-browser` -- server-side CDP cookie extraction. Connects to Chrome's remote debugging port (default 9224), finds voice.google.com tab, extracts cookies via WebSocket Network.getCookies, feeds into existing SetCookiesAsync pipeline. No Playwright dependency, uses BCL HttpClient + ClientWebSocket only. `GVBridgeConfig.ChromeCdpPort` added. |
