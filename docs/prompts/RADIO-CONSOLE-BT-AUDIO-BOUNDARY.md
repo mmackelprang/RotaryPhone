@@ -6,7 +6,7 @@
 > adapter, profiles, or WirePlumber configs without updating this document.
 >
 > **Canonical location:** `D:\prj\RotaryPhone\docs\prompts\RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`
-> **Last updated:** 2026-03-14 by Radio Console session
+> **Last updated:** 2026-05-24 by RotaryPhone session (Phase B PR1)
 >
 > **If you need to change any boundary (adapter assignment, WP config, profile ownership),
 > update this document first, then coordinate with the other session.**
@@ -122,6 +122,39 @@ SCO/eSCO audio routing yourself (e.g., via PipeWire directly, or BlueZ's transpo
 Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 - **SignalR Hub** at `/hub` — receives: `CallStateChanged`, `IncomingCall`, `CallHistoryUpdated`, `SystemStatusChanged`
 - **REST API** — `GET /api/phone/system-status`, `GET /api/phone/status`, contacts CRUD, call history, simulate endpoints
+
+### REST endpoints consumed by Radio Console (RTest UI)
+
+| Method | Route | Purpose | Phase added |
+|--------|-------|---------|:-----------:|
+| GET | `/api/phone/system-status` | Platform / BT / SIP / HT801 reachability | A (existing) |
+| GET | `/api/phone/status` | Current call state | A (existing) |
+| GET | `/api/gvbridge/status` | GV API availability + SipRegistered + CookiesValid | B (PR1) |
+| GET | `/api/gvbridge/adapter/mode` | Available + active call adapter mode | A (existing) |
+| PUT | `/api/gvbridge/adapter/mode` | Switch active adapter mode | A (existing) |
+| GET | `/api/gvtrunk/status` | VoIP.ms SIP trunk registration state | A (existing) |
+| GET | `/api/gvtrunk/calls` | Call history (last 50) | A (existing) |
+| GET | `/api/gvtrunk/sms` | SMS history (last 20, in-memory) | A (existing) |
+| POST | `/api/gvtrunk/dial` | Place outbound call via trunk | A (existing) |
+| POST | `/api/gvtrunk/reregister` | Force re-registration of trunk | A (existing) |
+| GET | `/api/diagnostics/status` | Full diagnostics snapshot | B (existing, newly consumed) |
+| GET | `/api/diagnostics/audio-bridge` | Audio-bridge stats only (cheap polling) | B (PR1) |
+| GET | `/api/diagnostics/ht801` | Consolidated HT801 status (network + SIP + freshness) | B (PR1) |
+| GET | `/api/diagnostics/sip-log` | Recent SIP messages | B (existing, newly consumed) |
+| GET | `/api/diagnostics/timeline` | Call timeline events | B (existing, newly consumed) |
+| GET | `/api/contacts/*` | Contact CRUD (already in use) | A (existing) |
+| GET | `/api/callhistory` | Call history | A (existing) |
+
+**JSON conventions:** All response payloads are camelCase or PascalCase depending on whether the controller returns an anonymous object (camelCase) or a typed DTO/record (PascalCase). RTest's `Radio.Web` configures `JsonSerializerOptions.PropertyNameCaseInsensitive = true` so both work transparently. **New endpoints should prefer typed records** for OpenAPI/Swagger schema clarity.
+
+**Polling cadence guidance for RTest:**
+
+- `/api/phone/status` -- 5 seconds (already)
+- `/api/gvbridge/status` -- 10 seconds (cheap, fast-changing)
+- `/api/gvtrunk/status` -- 10 seconds
+- `/api/diagnostics/audio-bridge` -- 2 seconds **only while audio bridge is active**, otherwise paused
+- `/api/diagnostics/ht801` -- 30 seconds (involves a network probe of HT801)
+- `/api/diagnostics/sip-log`, `/api/diagnostics/timeline` -- only on-demand (user opens diagnostics panel), do NOT poll
 
 ### RotaryPhone → Radio Console (SignalR)
 
@@ -251,3 +284,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-03-14 | Radio Console session | Added BT reliability infrastructure (PR #347). New `radio-bt-setup.service` runs at boot: configures both adapters, removes stale cross-adapter pairings, sets PipeWire defaults, verifies WP patches. APT hook auto-protects bluez.lua patch. Radio.API now has pipeline self-healing monitor (30s) and BT health check. **ACTION NEEDED for RotaryPhone:** bt_manager.py must check if a device is already paired on hci0 before pairing on hci1. See prompt file `docs/prompts/2026-03-14-bt-cross-adapter-pairing-guard.md`. |
 | 2026-03-14 | Radio Console session (on behalf of RotaryPhone) | COMPLETED: RotaryPhone commit `3f27809` adds cross-adapter pairing guard to bt_manager.py. Devices already paired on hci0 are now rejected from pairing on hci1. Action item from previous entry is resolved. |
 | 2026-03-21 | RotaryPhone session | GV Bridge feature complete (PRs #12-#15). New `gv-bridge-chrome.service` runs a second Chrome instance (separate profile, off-screen) for `voice.google.com`. WebSocket server on `ws://127.0.0.1:8765`. No BT/audio boundary impact. **ACTION for Radio Console:** Integrate GV Bridge Blazor components into kiosk UI. See prompt at `D:\prj\RTest\RTest\docs\2026-03-21-gvbridge-kiosk-integration.md`. Key component: `<ConnectionModeSelector />` for switching between BT/SIP/GV call paths. |
+| 2026-05-24 | RotaryPhone session | Phase B PR1 merged: `/api/gvbridge/status` now returns `sipRegistered` + `cookiesValid` fields; new `/api/diagnostics/audio-bridge` and `/api/diagnostics/ht801` endpoints. REST endpoints table added to Integration Points section. RTest Phase C can now consume these for two-badge GV status + audio-bridge dashboard + HT801 dashboard card. |

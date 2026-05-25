@@ -24,6 +24,20 @@ public class GVApiAdapterTests
     }
 
     [Fact]
+    public void IsSipRegistered_BeforeActivate_ReturnsFalse()
+    {
+        var adapter = CreateAdapter();
+        Assert.False(adapter.IsSipRegistered);
+    }
+
+    [Fact]
+    public void AreCookiesValid_BeforeActivate_ReturnsFalse()
+    {
+        var adapter = CreateAdapter();
+        Assert.False(adapter.AreCookiesValid);
+    }
+
+    [Fact]
     public async Task PlaceCallAsync_ThrowsWhenNotAvailable()
     {
         var adapter = CreateAdapter();

@@ -33,9 +33,20 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     private string? _activeCallId;
     private bool _disposed;
+    private bool _areCookiesValid;
 
     public CallAdapterMode Mode => CallAdapterMode.GVApi;
     public bool IsAvailable { get; private set; }
+
+    /// <summary>
+    /// Whether the SIP transport is currently registered with Google Voice.
+    /// </summary>
+    public bool IsSipRegistered => _sipTransport?.IsRegistered ?? false;
+
+    /// <summary>
+    /// Whether the last cookie health check passed (cookies are still accepted by Google).
+    /// </summary>
+    public bool AreCookiesValid => _areCookiesValid;
 
     public event Action<bool>? OnAvailabilityChanged;
     public event Action<string>? OnIncomingCall;
@@ -112,6 +123,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         // 4. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
+        _areCookiesValid = healthy;
         if (!healthy)
         {
             _logger.LogWarning("GVApi: Initial health check failed — cookies may be expired");
@@ -184,6 +196,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _accountClient = null;
         _cookieSet = null;
         _cookieStore = null;
+        _areCookiesValid = false;
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
@@ -267,6 +280,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             if (_accountClient == null) return;
 
             var healthy = await _accountClient.IsHealthyAsync();
+            _areCookiesValid = healthy;
             if (!healthy)
             {
                 _logger.LogWarning("GVApi: periodic health check failed — marking unavailable");
