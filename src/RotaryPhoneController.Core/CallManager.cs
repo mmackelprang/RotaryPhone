@@ -453,17 +453,18 @@ public class CallManager
         _logger.LogInformation("Call answered on rotary phone");
 
         // Notify the active adapter:
-        // - In GVBrowser mode: starts audio bridge AND answers the call on the GV web page
+        // - In GV modes (GVBrowser/GVApi): starts audio bridge AND answers the call
         // - In other modes: no-op (default interface implementation)
         if (_boundAdapter != null)
         {
+            _logger.LogInformation("Calling adapter.OnCallAnsweredOnRotaryPhoneAsync for mode {Mode}", _boundAdapter.Mode);
             _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
         }
 
         // Start audio based on active adapter mode.
-        // In GVBrowser mode, audio is handled by GVAudioBridgeService (started above).
-        // Only start Bluetooth/SCO audio for non-GV modes.
-        if (_boundAdapter?.Mode != CallAdapterMode.GVBrowser)
+        // In GV modes (GVBrowser/GVApi), audio is handled by GVAudioBridgeService (started above).
+        // Only start Bluetooth/SCO or RTP audio for non-GV modes (or when no adapter is bound).
+        if (_boundAdapter == null || _boundAdapter.Mode == CallAdapterMode.BluetoothHfp || _boundAdapter.Mode == CallAdapterMode.SipTrunk)
         {
             if (_deviceManager != null && _activeDeviceAddress != null)
             {
