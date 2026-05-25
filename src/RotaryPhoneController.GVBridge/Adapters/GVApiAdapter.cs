@@ -35,6 +35,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     private bool _disposed;
     private bool _areCookiesValid;
 
+    // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
+    private int? _negotiatedHt801RtpPort;
+    private string? _negotiatedHt801RtpIp;
+    private int? _inviteRtpPort;  // the port we offered in the INVITE SDP
+
     public CallAdapterMode Mode => CallAdapterMode.GVApi;
     public bool IsAvailable { get; private set; }
 
@@ -90,6 +95,23 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     public void SetAudioBridge(GVAudioBridgeService audioBridge)
     {
         _audioBridge = audioBridge;
+    }
+
+    /// <summary>
+    /// Called by CallManager after the HT801 200 OK SDP is parsed.
+    /// Stores the negotiated RTP details so StartAsync can use them.
+    /// </summary>
+    /// <param name="ht801Port">HT801's RTP port from its SDP answer.</param>
+    /// <param name="ht801Ip">HT801's IP from its SDP answer.</param>
+    /// <param name="invitePort">The local RTP port we advertised in the INVITE SDP.</param>
+    public void SetNegotiatedRtpDetails(int? ht801Port, string? ht801Ip, int? invitePort)
+    {
+        _negotiatedHt801RtpPort = ht801Port;
+        _negotiatedHt801RtpIp = ht801Ip;
+        _inviteRtpPort = invitePort;
+        _logger.LogInformation(
+            "GVApiAdapter received negotiated RTP details — HT801={Ip}:{Port}, invitePort={InvitePort}",
+            ht801Ip ?? "(null)", ht801Port?.ToString() ?? "(null)", invitePort?.ToString() ?? "(null)");
     }
 
     public async Task ActivateAsync(CancellationToken ct = default)
@@ -317,12 +339,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     public async Task OnCallAnsweredOnRotaryPhoneAsync()
     {
-        _logger.LogInformation("Rotary phone answered — starting audio bridge");
+        _logger.LogInformation("Rotary phone answered — starting audio bridge with negotiated ports " +
+            "(HT801={Ip}:{Port}, localBind={LocalPort})",
+            _negotiatedHt801RtpIp ?? "(config)", _negotiatedHt801RtpPort?.ToString() ?? "(config)",
+            _inviteRtpPort?.ToString() ?? "(config)");
 
         if (_audioBridge != null && _sipTransport != null && _activeCallId != null)
         {
             _audioBridge.SetSipTransport(_sipTransport, _activeCallId);
-            await _audioBridge.StartAsync();
+            await _audioBridge.StartAsync(
+                remoteRtpPort: _negotiatedHt801RtpPort,
+                remoteRtpAddress: _negotiatedHt801RtpIp,
+                localRtpPort: _inviteRtpPort);
         }
     }
 
@@ -332,6 +360,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         if (_audioBridge != null)
             await _audioBridge.StopAsync();
+
+        // Clear negotiated RTP details for this call
+        _negotiatedHt801RtpPort = null;
+        _negotiatedHt801RtpIp = null;
+        _inviteRtpPort = null;
 
         var callId = Interlocked.Exchange(ref _activeCallId, null);
         if (callId != null && _sipTransport != null)

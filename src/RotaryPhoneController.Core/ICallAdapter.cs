@@ -21,6 +21,16 @@ public interface ICallAdapter
     Task HangUpAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Called by CallManager after HT801 answers (200 OK with SDP) to provide negotiated
+    /// RTP port details. Adapters that manage their own audio bridge should store these
+    /// and use them in OnCallAnsweredOnRotaryPhoneAsync. Default is no-op.
+    /// </summary>
+    /// <param name="ht801RtpPort">HT801's RTP port from SDP (-1 if parsing failed).</param>
+    /// <param name="ht801RtpIp">HT801's IP from SDP.</param>
+    /// <param name="inviteRtpPort">The local RTP port we advertised in the INVITE SDP.</param>
+    void SetNegotiatedRtpDetails(int? ht801RtpPort, string? ht801RtpIp, int? inviteRtpPort) { }
+
+    /// <summary>
     /// Called by CallManager when the call is answered on the rotary phone (SIP 200 OK).
     /// Adapters that manage their own audio bridge (e.g., GVBrowser) should start it here.
     /// Default implementation is a no-op for adapters that don't need it.
