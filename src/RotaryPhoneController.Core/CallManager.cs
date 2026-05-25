@@ -24,6 +24,10 @@ public class CallManager
     private bool _isHangingUp;
     private string? _activeDeviceAddress;
 
+    // RTP port details negotiated from HT801's 200 OK SDP response
+    private int? _negotiatedRtpPort;
+    private string? _negotiatedRtpIp;
+
     public event Action? StateChanged;
 
     public CallState CurrentState
@@ -94,6 +98,7 @@ public class CallManager
         _sipAdapter.OnHookChange += HandleHookChange;
         _sipAdapter.OnDigitsReceived += HandleDigitsReceived;
         _sipAdapter.OnIncomingCall += HandleIncomingCall;
+        _sipAdapter.OnRtpDetailsNegotiated += HandleRtpDetailsNegotiated;
         
         // Subscribe to Bluetooth HFP events
         _bluetoothAdapter.OnIncomingCall += HandleBluetoothIncomingCall;
@@ -167,6 +172,13 @@ public class CallManager
     {
         if (CurrentState == CallState.Idle) return;
         HandleBluetoothCallEnded();
+    }
+
+    private void HandleRtpDetailsNegotiated(int port, string ip)
+    {
+        _negotiatedRtpPort = port;
+        _negotiatedRtpIp = ip;
+        _logger.LogInformation("CallManager captured negotiated RTP from HT801 SDP: {IP}:{Port}", ip, port);
     }
 
     public void HandleHookChange(bool isOffHook)
@@ -303,12 +315,11 @@ public class CallManager
         }, TaskScheduler.Default);
 
         // Send INVITE to HT801 to trigger ring.
-        // In GVBrowser mode, use the GV audio bridge's RTP port (5070) in the SDP
-        // so the HT801 sends audio to the right place.
-        var rtpPortForSdp = _boundAdapter?.Mode == CallAdapterMode.GVBrowser ? 5070 : _rtpPort;
+        // Always use _rtpPort (from config, typically 49000) in the SDP — the audio bridge
+        // will bind to this same port so HT801's RTP arrives at the correct destination.
         _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP} (SDP RTP port {Port})",
-            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, rtpPortForSdp);
+            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
+        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
 
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
@@ -457,7 +468,14 @@ public class CallManager
         // - In other modes: no-op (default interface implementation)
         if (_boundAdapter != null)
         {
-            _logger.LogInformation("Calling adapter.OnCallAnsweredOnRotaryPhoneAsync for mode {Mode}", _boundAdapter.Mode);
+            // Pass negotiated RTP details so the audio bridge binds to the correct ports.
+            // _rtpPort is what we advertised in the INVITE SDP (the port HT801 will send TO).
+            _boundAdapter.SetNegotiatedRtpDetails(_negotiatedRtpPort, _negotiatedRtpIp, _rtpPort);
+            _logger.LogInformation(
+                "Calling adapter.OnCallAnsweredOnRotaryPhoneAsync for mode {Mode} " +
+                "(negotiated HT801 RTP={NegIp}:{NegPort}, invitePort={InvitePort})",
+                _boundAdapter.Mode, _negotiatedRtpIp ?? "(null)",
+                _negotiatedRtpPort?.ToString() ?? "(null)", _rtpPort);
             _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
         }
 
@@ -584,6 +602,8 @@ public class CallManager
             IncomingPhoneNumber = null;
             CallStartedAtUtc = null;
             _activeDeviceAddress = null;
+            _negotiatedRtpPort = null;
+            _negotiatedRtpIp = null;
             _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
         }
         finally

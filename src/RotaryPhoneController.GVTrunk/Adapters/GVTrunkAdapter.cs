@@ -23,6 +23,7 @@ public class GVTrunkAdapter : ITrunkAdapter, IDisposable
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
     public event Action? OnIncomingCall;
+    public event Action<int, string>? OnRtpDetailsNegotiated;
     public event Action<bool>? OnRegistrationChanged;
     public event Action<string>? OnDtmfReceived;
 

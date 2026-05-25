@@ -25,6 +25,12 @@ public class SIPSorceryAdapter : ISipAdapter
     public event Action<SipMessageEntry>? OnSipMessageLogged;
 
     /// <summary>
+    /// Fired when HT801 responds with 200 OK containing SDP.
+    /// Parameters: (negotiated RTP port, negotiated IP address).
+    /// </summary>
+    public event Action<int, string>? OnRtpDetailsNegotiated;
+
+    /// <summary>
     /// Gets whether the SIP transport is currently listening
     /// </summary>
     public bool IsListening => _sipTransport != null;
@@ -165,6 +171,15 @@ public class SIPSorceryAdapter : ISipAdapter
             catch (Exception ex)
             {
                 _logger.Error(ex, "Failed to send ACK");
+            }
+
+            // Parse RTP details from the HT801's SDP answer so the audio bridge
+            // knows which port/IP the HT801 is actually listening on.
+            if (!string.IsNullOrEmpty(sipResponse.Body))
+            {
+                var (rtpPort, rtpIp) = ExtractRtpDetailsFromSdp(sipResponse.Body);
+                _logger.Information("Extracted RTP details from HT801 200 OK SDP: {IP}:{Port}", rtpIp, rtpPort);
+                OnRtpDetailsNegotiated?.Invoke(rtpPort, rtpIp);
             }
 
             _inviteAnswered = true;
@@ -499,6 +514,28 @@ public class SIPSorceryAdapter : ISipAdapter
             _pendingInviteRequest = null;
             _inviteAnswered = false;
         }
+    }
+
+    /// <summary>
+    /// Parse RTP port and IP from an SDP body (c= and m=audio lines).
+    /// Returns (-1, "0.0.0.0") if parsing fails.
+    /// </summary>
+    internal static (int port, string ip) ExtractRtpDetailsFromSdp(string sdp)
+    {
+        int port = -1;
+        string ip = "0.0.0.0";
+        foreach (var line in sdp.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (line.StartsWith("c=IN IP4 "))
+                ip = line.Substring("c=IN IP4 ".Length).Trim();
+            if (line.StartsWith("m=audio "))
+            {
+                var parts = line.Split(' ');
+                if (parts.Length > 1 && int.TryParse(parts[1], out var p))
+                    port = p;
+            }
+        }
+        return (port > 0 ? port : -1, ip);
     }
 
     private string CreateBasicSDP(SIPEndPoint localEndpoint)

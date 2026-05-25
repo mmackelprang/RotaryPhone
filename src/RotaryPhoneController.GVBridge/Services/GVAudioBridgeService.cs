@@ -53,7 +53,10 @@ public class GVAudioBridgeService : IDisposable
     /// <summary>
     /// Start the RTP session and subscribe to SIP audio events.
     /// </summary>
-    public async Task StartAsync()
+    /// <param name="remoteRtpPort">HT801's negotiated RTP port from SDP (overrides config if provided).</param>
+    /// <param name="remoteRtpAddress">HT801's negotiated IP from SDP (overrides config if provided).</param>
+    /// <param name="localRtpPort">Local port to bind (should match the port advertised in the INVITE SDP).</param>
+    public async Task StartAsync(int? remoteRtpPort = null, string? remoteRtpAddress = null, int? localRtpPort = null)
     {
         if (IsActive)
         {
@@ -67,13 +70,25 @@ public class GVAudioBridgeService : IDisposable
             return;
         }
 
-        // Create RTP session bound to the configured local port (0 = OS-assigned).
+        // Resolve effective ports: prefer negotiated values, fall back to config.
+        var effectiveLocalPort = localRtpPort ?? _config.LocalRtpPort;
+        var effectiveRemotePort = remoteRtpPort ?? _config.HT801RtpPort;
+        var effectiveRemoteIp = remoteRtpAddress ?? _config.HT801Ip;
+
+        _logger.LogInformation(
+            "GVAudioBridge resolving ports — local: {LocalPort} (override={LocalOverride}), " +
+            "remote: {RemoteIp}:{RemotePort} (overrides={RemoteIpOverride}/{RemotePortOverride})",
+            effectiveLocalPort, localRtpPort.HasValue,
+            effectiveRemoteIp, effectiveRemotePort,
+            remoteRtpAddress != null, remoteRtpPort.HasValue);
+
+        // Create RTP session bound to the effective local port (0 = OS-assigned).
         _rtpSession = new RTPSession(
             isMediaMultiplexed: false,
             isRtcpMultiplexed: false,
             isSecure: false,
             bindAddress: IPAddress.Parse(_config.LocalIp),
-            bindPort: _config.LocalRtpPort);
+            bindPort: effectiveLocalPort);
 
         // Add a PCMU (G.711 µ-law) audio track.
         var pcmuTrack = new MediaStreamTrack(
@@ -83,8 +98,8 @@ public class GVAudioBridgeService : IDisposable
         _rtpSession.addTrack(pcmuTrack);
 
         // Set the remote RTP destination (HT801 ATA).
-        var remoteRtpEP = new IPEndPoint(IPAddress.Parse(_config.HT801Ip), _config.HT801RtpPort);
-        var remoteRtcpEP = new IPEndPoint(IPAddress.Parse(_config.HT801Ip), _config.HT801RtpPort + 1);
+        var remoteRtpEP = new IPEndPoint(IPAddress.Parse(effectiveRemoteIp), effectiveRemotePort);
+        var remoteRtcpEP = new IPEndPoint(IPAddress.Parse(effectiveRemoteIp), effectiveRemotePort + 1);
         _rtpSession.SetDestination(SDPMediaTypesEnum.audio, remoteRtpEP, remoteRtcpEP);
 
         // Accept RTP from any source (the HT801 may use a different port for sending).
@@ -101,8 +116,8 @@ public class GVAudioBridgeService : IDisposable
 
         IsActive = true;
         _logger.LogInformation(
-            "GVAudioBridge started — local RTP port {Port}, destination {Dest}:{DestPort}, callId {CallId}",
-            _config.LocalRtpPort, _config.HT801Ip, _config.HT801RtpPort, _activeCallId);
+            "GVAudioBridge started — local RTP port {LocalPort}, destination {Dest}:{DestPort}, callId {CallId}",
+            effectiveLocalPort, effectiveRemoteIp, effectiveRemotePort, _activeCallId);
     }
 
     /// <summary>
