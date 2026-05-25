@@ -1,8 +1,12 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
+using Moq.Protected;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Api;
@@ -177,10 +181,36 @@ public class GVBridgeControllerTests
     var registry = new Mock<ICallAdapterRegistry>();
     registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
 
+    var config = Options.Create(new GVBridgeConfig
+    {
+      GvApiBaseUrl = "https://clients6.google.com/voice/v1/voiceclient",
+      GvApiKey = "test",
+      CookieFilePath = "test.enc",
+      CookieEncryptionKey = Convert.ToBase64String(new byte[32]),
+    });
+
     var adapter = CreateAdapter();
     var cm = cookieManager ?? CreateDefaultCookieManager();
 
-    return new GVBridgeController(registry.Object, adapter, cm.Object);
+    // Minimal IHttpClientFactory mock (not exercised by these tests)
+    var handler = new Mock<HttpMessageHandler>();
+    handler.Protected()
+      .Setup<Task<HttpResponseMessage>>(
+        "SendAsync",
+        ItExpr.IsAny<HttpRequestMessage>(),
+        ItExpr.IsAny<CancellationToken>())
+      .ReturnsAsync(new HttpResponseMessage { StatusCode = HttpStatusCode.OK, Content = new StringContent("[]") });
+    var httpFactory = new Mock<IHttpClientFactory>();
+    httpFactory.Setup(f => f.CreateClient(It.IsAny<string>()))
+      .Returns(new HttpClient(handler.Object));
+
+    return new GVBridgeController(
+      registry.Object,
+      adapter,
+      cm.Object,
+      config,
+      httpFactory.Object,
+      NullLogger<GVBridgeController>.Instance);
   }
 
   private static Mock<IGvCookieManager> CreateDefaultCookieManager()

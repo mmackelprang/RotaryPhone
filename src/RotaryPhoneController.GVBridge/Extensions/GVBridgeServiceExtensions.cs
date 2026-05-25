@@ -23,6 +23,9 @@ public static class GVBridgeServiceExtensions
         services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVApiAdapter>());
         services.AddSingleton<IGvCookieManager, GvCookieManager>();
 
+        // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
+        services.AddHttpClient();
+
         // Wire audio bridge into adapter at startup
         services.AddHostedService(sp =>
         {

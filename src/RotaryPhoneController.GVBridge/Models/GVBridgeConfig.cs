@@ -19,6 +19,9 @@ public class GVBridgeConfig
     public int CookieHealthCheckIntervalMinutes { get; set; } = 30;
     public int CookieRefreshIntervalMinutes { get; set; } = 5;
 
+    // Chrome DevTools Protocol (CDP) for automated cookie extraction
+    public int ChromeCdpPort { get; set; } = 9224;
+
     // Signaler (kept for potential future use)
     public string SignalerBaseUrl { get; set; } = "https://signaler-pa.clients6.google.com";
 
