@@ -48,6 +48,26 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     /// </summary>
     public bool AreCookiesValid => _areCookiesValid;
 
+    /// <summary>
+    /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
+    /// </summary>
+    public DateTime? LoadedAt { get; private set; }
+
+    /// <summary>
+    /// Timestamp of the last health check call (set in RunHealthCheckAsync and during activation).
+    /// </summary>
+    public DateTime? LastValidatedAt { get; private set; }
+
+    /// <summary>
+    /// The currently loaded cookie set (read-only access for status queries).
+    /// </summary>
+    internal GvCookieSet? CurrentCookieSet => _cookieSet;
+
+    /// <summary>
+    /// The cookie store used by the adapter (may be null before ActivateAsync).
+    /// </summary>
+    internal GvCookieStore? CookieStore => _cookieStore;
+
     public event Action<bool>? OnAvailabilityChanged;
     public event Action<string>? OnIncomingCall;
     public event Action? OnCallAnswered;
@@ -98,6 +118,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
         _cookieSet = await _cookieStore.LoadAsync();
+        LoadedAt = _cookieSet != null ? DateTime.UtcNow : null;
 
         if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
@@ -124,6 +145,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         // 4. Health check to verify cookies work
         var healthy = await _accountClient.IsHealthyAsync(ct);
         _areCookiesValid = healthy;
+        LastValidatedAt = DateTime.UtcNow;
         if (!healthy)
         {
             _logger.LogWarning("GVApi: Initial health check failed — cookies may be expired");
@@ -197,10 +219,68 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _cookieSet = null;
         _cookieStore = null;
         _areCookiesValid = false;
+        LoadedAt = null;
+        LastValidatedAt = null;
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
         _logger.LogInformation("GVApiAdapter deactivated");
+    }
+
+    /// <summary>
+    /// Reload cookies from the store without a full deactivate/activate cycle.
+    /// Updates the in-memory cookie set and re-creates the HttpClient handler.
+    /// If the adapter hasn't been activated yet, this is a no-op.
+    /// </summary>
+    public async Task<bool> ReloadCookiesAsync(CancellationToken ct = default)
+    {
+        if (_cookieStore == null)
+        {
+            _logger.LogWarning("ReloadCookiesAsync: adapter not activated, cannot reload");
+            return false;
+        }
+
+        var newCookies = await _cookieStore.LoadAsync();
+        if (newCookies == null || string.IsNullOrEmpty(newCookies.Sapisid))
+        {
+            _logger.LogWarning("ReloadCookiesAsync: no valid cookies in store");
+            return false;
+        }
+
+        _cookieSet = newCookies;
+        LoadedAt = DateTime.UtcNow;
+
+        // Re-create authenticated HttpClient with updated cookies
+        _httpClient?.Dispose();
+        var handler = new GvHttpClientHandler(() =>
+            Task.FromResult(_cookieSet!));
+        _httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            BaseAddress = new Uri("https://clients6.google.com/")
+        };
+
+        // Re-create account client with new HttpClient
+        _accountClient = new GvAccountClient(
+            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
+            _loggerFactory.CreateLogger<GvAccountClient>());
+
+        // Verify the new cookies work
+        var healthy = await _accountClient.IsHealthyAsync(ct);
+        _areCookiesValid = healthy;
+        LastValidatedAt = DateTime.UtcNow;
+
+        if (healthy && !IsAvailable)
+        {
+            SetAvailable(true);
+            _logger.LogInformation("ReloadCookiesAsync: cookies valid, adapter now available");
+        }
+        else if (!healthy)
+        {
+            _logger.LogWarning("ReloadCookiesAsync: new cookies failed health check");
+        }
+
+        return healthy;
     }
 
     public async Task<string> PlaceCallAsync(string e164Number, CancellationToken ct = default)
@@ -281,6 +361,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
             var healthy = await _accountClient.IsHealthyAsync();
             _areCookiesValid = healthy;
+            LastValidatedAt = DateTime.UtcNow;
             if (!healthy)
             {
                 _logger.LogWarning("GVApi: periodic health check failed — marking unavailable");
