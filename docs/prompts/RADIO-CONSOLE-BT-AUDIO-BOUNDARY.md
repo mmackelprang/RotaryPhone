@@ -6,7 +6,7 @@
 > adapter, profiles, or WirePlumber configs without updating this document.
 >
 > **Canonical location:** `D:\prj\RotaryPhone\docs\prompts\RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`
-> **Last updated:** 2026-05-24 by RotaryPhone session (Phase B PR1)
+> **Last updated:** 2026-05-25 by RotaryPhone session (Phase B PR2)
 >
 > **If you need to change any boundary (adapter assignment, WP config, profile ownership),
 > update this document first, then coordinate with the other session.**
@@ -132,6 +132,8 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | GET | `/api/gvbridge/status` | GV API availability + SipRegistered + CookiesValid | B (PR1) |
 | GET | `/api/gvbridge/adapter/mode` | Available + active call adapter mode | A (existing) |
 | PUT | `/api/gvbridge/adapter/mode` | Switch active adapter mode | A (existing) |
+| GET | `/api/gvbridge/cookies` | Cookie status metadata (no secrets) | B (PR2) |
+| POST | `/api/gvbridge/cookies` | Replace cookie set from paste | B (PR2) |
 | GET | `/api/gvtrunk/status` | VoIP.ms SIP trunk registration state | A (existing) |
 | GET | `/api/gvtrunk/calls` | Call history (last 50) | A (existing) |
 | GET | `/api/gvtrunk/sms` | SMS history (last 20, in-memory) | A (existing) |
@@ -154,6 +156,7 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 - `/api/gvtrunk/status` -- 10 seconds
 - `/api/diagnostics/audio-bridge` -- 2 seconds **only while audio bridge is active**, otherwise paused
 - `/api/diagnostics/ht801` -- 30 seconds (involves a network probe of HT801)
+- `/api/gvbridge/cookies` -- 60 seconds (cookie expiry is measured in days)
 - `/api/diagnostics/sip-log`, `/api/diagnostics/timeline` -- only on-demand (user opens diagnostics panel), do NOT poll
 
 ### RotaryPhone → Radio Console (SignalR)
@@ -205,6 +208,10 @@ RotaryPhone needs its own reconnection handling. Radio Console will not be affec
 The Intel AX201 is a combo WiFi+BT chip. HFP voice traffic is low-bandwidth and should not
 cause WiFi interference. However, if WiFi issues appear, the Intel BT adapter is the first
 suspect. Monitor WiFi stability after enabling voice calls.
+
+### Cookie Management Security
+
+RotaryPhone's `/api/gvbridge/cookies` endpoints accept and return Google Voice authentication state. **They have no authentication today** because RotaryPhone listens only on the LAN (radio:5004). If RotaryPhone is ever exposed beyond the LAN (port forward, VPN ingress, Tailscale, etc.), `POST /api/gvbridge/cookies` becomes a credential-theft / account-hijack vector. **MUST add auth before any external exposure.** Suggested approach: API key in `appsettings.json`, required header `X-RotaryPhone-Auth: <key>` on cookie endpoints, validated by middleware.
 
 ### `bluetoothctl` Default Adapter
 
@@ -285,3 +292,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-03-14 | Radio Console session (on behalf of RotaryPhone) | COMPLETED: RotaryPhone commit `3f27809` adds cross-adapter pairing guard to bt_manager.py. Devices already paired on hci0 are now rejected from pairing on hci1. Action item from previous entry is resolved. |
 | 2026-03-21 | RotaryPhone session | GV Bridge feature complete (PRs #12-#15). New `gv-bridge-chrome.service` runs a second Chrome instance (separate profile, off-screen) for `voice.google.com`. WebSocket server on `ws://127.0.0.1:8765`. No BT/audio boundary impact. **ACTION for Radio Console:** Integrate GV Bridge Blazor components into kiosk UI. See prompt at `D:\prj\RTest\RTest\docs\2026-03-21-gvbridge-kiosk-integration.md`. Key component: `<ConnectionModeSelector />` for switching between BT/SIP/GV call paths. |
 | 2026-05-24 | RotaryPhone session | Phase B PR1 merged: `/api/gvbridge/status` now returns `sipRegistered` + `cookiesValid` fields; new `/api/diagnostics/audio-bridge` and `/api/diagnostics/ht801` endpoints. REST endpoints table added to Integration Points section. RTest Phase C can now consume these for two-badge GV status + audio-bridge dashboard + HT801 dashboard card. |
+| 2026-05-25 | RotaryPhone session | Phase B PR2: cookie management endpoints `GET /api/gvbridge/cookies` (status metadata, no secrets) and `POST /api/gvbridge/cookies` (paste-in from browser DevTools). Accepts RawCookieHeader or individual fields. LAN-only, no auth -- see Cookie Management Security note. `GvCookieManager` service extracts cookie lifecycle. `GVApiAdapter` gains `LoadedAt`, `LastValidatedAt`, `ReloadCookiesAsync`. |

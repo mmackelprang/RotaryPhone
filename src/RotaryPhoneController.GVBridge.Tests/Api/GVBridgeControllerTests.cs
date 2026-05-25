@@ -7,6 +7,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Models;
+using RotaryPhoneController.GVBridge.Services;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -16,11 +17,7 @@ public class GVBridgeControllerTests
   [Fact]
   public void GetStatus_ReturnsAllFourFields()
   {
-    var registry = new Mock<ICallAdapterRegistry>();
-    registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
-
-    var adapter = CreateAdapter();
-    var controller = new GVBridgeController(registry.Object, adapter);
+    var controller = CreateController();
 
     var result = controller.GetStatus();
 
@@ -38,11 +35,7 @@ public class GVBridgeControllerTests
   [Fact]
   public void GetStatus_DefaultValues_ShowUnavailable()
   {
-    var registry = new Mock<ICallAdapterRegistry>();
-    registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
-
-    var adapter = CreateAdapter();
-    var controller = new GVBridgeController(registry.Object, adapter);
+    var controller = CreateController();
 
     var result = controller.GetStatus();
 
@@ -55,6 +48,152 @@ public class GVBridgeControllerTests
     Assert.False(root.GetProperty("sipRegistered").GetBoolean());
     Assert.False(root.GetProperty("cookiesValid").GetBoolean());
     Assert.Equal("GVApi", root.GetProperty("activeMode").GetString());
+  }
+
+  [Fact]
+  public void GetCookies_ReturnsAllSixFields()
+  {
+    var controller = CreateController();
+
+    var result = controller.GetCookies();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    Assert.True(root.TryGetProperty("cookiesPresent", out _));
+    Assert.True(root.TryGetProperty("cookiesValid", out _));
+    Assert.True(root.TryGetProperty("lastValidatedAt", out _));
+    Assert.True(root.TryGetProperty("loadedAt", out _));
+    Assert.True(root.TryGetProperty("cookieCount", out _));
+    Assert.True(root.TryGetProperty("sapisidPrefix", out _));
+  }
+
+  [Fact]
+  public void GetCookies_NoCookiesLoaded_ReturnsFalseAndNulls()
+  {
+    var controller = CreateController();
+
+    var result = controller.GetCookies();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    Assert.False(root.GetProperty("cookiesPresent").GetBoolean());
+    Assert.False(root.GetProperty("cookiesValid").GetBoolean());
+    Assert.Equal(JsonValueKind.Null, root.GetProperty("cookieCount").ValueKind);
+    Assert.Equal(JsonValueKind.Null, root.GetProperty("sapisidPrefix").ValueKind);
+  }
+
+  [Fact]
+  public async Task SetCookies_MissingSapisidAndSid_ReturnsBadRequest()
+  {
+    var controller = CreateController();
+    var request = new SetCookiesRequest(null, null, null, null, null, null, null, null);
+
+    var result = await controller.SetCookies(request);
+
+    var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+    var json = JsonSerializer.Serialize(badRequest.Value);
+    Assert.Contains("Sapisid", json);
+  }
+
+  [Fact]
+  public async Task SetCookies_WithRawHeader_ExtractsFieldsAndSaves()
+  {
+    var cookieManager = new Mock<IGvCookieManager>();
+    cookieManager
+      .Setup(m => m.SetCookiesAsync(It.IsAny<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(), It.IsAny<CancellationToken>()))
+      .ReturnsAsync(true);
+    var controller = CreateController(cookieManager: cookieManager);
+
+    var rawHeader = "SAPISID=abc123def456; SID=mysid; HSID=myhsid; SSID=myssid; APISID=myapisid; __Secure-1PSID=sec1; other=ignored";
+    var request = new SetCookiesRequest(null, null, null, null, null, null, null, rawHeader);
+
+    var result = await controller.SetCookies(request);
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    Assert.Contains("saved", json);
+
+    cookieManager.Verify(m => m.SetCookiesAsync(
+      It.Is<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(c =>
+        c.Sapisid == "abc123def456" &&
+        c.Sid == "mysid" &&
+        c.RawCookieHeader == rawHeader),
+      It.IsAny<CancellationToken>()), Times.Once);
+  }
+
+  [Fact]
+  public async Task SetCookies_WithIndividualFields_Saves()
+  {
+    var cookieManager = new Mock<IGvCookieManager>();
+    cookieManager
+      .Setup(m => m.SetCookiesAsync(It.IsAny<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(), It.IsAny<CancellationToken>()))
+      .ReturnsAsync(true);
+    var controller = CreateController(cookieManager: cookieManager);
+
+    var request = new SetCookiesRequest(
+      "my-sapisid", "my-sid", "my-hsid", "my-ssid", "my-apisid",
+      "sec1", "sec3", null);
+
+    var result = await controller.SetCookies(request);
+
+    Assert.IsType<OkObjectResult>(result);
+    cookieManager.Verify(m => m.SetCookiesAsync(
+      It.Is<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(c =>
+        c.Sapisid == "my-sapisid" && c.Sid == "my-sid"),
+      It.IsAny<CancellationToken>()), Times.Once);
+  }
+
+  [Fact]
+  public void ParseCookieHeader_ParsesCorrectly()
+  {
+    var header = "SAPISID=abc123; SID=mysid; __Secure-1PSID=s1; HSID=h; complex=a=b=c";
+    var parsed = GVBridgeController.ParseCookieHeader(header);
+
+    Assert.Equal("abc123", parsed["SAPISID"]);
+    Assert.Equal("mysid", parsed["SID"]);
+    Assert.Equal("s1", parsed["__Secure-1PSID"]);
+    Assert.Equal("h", parsed["HSID"]);
+    Assert.Equal("a=b=c", parsed["complex"]); // Handles '=' in values
+  }
+
+  [Fact]
+  public void ParseCookieHeader_CaseInsensitiveLookup()
+  {
+    var header = "SAPISID=abc123; sid=mysid";
+    var parsed = GVBridgeController.ParseCookieHeader(header);
+
+    Assert.Equal("abc123", parsed["sapisid"]);
+    Assert.Equal("mysid", parsed["SID"]);
+  }
+
+  private static GVBridgeController CreateController(Mock<IGvCookieManager>? cookieManager = null)
+  {
+    var registry = new Mock<ICallAdapterRegistry>();
+    registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
+
+    var adapter = CreateAdapter();
+    var cm = cookieManager ?? CreateDefaultCookieManager();
+
+    return new GVBridgeController(registry.Object, adapter, cm.Object);
+  }
+
+  private static Mock<IGvCookieManager> CreateDefaultCookieManager()
+  {
+    var mock = new Mock<IGvCookieManager>();
+    mock.Setup(m => m.GetStatus()).Returns(new GvCookieStatusDto(
+      CookiesPresent: false,
+      CookiesValid: false,
+      LastValidatedAt: null,
+      LoadedAt: null,
+      CookieCount: null,
+      SapisidPrefix: null));
+    return mock;
   }
 
   private static GVApiAdapter CreateAdapter()
