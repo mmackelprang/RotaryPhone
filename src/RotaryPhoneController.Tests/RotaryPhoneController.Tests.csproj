@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj" />
+    <ProjectReference Include="..\RotaryPhoneController.Server\RotaryPhoneController.Server.csproj" />
   </ItemGroup>
 
 </Project>

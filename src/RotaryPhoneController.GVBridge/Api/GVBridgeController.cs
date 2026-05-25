@@ -23,7 +23,9 @@ public class GVBridgeController : ControllerBase
         return Ok(new
         {
             available = _adapter.IsAvailable,
-            activeMode = _registry.ActiveMode.ToString()
+            activeMode = _registry.ActiveMode.ToString(),
+            sipRegistered = _adapter.IsSipRegistered,
+            cookiesValid = _adapter.AreCookiesValid
         });
     }
 

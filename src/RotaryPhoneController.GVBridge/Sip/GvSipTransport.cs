@@ -61,6 +61,11 @@ public sealed class GvSipTransport : IAsyncDisposable
     private string? _regWsHost;
     private bool _registered;
 
+    /// <summary>
+    /// Whether SIP registration with Google Voice is currently active.
+    /// </summary>
+    public bool IsRegistered => _registered;
+
     public event EventHandler<IncomingCallEventArgs>? IncomingCallReceived;
 
     public event EventHandler<AudioDataEventArgs>? AudioReceived;

@@ -93,6 +93,51 @@ public class DiagnosticsController : ControllerBase
     }
 
     /// <summary>
+    /// Lightweight audio-bridge snapshot for cheap polling (no SIP messages / timeline).
+    /// </summary>
+    [HttpGet("audio-bridge")]
+    public IActionResult GetAudioBridge()
+    {
+        var stats = _gvAudioBridge.Stats;
+        return Ok(new AudioBridgeSnapshotDto(
+            _gvAudioBridge.IsActive,
+            stats.InboundFramesSent,
+            stats.OutboundFramesReceived,
+            stats.InboundErrors,
+            stats.OutboundErrors,
+            _gvAudioBridge.IsActive
+                && stats.InboundFramesSent > 0
+                && stats.OutboundFramesReceived > 0));
+    }
+
+    /// <summary>
+    /// Consolidated HT801 status: network reachability, SIP registration, and freshness.
+    /// </summary>
+    [HttpGet("ht801")]
+    public async Task<IActionResult> GetHt801([FromQuery] string? phoneId = null)
+    {
+        phoneId ??= _config.Phones.FirstOrDefault()?.Id ?? "default";
+        var ht801Config = _ht801Service.GetConfig(phoneId);
+        var sipHealth = _diagnostics.GetHt801Health();
+
+        bool? ipReachable = null;
+        if (!string.IsNullOrEmpty(ht801Config.IpAddress)
+            && ht801Config.IpAddress != "0.0.0.0")
+        {
+            var probe = await _ht801Service.TestConnectionAsync(ht801Config.IpAddress);
+            ipReachable = probe.Success;
+        }
+
+        return Ok(new Ht801StatusDto(
+            ht801Config.IpAddress,
+            ht801Config.Extension,
+            ipReachable,
+            sipHealth.IsRegistered,
+            sipHealth.LastRegisterReceived,
+            sipHealth.RegistrationExpiresIn));
+    }
+
+    /// <summary>
     /// Send a test INVITE to the HT801 to verify SIP connectivity.
     /// </summary>
     [HttpPost("test-ring")]
@@ -165,3 +210,25 @@ public class DiagnosticsController : ControllerBase
         return Ok(result);
     }
 }
+
+/// <summary>
+/// Lightweight snapshot of the GV audio bridge state for dashboard polling.
+/// </summary>
+public record AudioBridgeSnapshotDto(
+    bool IsActive,
+    long InboundFramesSent,
+    long OutboundFramesReceived,
+    long InboundErrors,
+    long OutboundErrors,
+    bool BidirectionalAudio);
+
+/// <summary>
+/// Consolidated HT801 status combining network probe, SIP registration, and freshness.
+/// </summary>
+public record Ht801StatusDto(
+    string? IpAddress,
+    string Extension,
+    bool? IpReachable,
+    bool SipRegistered,
+    DateTime? LastRegisterReceived,
+    int? RegistrationExpiresInSeconds);
