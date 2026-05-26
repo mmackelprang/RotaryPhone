@@ -191,8 +191,15 @@ public class CallManager
             switch (CurrentState)
             {
                 case CallState.Idle:
-                    // Check for available BT devices before allowing dialing
-                    if (_deviceManager != null)
+                    // When a GV adapter is active, BT devices aren't required for dialing.
+                    // Only enforce BT device check for Bluetooth/SipTrunk modes.
+                    if (_boundAdapter != null &&
+                        (_boundAdapter.Mode == CallAdapterMode.GVApi || _boundAdapter.Mode == CallAdapterMode.GVBrowser))
+                    {
+                        // GV mode — no BT device needed for outbound calls
+                        _logger.LogInformation("Off-hook in GV mode ({Mode}) — entering dialing state", _boundAdapter.Mode);
+                    }
+                    else if (_deviceManager != null)
                     {
                         var connected = _deviceManager.ConnectedDevices;
                         if (connected.Count == 0)
@@ -533,7 +540,15 @@ public class CallManager
 
         DialedNumber = number;
 
-        if (_deviceManager != null && _activeDeviceAddress != null)
+        // Route based on active call adapter mode
+        if (_boundAdapter != null &&
+            (_boundAdapter.Mode == CallAdapterMode.GVApi || _boundAdapter.Mode == CallAdapterMode.GVBrowser))
+        {
+            // Place call through Google Voice adapter
+            _logger.LogInformation("Placing outbound call to {Number} via {Mode}", number, _boundAdapter.Mode);
+            _ = PlaceGvCallAsync(number);
+        }
+        else if (_deviceManager != null && _activeDeviceAddress != null)
         {
             // Use device manager — dial via the active BT device, stay in Dialing
             // until call_active event arrives (HandleDeviceCallActive transitions to InCall)
@@ -549,6 +564,43 @@ public class CallManager
         }
 
         _logger.LogInformation("Call initiated for {Number}", number);
+    }
+
+    /// <summary>
+    /// Places an outbound call through the Google Voice adapter.
+    /// After PlaceCallAsync returns a call ID, sets negotiated RTP details and starts
+    /// the audio bridge. For outbound calls the HT801 handset is already off-hook
+    /// (user lifted it to dial), so the audio bridge must start immediately — unlike
+    /// incoming calls where OnCallAnsweredOnRotaryPhoneAsync fires when the handset is lifted.
+    /// </summary>
+    private async Task PlaceGvCallAsync(string number)
+    {
+        try
+        {
+            var callId = await _boundAdapter!.PlaceCallAsync(number);
+            _logger.LogInformation("GV outbound call placed, CallId={CallId}, Number={Number}", callId, number);
+
+            // The HT801's outbound INVITE was already answered by SIPSorceryAdapter with
+            // an SDP containing _rtpPort (49000). HT801 is sending RTP to that port.
+            // Pass the negotiated RTP details so the audio bridge binds correctly.
+            _boundAdapter.SetNegotiatedRtpDetails(_negotiatedRtpPort, _negotiatedRtpIp, _rtpPort);
+
+            // Start the audio bridge (HT801 <-> GV). For incoming calls this happens in
+            // AnswerCall -> OnCallAnsweredOnRotaryPhoneAsync, but for outbound the handset
+            // is already off-hook so we trigger it directly.
+            _logger.LogInformation(
+                "Starting GV audio bridge for outbound call (HT801 RTP={Ip}:{Port}, localRtpPort={LocalPort})",
+                _negotiatedRtpIp ?? "(null)", _negotiatedRtpPort?.ToString() ?? "(null)", _rtpPort);
+            await _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
+
+            CallStartedAtUtc = DateTime.UtcNow;
+            CurrentState = CallState.InCall;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to place GV outbound call to {Number}", number);
+            CurrentState = CallState.Idle;
+        }
     }
 
     public void HangUp()
