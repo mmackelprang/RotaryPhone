@@ -71,4 +71,82 @@ public class SipAdapterTests
     {
         Assert.False(SIPSorceryAdapter.IsDialableNumber(null!));
     }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_TypicalHT801Sdp_ReturnsPortAndIp()
+    {
+        // Typical SDP body from an HT801 INVITE
+        var sdp = "v=0\r\n" +
+                  "o=- 12345 12345 IN IP4 192.168.86.22\r\n" +
+                  "s=GrandStream\r\n" +
+                  "c=IN IP4 192.168.86.22\r\n" +
+                  "t=0 0\r\n" +
+                  "m=audio 5004 RTP/AVP 0 101\r\n" +
+                  "a=rtpmap:0 PCMU/8000\r\n" +
+                  "a=rtpmap:101 telephone-event/8000\r\n" +
+                  "a=fmtp:101 0-15\r\n" +
+                  "a=sendrecv\r\n";
+
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
+
+        Assert.Equal(5004, port);
+        Assert.Equal("192.168.86.22", ip);
+    }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_DifferentPort_ReturnsCorrectPort()
+    {
+        // HT801 may use a non-default RTP port
+        var sdp = "v=0\r\n" +
+                  "c=IN IP4 10.0.0.5\r\n" +
+                  "m=audio 16384 RTP/AVP 0\r\n";
+
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
+
+        Assert.Equal(16384, port);
+        Assert.Equal("10.0.0.5", ip);
+    }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_NoSdpBody_ReturnsDefaults()
+    {
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp("");
+
+        Assert.Equal(-1, port);
+        Assert.Equal("0.0.0.0", ip);
+    }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_MissingMediaLine_ReturnsNegativePort()
+    {
+        var sdp = "v=0\r\nc=IN IP4 192.168.86.22\r\n";
+
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
+
+        Assert.Equal(-1, port);
+        Assert.Equal("192.168.86.22", ip);
+    }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_MissingConnectionLine_ReturnsDefaultIp()
+    {
+        var sdp = "v=0\r\nm=audio 5004 RTP/AVP 0\r\n";
+
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
+
+        Assert.Equal(5004, port);
+        Assert.Equal("0.0.0.0", ip);
+    }
+
+    [Fact]
+    public void ExtractRtpDetailsFromSdp_UnixLineEndings_ParsesCorrectly()
+    {
+        // SDP with Unix-style \n line endings
+        var sdp = "v=0\nc=IN IP4 192.168.86.22\nm=audio 5004 RTP/AVP 0 101\na=sendrecv\n";
+
+        var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
+
+        Assert.Equal(5004, port);
+        Assert.Equal("192.168.86.22", ip);
+    }
 }

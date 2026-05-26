@@ -299,6 +299,27 @@ public class SIPSorceryAdapter : ISipAdapter
 
             _sipTransport?.SendResponseAsync(response);
 
+            // Extract HT801's RTP details from the incoming INVITE's SDP.
+            // For outbound calls (user dials from rotary phone), the HT801 sends us
+            // an INVITE whose SDP contains the port/IP HT801 is listening on for RTP.
+            // Without this, the audio bridge falls back to config defaults which may
+            // not match the HT801's actual RTP port.
+            if (!string.IsNullOrEmpty(sipRequest.Body))
+            {
+                var (rtpPort, rtpIp) = ExtractRtpDetailsFromSdp(sipRequest.Body);
+                if (rtpPort > 0)
+                {
+                    _logger.Information(
+                        "Extracted RTP from HT801 INVITE SDP: {IP}:{Port}", rtpIp, rtpPort);
+                    OnRtpDetailsNegotiated?.Invoke(rtpPort, rtpIp);
+                }
+                else
+                {
+                    _logger.Warning(
+                        "HT801 INVITE had SDP body but no valid m=audio port could be parsed");
+                }
+            }
+
             // Only trigger call-flow events for real phone numbers, not the HT801's
             // registration name ("rotaryphone") or other non-numeric URI users.
             bool isRealNumber = IsDialableNumber(dialedNumber);
