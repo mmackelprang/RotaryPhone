@@ -248,61 +248,92 @@ public class SIPSorceryAdapter : ISipAdapter
         // In this architecture, if the SIP Adapter (Server) receives an INVITE,
         // it means the HT801 (Client) is trying to place an outgoing call.
         // The dialed number is in the To header.
+        //
+        // The HT801 sends TWO INVITEs per outbound call:
+        //   1. sip:rotaryphone@... — its own registration name (not a real number)
+        //   2. sip:9193718044@...  — the actual dialed number
+        // We must answer BOTH with 200 OK (to complete the SIP dialog and stop
+        // retransmissions), but only fire OnDigitsReceived / OnHookChange for the
+        // real dialed-number INVITE. Otherwise the first INVITE pushes the call
+        // state machine into InCall before the real number arrives, and the digits
+        // get ignored.
 
         try
         {
             var dialedNumber = sipRequest.Header.To.ToURI.User;
-            if (!string.IsNullOrEmpty(dialedNumber))
+            if (string.IsNullOrEmpty(dialedNumber))
+            {
+                _logger.Warning("Received INVITE without a user in To header");
+                return;
+            }
+
+            // Always answer the INVITE to establish the SIP dialog and stop
+            // the HT801 from retransmitting.
+            var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+
+            // Resolve actual local IP when listening on 0.0.0.0 — the SDP must
+            // contain a routable IP so HT801 knows where to send its RTP.
+            // Without this, the SDP has c=IN IP4 0.0.0.0 which is a hold indicator
+            // (RFC 3264) and causes one-way audio (HT801 -> us fails).
+            var localIP = _localIPAddress;
+            if (localIP == "0.0.0.0" && sipRequest.RemoteSIPEndPoint != null)
+            {
+                localIP = GetLocalIPForTarget(sipRequest.RemoteSIPEndPoint.Address.ToString());
+                _logger.Information("Resolved local SDP address to {LocalIP} for INVITE response", localIP);
+            }
+
+            // Add Contact header to response (required)
+            response.Header.Contact = new List<SIPContactHeader>
+            {
+                new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
+                    SIPEndPoint.ParseSIPEndPoint($"{localIP}:{_localPort}")))
+            };
+
+            // Add SDP to response (negotiate codec)
+            // Use the same RTP port the audio bridge will bind (49000) so HT801
+            // sends its RTP to the correct destination once the bridge starts.
+            var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
+            response.Body = CreateBasicSDP(localEndpoint);
+
+            _logger.Information("INVITE 200 OK SDP: RTP at {IP}:{Port}", localIP, 49000);
+
+            _sipTransport?.SendResponseAsync(response);
+
+            // Only trigger call-flow events for real phone numbers, not the HT801's
+            // registration name ("rotaryphone") or other non-numeric URI users.
+            bool isRealNumber = IsDialableNumber(dialedNumber);
+
+            if (isRealNumber)
             {
                 _logger.Information("User dialed: {Number}", dialedNumber);
-
-                // Trigger digits received with the full number
                 OnDigitsReceived?.Invoke(dialedNumber);
-
-                // Important: We must answer the INVITE to establish the SIP dialog
-                // and stop the HT801 from retransmitting.
-                var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
-
-                // Resolve actual local IP when listening on 0.0.0.0 — the SDP must
-                // contain a routable IP so HT801 knows where to send its RTP.
-                // Without this, the SDP has c=IN IP4 0.0.0.0 which is a hold indicator
-                // (RFC 3264) and causes one-way audio (HT801 -> us fails).
-                var localIP = _localIPAddress;
-                if (localIP == "0.0.0.0" && sipRequest.RemoteSIPEndPoint != null)
-                {
-                    localIP = GetLocalIPForTarget(sipRequest.RemoteSIPEndPoint.Address.ToString());
-                    _logger.Information("Resolved local SDP address to {LocalIP} for INVITE response", localIP);
-                }
-
-                // Add Contact header to response (required)
-                response.Header.Contact = new List<SIPContactHeader>
-                {
-                    new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
-                        SIPEndPoint.ParseSIPEndPoint($"{localIP}:{_localPort}")))
-                };
-
-                // Add SDP to response (negotiate codec)
-                // Use the same RTP port the audio bridge will bind (49000) so HT801
-                // sends its RTP to the correct destination once the bridge starts.
-                var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
-                response.Body = CreateBasicSDP(localEndpoint);
-
-                _logger.Information("INVITE 200 OK SDP: RTP at {IP}:{Port}", localIP, 49000);
-
-                _sipTransport?.SendResponseAsync(response);
-
-                // Also trigger hook change to ensure we are in InCall state
                 OnHookChange?.Invoke(true);
             }
             else
             {
-                _logger.Warning("Received INVITE without a user in To header");
+                _logger.Information(
+                    "Answered INVITE for non-dialable URI user '{User}' (HT801 registration) " +
+                    "— SIP dialog established but no call-state change fired",
+                    dialedNumber);
             }
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Error processing INVITE");
         }
+    }
+
+    /// <summary>
+    /// Returns true if the URI user part looks like a real dialable number
+    /// (digits, +, *, # only). Returns false for registration names like
+    /// "rotaryphone" or other non-numeric strings.
+    /// </summary>
+    internal static bool IsDialableNumber(string uriUser)
+    {
+        if (string.IsNullOrEmpty(uriUser))
+            return false;
+
+        return uriUser.All(c => char.IsDigit(c) || c == '+' || c == '*' || c == '#');
     }
 
     private void HandleBye(SIPRequest sipRequest)
