@@ -96,8 +96,13 @@ public sealed class GvSipTransport : IAsyncDisposable
     /// </summary>
     public async Task EnsureRegisteredAsync(CancellationToken ct = default)
     {
-        if (!_registered)
+        if (!_registered || _wsChannel is null || !_wsChannel.IsConnected)
+        {
+            _logger.LogInformation("Re-registering: registered={Registered}, wsConnected={WsConnected}",
+                _registered, _wsChannel?.IsConnected ?? false);
+            _registered = false;  // Force full re-registration
             await RegisterAsync(ct).ConfigureAwait(false);
+        }
     }
 
     public async Task<TransportCallResult> InitiateAsync(string toNumber, CancellationToken ct = default)

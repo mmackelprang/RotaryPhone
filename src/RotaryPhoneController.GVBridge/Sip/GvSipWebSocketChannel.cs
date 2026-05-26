@@ -28,6 +28,8 @@ public sealed class GvSipWebSocketChannel : IDisposable
 
     public event EventHandler<SipMessageEventArgs>? MessageReceived;
 
+    public bool IsConnected => _ws?.State == WebSocketState.Open;
+
     public GvSipWebSocketChannel(Uri serverUri, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(serverUri);
