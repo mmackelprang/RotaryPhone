@@ -356,7 +356,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     public async Task OnCallHungUpAsync()
     {
-        _logger.LogInformation("Call hung up — stopping audio bridge");
+        // Capture call ID FIRST before stopping audio bridge, because stopping the bridge
+        // clears its own internal reference (not ours, but we want this explicit).
+        var callId = Interlocked.Exchange(ref _activeCallId, null);
+        _logger.LogInformation("Call hung up — stopping audio bridge (callId={CallId}, sipTransport={HasTransport})",
+            callId ?? "(null)", _sipTransport != null);
 
         if (_audioBridge != null)
             await _audioBridge.StopAsync();
@@ -366,11 +370,17 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _negotiatedHt801RtpIp = null;
         _inviteRtpPort = null;
 
-        var callId = Interlocked.Exchange(ref _activeCallId, null);
+        // Send SIP BYE to Google Voice to terminate the remote leg
         if (callId != null && _sipTransport != null)
         {
+            _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}", callId);
             try { await _sipTransport.HangupAsync(callId); }
-            catch (Exception ex) { _logger.LogWarning(ex, "SIP BYE on hangup failed"); }
+            catch (Exception ex) { _logger.LogWarning(ex, "SIP BYE to Google Voice failed for call {CallId}", callId); }
+        }
+        else
+        {
+            _logger.LogWarning("Cannot send GV SIP BYE — callId={CallId}, sipTransport={HasTransport}",
+                callId ?? "(null)", _sipTransport != null);
         }
     }
 

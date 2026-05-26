@@ -338,13 +338,37 @@ public sealed class GvSipTransport : IAsyncDisposable
                     $"Content-Length: 0\r\n" +
                     $"\r\n";
 
+#pragma warning disable CA1848, CA1873
+                _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}:\n{Bye}",
+                    callId, bye[..Math.Min(500, bye.Length)]);
+#pragma warning restore CA1848, CA1873
+
                 await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
+            }
+            else
+            {
+#pragma warning disable CA1848, CA1873
+                _logger.LogWarning(
+                    "Cannot send SIP BYE for call {CallId} — missing dialog state " +
+                    "(RemoteContactUri={RemoteUri}, ToHeader={To})",
+                    callId, session.RemoteContactUri ?? "(null)", session.ToHeader ?? "(null)");
+#pragma warning restore CA1848, CA1873
             }
 
             var oldStatus = session.Status;
             session.Status = CallStatusType.Completed;
             CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Completed));
             session.Dispose();
+        }
+        else
+        {
+            var sessionFound = _activeCalls.ContainsKey(callId);
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "HangupAsync: could not send BYE for call {CallId} — " +
+                "session found={SessionFound}, wsChannel={WsChannel}",
+                callId, sessionFound, _wsChannel is not null ? "connected" : "null");
+#pragma warning restore CA1848, CA1873
         }
     }
 
@@ -501,15 +525,23 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning restore CA1031
         };
 
-        // Store session
+        // Store session — for BYE purposes, swap From/To so that when WE (callee)
+        // send a BYE the headers match RFC 3261 section 15.1.1:
+        //   From = local party (us, with our dialog tag)
+        //   To = remote party (caller, with their tag)
+        // The original INVITE has From=caller, To=us, so we reverse for our BYE.
+        var ourFromForBye = invTo?.Contains(";tag=", StringComparison.Ordinal) == true
+            ? invTo
+            : $"{invTo};tag={dialogTag}";
+
         var inSession = new SipCallSession(invCallId)
         {
             PeerConnection = pc,
             OpusEncoder = inEncoder,
             OpusDecoder = inDecoder,
             RemoteContactUri = ExtractSipUri(invContact ?? ""),
-            ToHeader = invTo,
-            FromHeader = invFrom,
+            ToHeader = invFrom,        // Remote party (caller) goes in To for our BYE
+            FromHeader = ourFromForBye, // Us (callee + dialog tag) goes in From for our BYE
             RouteSet = [.. recordRoutes],
             Status = CallStatusType.Active,
         };

@@ -90,6 +90,7 @@ ExecStart=${CHROME_BIN} \\
     --disable-renderer-backgrounding \\
     --disable-backgrounding-occluded-windows \\
     --autoplay-policy=no-user-gesture-required \\
+    --mute-audio \\
     --window-size=800,600 \\
     --window-position=10000,10000 \\
     --ozone-platform=wayland \\
@@ -136,7 +137,7 @@ cat > "${AUTOSTART_DIR}/gv-bridge-chrome.desktop" << EOF
 [Desktop Entry]
 Name=GV Bridge Chrome
 Comment=Google Voice Bridge for RotaryPhone
-Exec=${CHROME_BIN} --load-extension=${EXTENSION_DEPLOY_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland --remote-debugging-port=9224 https://voice.google.com
+Exec=${CHROME_BIN} --load-extension=${EXTENSION_DEPLOY_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required --mute-audio --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland --remote-debugging-port=9224 https://voice.google.com
 Terminal=false
 Type=Application
 X-GNOME-Autostart-enabled=true
