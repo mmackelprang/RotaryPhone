@@ -320,6 +320,11 @@ public sealed class GvSipTransport : IAsyncDisposable
             // Send SIP BYE if we have dialog state
             if (session.RemoteContactUri is not null && session.ToHeader is not null)
             {
+                // CSeq must be higher than any previously sent request in this dialog.
+                // PrackCSeq is incremented by session timer re-INVITEs, so it may exceed
+                // InviteCSeq. Use the max of both + 1 to guarantee monotonicity.
+                var byeCSeq = Math.Max(session.InviteCSeq, session.PrackCSeq) + 1;
+
                 var bye = $"BYE {session.RemoteContactUri} SIP/2.0\r\n";
 
                 foreach (var route in session.RouteSet)
@@ -333,17 +338,29 @@ public sealed class GvSipTransport : IAsyncDisposable
                     $"To: {session.ToHeader}\r\n" +
                     $"From: {session.FromHeader}\r\n" +
                     $"Call-ID: {callId}\r\n" +
-                    $"CSeq: {session.InviteCSeq + 10} BYE\r\n" +
+                    $"CSeq: {byeCSeq} BYE\r\n" +
                     $"User-Agent: {UserAgent}\r\n" +
                     $"Content-Length: 0\r\n" +
                     $"\r\n";
 
 #pragma warning disable CA1848, CA1873
+                _logger.LogInformation(
+                    "BYE headers — From: {From}, To: {To}, Call-ID: {CallId}, CSeq: {CSeq}",
+                    session.FromHeader, session.ToHeader, callId, byeCSeq);
                 _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}:\n{Bye}",
                     callId, bye[..Math.Min(500, bye.Length)]);
 #pragma warning restore CA1848, CA1873
 
                 await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
+
+                // Give Google time to process BYE before we close the WebSocket/session.
+                // Without this delay, DTLS close_notify fires immediately and kills the
+                // connection before Google's proxy can relay the BYE to the caller.
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { /* shutting down — proceed with cleanup */ }
             }
             else
             {
