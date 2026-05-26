@@ -348,19 +348,54 @@ public sealed class GvSipTransport : IAsyncDisposable
                     "BYE headers — From: {From}, To: {To}, Call-ID: {CallId}, CSeq: {CSeq}",
                     session.FromHeader, session.ToHeader, callId, byeCSeq);
                 _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}:\n{Bye}",
-                    callId, bye[..Math.Min(500, bye.Length)]);
+                    callId, bye);
 #pragma warning restore CA1848, CA1873
 
-                await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
+                // Subscribe to all incoming SIP messages during the BYE wait window
+                // so we can see if Google sends a response (e.g. 200 OK to BYE)
+                EventHandler<SipMessageEventArgs>? debugHandler = null;
+                debugHandler = (_, args) =>
+                {
+#pragma warning disable CA1848, CA1873
+                    _logger.LogInformation(
+                        "SIP message received during BYE wait for {CallId}: {Msg}",
+                        callId, args.Message[..Math.Min(500, args.Message.Length)]);
+#pragma warning restore CA1848, CA1873
+                };
+                _wsChannel.MessageReceived += debugHandler;
+
+#pragma warning disable CA1848, CA1873
+                _logger.LogInformation("WebSocket state before BYE send: {State}",
+                    _wsChannel is not null ? "channel exists" : "null");
+#pragma warning restore CA1848, CA1873
+
+                try
+                {
+                    await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
+#pragma warning disable CA1848, CA1873
+                    _logger.LogInformation("BYE sent successfully via WebSocket for call {CallId}", callId);
+#pragma warning restore CA1848, CA1873
+                }
+#pragma warning disable CA1031
+                catch (Exception ex)
+                {
+#pragma warning disable CA1848, CA1873
+                    _logger.LogError(ex, "Failed to send BYE via WebSocket for call {CallId}", callId);
+#pragma warning restore CA1848, CA1873
+                }
+#pragma warning restore CA1031
 
                 // Give Google time to process BYE before we close the WebSocket/session.
                 // Without this delay, DTLS close_notify fires immediately and kills the
                 // connection before Google's proxy can relay the BYE to the caller.
+                _logger.LogInformation("BYE sent via WebSocket, waiting 2s for response...");
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { /* shutting down — proceed with cleanup */ }
+
+                _wsChannel.MessageReceived -= debugHandler;
             }
             else
             {
