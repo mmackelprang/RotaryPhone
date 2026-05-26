@@ -313,100 +313,132 @@ public sealed class GvSipTransport : IAsyncDisposable
     {
         LogCallEnded(_logger, callId, null);
 
-#pragma warning disable CA2000 // Session is disposed within this block
-        if (_activeCalls.TryRemove(callId, out var session) && _wsChannel is not null)
-#pragma warning restore CA2000
+        // Use TryGetValue (not TryRemove) to retrieve the session for sending BYE.
+        // The incoming BYE handler may have already removed the session from _activeCalls
+        // via the CallStatusChanged -> OnCallEnded -> HangUp -> HangupAsync event chain.
+        // If the session was already removed, it means Google already sent us a BYE and
+        // we responded with 200 OK — no need to send our own BYE.
+        if (!_activeCalls.TryGetValue(callId, out var session))
         {
-            // Send SIP BYE if we have dialog state
-            if (session.RemoteContactUri is not null && session.ToHeader is not null)
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "HangupAsync: no active session for call {CallId} — " +
+                "likely already cleaned up by incoming BYE handler",
+                callId);
+#pragma warning restore CA1848, CA1873
+            return;
+        }
+
+        if (_wsChannel is null)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning("HangupAsync: WebSocket channel is null for call {CallId}", callId);
+#pragma warning restore CA1848, CA1873
+            // Clean up the session even though we can't send BYE
+            if (_activeCalls.TryRemove(callId, out _))
             {
-                // CSeq must be higher than any previously sent request in this dialog.
-                // PrackCSeq is incremented by session timer re-INVITEs, so it may exceed
-                // InviteCSeq. Use the max of both + 1 to guarantee monotonicity.
-                var byeCSeq = Math.Max(session.InviteCSeq, session.PrackCSeq) + 1;
+                var oldWsStatus = session.Status;
+                session.Status = CallStatusType.Completed;
+                CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldWsStatus, CallStatusType.Completed));
+                session.Dispose();
+            }
+            return;
+        }
 
-                var bye = $"BYE {session.RemoteContactUri} SIP/2.0\r\n";
+        // Send SIP BYE if we have dialog state
+        if (session.RemoteContactUri is not null && session.ToHeader is not null)
+        {
+            // CSeq must be higher than any previously sent request in this dialog.
+            // PrackCSeq is incremented by session timer re-INVITEs, so it may exceed
+            // InviteCSeq. Use the max of both + 1 to guarantee monotonicity.
+            var byeCSeq = Math.Max(session.InviteCSeq, session.PrackCSeq) + 1;
 
-                foreach (var route in session.RouteSet)
-                {
-                    bye += $"Route: {route}\r\n";
-                }
+            var bye = $"BYE {session.RemoteContactUri} SIP/2.0\r\n";
 
-                bye +=
-                    $"Via: SIP/2.0/wss {_regWsHost};branch={CallProperties.CreateBranchId()};keep\r\n" +
-                    $"Max-Forwards: 69\r\n" +
-                    $"To: {session.ToHeader}\r\n" +
-                    $"From: {session.FromHeader}\r\n" +
-                    $"Call-ID: {callId}\r\n" +
-                    $"CSeq: {byeCSeq} BYE\r\n" +
-                    $"User-Agent: {UserAgent}\r\n" +
-                    $"Content-Length: 0\r\n" +
-                    $"\r\n";
+            foreach (var route in session.RouteSet)
+            {
+                bye += $"Route: {route}\r\n";
+            }
 
+            bye +=
+                $"Via: SIP/2.0/wss {_regWsHost};branch={CallProperties.CreateBranchId()};keep\r\n" +
+                $"Max-Forwards: 69\r\n" +
+                $"To: {session.ToHeader}\r\n" +
+                $"From: {session.FromHeader}\r\n" +
+                $"Call-ID: {callId}\r\n" +
+                $"CSeq: {byeCSeq} BYE\r\n" +
+                $"User-Agent: {UserAgent}\r\n" +
+                $"Content-Length: 0\r\n" +
+                $"\r\n";
+
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "BYE headers — From: {From}, To: {To}, Call-ID: {CallId}, CSeq: {CSeq}",
+                session.FromHeader, session.ToHeader, callId, byeCSeq);
+            _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}:\n{Bye}",
+                callId, bye);
+#pragma warning restore CA1848, CA1873
+
+            // Subscribe to all incoming SIP messages during the BYE wait window
+            // so we can see if Google sends a response (e.g. 200 OK to BYE)
+            EventHandler<SipMessageEventArgs>? debugHandler = null;
+            debugHandler = (_, args) =>
+            {
 #pragma warning disable CA1848, CA1873
                 _logger.LogInformation(
-                    "BYE headers — From: {From}, To: {To}, Call-ID: {CallId}, CSeq: {CSeq}",
-                    session.FromHeader, session.ToHeader, callId, byeCSeq);
-                _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}:\n{Bye}",
-                    callId, bye);
+                    "SIP message received during BYE wait for {CallId}: {Msg}",
+                    callId, args.Message[..Math.Min(500, args.Message.Length)]);
 #pragma warning restore CA1848, CA1873
-
-                // Subscribe to all incoming SIP messages during the BYE wait window
-                // so we can see if Google sends a response (e.g. 200 OK to BYE)
-                EventHandler<SipMessageEventArgs>? debugHandler = null;
-                debugHandler = (_, args) =>
-                {
-#pragma warning disable CA1848, CA1873
-                    _logger.LogInformation(
-                        "SIP message received during BYE wait for {CallId}: {Msg}",
-                        callId, args.Message[..Math.Min(500, args.Message.Length)]);
-#pragma warning restore CA1848, CA1873
-                };
-                _wsChannel.MessageReceived += debugHandler;
+            };
+            _wsChannel.MessageReceived += debugHandler;
 
 #pragma warning disable CA1848, CA1873
-                _logger.LogInformation("WebSocket state before BYE send: {State}",
-                    _wsChannel is not null ? "channel exists" : "null");
+            _logger.LogInformation("WebSocket state before BYE send: {State}",
+                _wsChannel is not null ? "channel exists" : "null");
 #pragma warning restore CA1848, CA1873
 
-                try
-                {
-                    await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
+            try
+            {
+                await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
 #pragma warning disable CA1848, CA1873
-                    _logger.LogInformation("BYE sent successfully via WebSocket for call {CallId}", callId);
+                _logger.LogInformation("BYE sent successfully via WebSocket for call {CallId}", callId);
 #pragma warning restore CA1848, CA1873
-                }
-#pragma warning disable CA1031
-                catch (Exception ex)
-                {
-#pragma warning disable CA1848, CA1873
-                    _logger.LogError(ex, "Failed to send BYE via WebSocket for call {CallId}", callId);
-#pragma warning restore CA1848, CA1873
-                }
-#pragma warning restore CA1031
-
-                // Give Google time to process BYE before we close the WebSocket/session.
-                // Without this delay, DTLS close_notify fires immediately and kills the
-                // connection before Google's proxy can relay the BYE to the caller.
-                _logger.LogInformation("BYE sent via WebSocket, waiting 2s for response...");
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) { /* shutting down — proceed with cleanup */ }
-
-                _wsChannel.MessageReceived -= debugHandler;
             }
-            else
+#pragma warning disable CA1031
+            catch (Exception ex)
             {
 #pragma warning disable CA1848, CA1873
-                _logger.LogWarning(
-                    "Cannot send SIP BYE for call {CallId} — missing dialog state " +
-                    "(RemoteContactUri={RemoteUri}, ToHeader={To})",
-                    callId, session.RemoteContactUri ?? "(null)", session.ToHeader ?? "(null)");
+                _logger.LogError(ex, "Failed to send BYE via WebSocket for call {CallId}", callId);
 #pragma warning restore CA1848, CA1873
             }
+#pragma warning restore CA1031
 
+            // Give Google time to process BYE before we close the WebSocket/session.
+            // Without this delay, DTLS close_notify fires immediately and kills the
+            // connection before Google's proxy can relay the BYE to the caller.
+            _logger.LogInformation("BYE sent via WebSocket, waiting 2s for response...");
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* shutting down — proceed with cleanup */ }
+
+            _wsChannel.MessageReceived -= debugHandler;
+        }
+        else
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "Cannot send SIP BYE for call {CallId} — missing dialog state " +
+                "(RemoteContactUri={RemoteUri}, ToHeader={To})",
+                callId, session.RemoteContactUri ?? "(null)", session.ToHeader ?? "(null)");
+#pragma warning restore CA1848, CA1873
+        }
+
+        // NOW remove the session after BYE has been sent (or skipped).
+        // Use TryRemove to handle the race where incoming BYE handler already removed it.
+        if (_activeCalls.TryRemove(callId, out _))
+        {
             var oldStatus = session.Status;
             session.Status = CallStatusType.Completed;
             CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Completed));
@@ -414,12 +446,10 @@ public sealed class GvSipTransport : IAsyncDisposable
         }
         else
         {
-            var sessionFound = _activeCalls.ContainsKey(callId);
 #pragma warning disable CA1848, CA1873
-            _logger.LogWarning(
-                "HangupAsync: could not send BYE for call {CallId} — " +
-                "session found={SessionFound}, wsChannel={WsChannel}",
-                callId, sessionFound, _wsChannel is not null ? "connected" : "null");
+            _logger.LogInformation(
+                "HangupAsync: session {CallId} already removed (incoming BYE handler won the race) — skipping dispose",
+                callId);
 #pragma warning restore CA1848, CA1873
         }
     }
