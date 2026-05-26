@@ -345,7 +345,27 @@ public sealed class GvSipTransport : IAsyncDisposable
             return;
         }
 
-        // Send SIP BYE if we have dialog state
+        // AGGRESSIVE MEDIA TEARDOWN: Close the DTLS-SRTP peer connection FIRST.
+        // This sends a DTLS close_notify alert to Google immediately, which stops
+        // RTP/SRTP flow. Google's RTP timeout detection will then terminate the
+        // far-end call within 5-10 seconds. We do this BEFORE the BYE because
+        // Google silently ignores our BYE (known interop issue — see KNOWN-ISSUES.md).
+        if (session.PeerConnection is not null)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "Closing DTLS-SRTP peer connection for call {CallId} — " +
+                "forces media teardown before BYE",
+                callId);
+#pragma warning restore CA1848, CA1873
+            session.PeerConnection.close();
+            session.PeerConnection = null;
+        }
+
+        // Send SIP BYE if we have dialog state.
+        // NOTE: Google currently ignores our BYE (known issue), but we send it
+        // anyway for protocol correctness and in case future debugging resolves
+        // the dialog state mismatch.
         if (session.RemoteContactUri is not null && session.ToHeader is not null)
         {
             // CSeq must be higher than any previously sent request in this dialog.
@@ -392,11 +412,6 @@ public sealed class GvSipTransport : IAsyncDisposable
             };
             _wsChannel.MessageReceived += debugHandler;
 
-#pragma warning disable CA1848, CA1873
-            _logger.LogInformation("WebSocket state before BYE send: {State}",
-                _wsChannel is not null ? "channel exists" : "null");
-#pragma warning restore CA1848, CA1873
-
             try
             {
                 await _wsChannel.SendAsync(bye, ct).ConfigureAwait(false);
@@ -413,13 +428,15 @@ public sealed class GvSipTransport : IAsyncDisposable
             }
 #pragma warning restore CA1031
 
-            // Give Google time to process BYE before we close the WebSocket/session.
-            // Without this delay, DTLS close_notify fires immediately and kills the
-            // connection before Google's proxy can relay the BYE to the caller.
-            _logger.LogInformation("BYE sent via WebSocket, waiting 2s for response...");
+            // Brief wait for BYE response (reduced from 2s since media is already torn down).
+            // The DTLS close_notify was already sent above, so Google's media timeout is
+            // already ticking. This wait is only for diagnostic logging of the BYE response.
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation("BYE sent, waiting 500ms for response (media already torn down)...");
+#pragma warning restore CA1848, CA1873
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromMilliseconds(500), ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { /* shutting down — proceed with cleanup */ }
 
