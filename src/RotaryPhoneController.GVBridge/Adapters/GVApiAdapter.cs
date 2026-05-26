@@ -359,9 +359,11 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         // Capture call ID FIRST before stopping audio bridge, because stopping the bridge
         // clears its own internal reference (not ours, but we want this explicit).
         var callId = Interlocked.Exchange(ref _activeCallId, null);
-        _logger.LogInformation("Call hung up — stopping audio bridge (callId={CallId}, sipTransport={HasTransport})",
+        _logger.LogInformation(
+            "Call hung up — tearing down media immediately (callId={CallId}, sipTransport={HasTransport})",
             callId ?? "(null)", _sipTransport != null);
 
+        // Step 1: Stop the audio bridge FIRST — halts RTP to/from HT801
         if (_audioBridge != null)
             await _audioBridge.StopAsync();
 
@@ -370,12 +372,16 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _negotiatedHt801RtpIp = null;
         _inviteRtpPort = null;
 
-        // Send SIP BYE to Google Voice to terminate the remote leg
+        // Step 2: Close the DTLS-SRTP session and send SIP BYE to Google Voice.
+        // HangupAsync closes the peer connection (DTLS close_notify) BEFORE sending
+        // BYE, so Google's RTP timeout starts immediately even though our BYE is
+        // silently ignored (known interop issue — see KNOWN-ISSUES.md).
         if (callId != null && _sipTransport != null)
         {
-            _logger.LogInformation("Sending SIP BYE to Google Voice for call {CallId}", callId);
+            _logger.LogInformation(
+                "Initiating GV media teardown + SIP BYE for call {CallId}", callId);
             try { await _sipTransport.HangupAsync(callId); }
-            catch (Exception ex) { _logger.LogWarning(ex, "SIP BYE to Google Voice failed for call {CallId}", callId); }
+            catch (Exception ex) { _logger.LogWarning(ex, "GV hangup failed for call {CallId}", callId); }
         }
         else
         {
