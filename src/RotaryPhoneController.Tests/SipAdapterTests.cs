@@ -48,4 +48,27 @@ public class SipAdapterTests
 
         Assert.True(fired);
     }
+
+    [Theory]
+    [InlineData("9193718044", true)]
+    [InlineData("+19193718044", true)]
+    [InlineData("911", true)]
+    [InlineData("*67", true)]
+    [InlineData("#123", true)]
+    [InlineData("+1*555#1234", true)]
+    [InlineData("rotaryphone", false)]
+    [InlineData("admin", false)]
+    [InlineData("sip-user", false)]
+    [InlineData("user123name", false)]
+    [InlineData("", false)]
+    public void IsDialableNumber_ClassifiesCorrectly(string input, bool expected)
+    {
+        Assert.Equal(expected, SIPSorceryAdapter.IsDialableNumber(input));
+    }
+
+    [Fact]
+    public void IsDialableNumber_NullInput_ReturnsFalse()
+    {
+        Assert.False(SIPSorceryAdapter.IsDialableNumber(null!));
+    }
 }
