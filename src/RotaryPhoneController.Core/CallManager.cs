@@ -228,12 +228,46 @@ public class CallManager
 
     public void HandleDigitsReceived(string number)
     {
-        _logger.LogInformation("Digits received: {Number}", number);
+        _logger.LogInformation("Digits received: {Number}, current state: {State}", number, CurrentState);
+
+        // Ignore non-numeric "numbers" (e.g., HT801 registration name "rotaryphone")
+        if (!number.All(c => char.IsDigit(c) || c == '+' || c == '*' || c == '#'))
+        {
+            _logger.LogDebug("Ignoring non-numeric dial string: {Number}", number);
+            return;
+        }
+
         DialedNumber = number;
 
         if (CurrentState == CallState.Dialing)
         {
             // Transition to InCall and start the call
+            StartCall(number);
+        }
+        else if (CurrentState == CallState.Idle)
+        {
+            // HT801 sends INVITE with full dialed number before hook change event.
+            // Treat this as an implicit off-hook + dial.
+            _logger.LogInformation("Digits received while Idle — implicit off-hook, starting call to {Number}", number);
+
+            // Same setup as HandleHookChange(offHook=true) for Idle state
+            if (_boundAdapter != null &&
+                (_boundAdapter.Mode == CallAdapterMode.GVApi || _boundAdapter.Mode == CallAdapterMode.GVBrowser))
+            {
+                // GV mode — no BT device needed
+            }
+            else if (_deviceManager != null)
+            {
+                var connected = _deviceManager.ConnectedDevices;
+                if (connected.Count == 0)
+                {
+                    _logger.LogWarning("No BT devices connected — cannot make calls");
+                    return;
+                }
+                _activeDeviceAddress = connected[0].Address;
+            }
+
+            CurrentState = CallState.Dialing;
             StartCall(number);
         }
     }

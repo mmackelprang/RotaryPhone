@@ -1,10 +1,10 @@
-using Xunit;
-using Moq;
 using Microsoft.Extensions.Logging;
+using Moq;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Configuration;
+using Xunit;
 
 namespace RotaryPhoneController.Tests;
 
@@ -188,5 +188,90 @@ public class CallManagerTests
         _mockCallHistory.Verify(x => x.UpdateCallHistory(
             It.Is<CallHistoryEntry>(e => e.CallerName == null && e.PhoneNumber == "5551234567")),
             Times.Once);
+    }
+
+    [Fact]
+    public void HandleDigitsReceived_NonNumeric_ShouldBeIgnored()
+    {
+        // Act — HT801 sometimes sends its registration name as first INVITE
+        _callManager.HandleDigitsReceived("rotaryphone");
+
+        // Assert — state stays Idle, DialedNumber not set to the junk value
+        Assert.Equal(CallState.Idle, _callManager.CurrentState);
+        Assert.Equal(string.Empty, _callManager.DialedNumber);
+    }
+
+    [Fact]
+    public void HandleDigitsReceived_WhileIdle_ShouldImplicitOffHookAndStartCall()
+    {
+        // Arrange — create a CallManager with a GV adapter so BT device isn't required
+        var mockAdapterRegistry = new Mock<ICallAdapterRegistry>();
+        var mockAdapter = new Mock<ICallAdapter>();
+        mockAdapter.Setup(a => a.Mode).Returns(CallAdapterMode.GVApi);
+        mockAdapter.Setup(a => a.PlaceCallAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("call-123");
+        mockAdapterRegistry.Setup(r => r.ActiveAdapter).Returns(mockAdapter.Object);
+
+        var cm = new CallManager(
+            _mockSipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            adapterRegistry: mockAdapterRegistry.Object
+        );
+        cm.Initialize();
+
+        // Act — digits arrive before hook change (HT801 INVITE ordering)
+        cm.HandleDigitsReceived("9193718044");
+
+        // Assert — should have transitioned through Dialing into the GV call flow
+        Assert.Equal("9193718044", cm.DialedNumber);
+        Assert.NotEqual(CallState.Idle, cm.CurrentState);
+        mockAdapter.Verify(a => a.PlaceCallAsync("9193718044", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleDigitsReceived_WhileIdle_NoBtDevice_ShouldNotStartCall()
+    {
+        // Arrange — CallManager with a device manager but no connected devices
+        var mockDeviceManager = new Mock<IBluetoothDeviceManager>();
+        mockDeviceManager.Setup(d => d.ConnectedDevices)
+            .Returns(new List<BluetoothDevice>());
+
+        var cm = new CallManager(
+            _mockSipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            deviceManager: mockDeviceManager.Object
+        );
+        cm.Initialize();
+
+        // Act — digits arrive while Idle but no BT device connected
+        cm.HandleDigitsReceived("5551234567");
+
+        // Assert — should stay Idle (no device to route through)
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+    }
+
+    [Theory]
+    [InlineData("+15551234567")]
+    [InlineData("*67")]
+    [InlineData("#31#5551234567")]
+    [InlineData("911")]
+    public void HandleDigitsReceived_ValidDialStrings_ShouldNotBeFiltered(string number)
+    {
+        // Act — go to Dialing first, then send digits
+        _callManager.HandleHookChange(true);
+        _callManager.HandleDigitsReceived(number);
+
+        // Assert — number should be accepted (not filtered by non-numeric guard)
+        Assert.Equal(number, _callManager.DialedNumber);
     }
 }
