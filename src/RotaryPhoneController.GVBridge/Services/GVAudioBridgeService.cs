@@ -58,10 +58,13 @@ public class GVAudioBridgeService : IDisposable
     /// <param name="localRtpPort">Local port to bind (should match the port advertised in the INVITE SDP).</param>
     public async Task StartAsync(int? remoteRtpPort = null, string? remoteRtpAddress = null, int? localRtpPort = null)
     {
-        if (IsActive)
+        // Defensive: if a stale RTP session from a previous call is still lingering
+        // (e.g., StopAsync wasn't called or port wasn't released), clean it up first
+        // so we can bind the same port for the new call.
+        if (IsActive || _rtpSession != null)
         {
-            _logger.LogDebug("GVAudioBridge StartAsync called but already active — no-op");
-            return;
+            _logger.LogWarning("GVAudioBridge StartAsync: cleaning up stale RTP session before starting new one");
+            await StopInternalAsync();
         }
 
         if (_sipTransport == null || _activeCallId == null)
@@ -125,12 +128,22 @@ public class GVAudioBridgeService : IDisposable
     /// </summary>
     public async Task StopAsync()
     {
-        if (!IsActive)
+        if (!IsActive && _rtpSession == null)
         {
             _logger.LogDebug("GVAudioBridge StopAsync called but not active — no-op");
             return;
         }
 
+        await StopInternalAsync();
+        _logger.LogInformation("GVAudioBridge stopped");
+    }
+
+    /// <summary>
+    /// Internal stop logic shared by StopAsync and the defensive cleanup in StartAsync.
+    /// Releases the RTP session and UDP port so a new session can bind the same port.
+    /// </summary>
+    private Task StopInternalAsync()
+    {
         IsActive = false;
 
         // Unsubscribe from SIP audio.
@@ -139,7 +152,7 @@ public class GVAudioBridgeService : IDisposable
             _sipTransport.AudioReceived -= OnSipAudioReceived;
         }
 
-        // Unsubscribe and close the RTP session.
+        // Unsubscribe and close the RTP session to release the UDP port.
         if (_rtpSession != null)
         {
             _rtpSession.OnRtpPacketReceived -= OnHt801RtpReceived;
@@ -152,8 +165,7 @@ public class GVAudioBridgeService : IDisposable
         _sipTransport = null;
         _activeCallId = null;
 
-        _logger.LogInformation("GVAudioBridge stopped");
-        await Task.CompletedTask;
+        return Task.CompletedTask;
     }
 
     /// <summary>

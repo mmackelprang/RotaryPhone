@@ -244,39 +244,53 @@ public class SIPSorceryAdapter : ISipAdapter
     private void HandleInvite(SIPRequest sipRequest)
     {
         _logger.Information("Processing INVITE from {Remote}", sipRequest.RemoteSIPEndPoint);
-        
+
         // In this architecture, if the SIP Adapter (Server) receives an INVITE,
         // it means the HT801 (Client) is trying to place an outgoing call.
         // The dialed number is in the To header.
-        
+
         try
         {
             var dialedNumber = sipRequest.Header.To.ToURI.User;
             if (!string.IsNullOrEmpty(dialedNumber))
             {
                 _logger.Information("User dialed: {Number}", dialedNumber);
-                
+
                 // Trigger digits received with the full number
                 OnDigitsReceived?.Invoke(dialedNumber);
-                
+
                 // Important: We must answer the INVITE to establish the SIP dialog
                 // and stop the HT801 from retransmitting.
                 var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
-                
+
+                // Resolve actual local IP when listening on 0.0.0.0 — the SDP must
+                // contain a routable IP so HT801 knows where to send its RTP.
+                // Without this, the SDP has c=IN IP4 0.0.0.0 which is a hold indicator
+                // (RFC 3264) and causes one-way audio (HT801 -> us fails).
+                var localIP = _localIPAddress;
+                if (localIP == "0.0.0.0" && sipRequest.RemoteSIPEndPoint != null)
+                {
+                    localIP = GetLocalIPForTarget(sipRequest.RemoteSIPEndPoint.Address.ToString());
+                    _logger.Information("Resolved local SDP address to {LocalIP} for INVITE response", localIP);
+                }
+
                 // Add Contact header to response (required)
-                response.Header.Contact = new List<SIPContactHeader> 
-                { 
-                    new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip, 
-                        SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:{_localPort}"))) 
+                response.Header.Contact = new List<SIPContactHeader>
+                {
+                    new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
+                        SIPEndPoint.ParseSIPEndPoint($"{localIP}:{_localPort}")))
                 };
-                
+
                 // Add SDP to response (negotiate codec)
-                // Use the same RTP port we configured for the bridge
-                var localEndpoint = SIPEndPoint.ParseSIPEndPoint($"{_localIPAddress}:49000");
+                // Use the same RTP port the audio bridge will bind (49000) so HT801
+                // sends its RTP to the correct destination once the bridge starts.
+                var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
                 response.Body = CreateBasicSDP(localEndpoint);
-                
+
+                _logger.Information("INVITE 200 OK SDP: RTP at {IP}:{Port}", localIP, 49000);
+
                 _sipTransport?.SendResponseAsync(response);
-                
+
                 // Also trigger hook change to ensure we are in InCall state
                 OnHookChange?.Invoke(true);
             }
