@@ -177,6 +177,56 @@ public class GvSipTransportReconnectTests
     }
 
     [Fact]
+    public async Task ConcurrentEnsureRegisteredAndClose_IsSingleFlight()
+    {
+        // A Closed event (push reconnect) and a concurrent EnsureRegisteredAsync (pull path)
+        // must funnel through the SAME single-flight register: exactly one new ConnectAsync,
+        // not two parallel RegisterAsync racing TeardownChannelAsync/create-channel.
+        var gate = new TaskCompletionSource();
+        var registerCount = 0;
+        var fake = new FakeSipWebSocketChannel();
+        fake.OnSend = (payload, ch) =>
+        {
+            if (!payload.StartsWith("REGISTER ", StringComparison.Ordinal))
+                return;
+
+            // First REGISTER (initial) responds immediately. Subsequent (reconnect/ensure)
+            // REGISTERs wait on the gate so the attempt stays in-flight while we pile on a
+            // concurrent EnsureRegisteredAsync.
+            if (Interlocked.Increment(ref registerCount) == 1)
+                ch.FeedMessage(Register200Ok());
+            else
+                gate.Task.ContinueWith(_ => ch.FeedMessage(Register200Ok()), TaskScheduler.Default);
+        };
+
+        await using var transport = CreateTransport(fake, options: FastOptions);
+        await transport.EnsureRegisteredAsync();
+        Assert.Equal(1, fake.ConnectCount);
+
+        // Drop the socket so the next EnsureRegisteredAsync sees !IsConnected and forces a
+        // re-register, AND kick the push reconnect via a Closed event — at the same time.
+        await fake.CloseAsync(); // IsConnected -> false
+        fake.RaiseClosed(wasIntentional: false);
+
+        // Concurrent pull-path register while the push reconnect is in flight.
+        var ensureTask = transport.EnsureRegisteredAsync();
+
+        // Wait until the single (gated) reconnect connect has started, then allow time for
+        // any erroneous SECOND connect to surface.
+        await WaitForAsync(() => fake.ConnectCount >= 2);
+        await Task.Delay(200);
+
+        // Release the gated REGISTER so both the push loop and the pull ensure complete.
+        gate.SetResult();
+        await ensureTask;
+        await WaitForAsync(() => transport.IsRegistered);
+
+        // Exactly one reconnect connect (#2). The concurrent triggers joined one attempt.
+        Assert.Equal(2, fake.ConnectCount);
+        Assert.True(transport.IsRegistered);
+    }
+
+    [Fact]
     public async Task Status_ReflectsConnectAndDrop()
     {
         // First registration auto-responds; the reconnect attempt does NOT (its REGISTER

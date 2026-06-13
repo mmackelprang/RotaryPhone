@@ -72,8 +72,16 @@ public sealed class GvSipTransport : IAsyncDisposable
     private int _keepAliveIntervalSeconds;
     private ITimer? _keepAliveTimer;
 
-    // Single-flight reconnect guard (0 = idle, 1 = reconnect in flight).
+    // Single-flight reconnect guard (0 = idle, 1 = reconnect in flight). Guards the BACKOFF
+    // LOOP so two loops never run; the actual RegisterAsync call is de-duped separately below.
     private int _reconnecting;
+
+    // Single in-flight REGISTER shared by every (re)register trigger (EnsureRegisteredAsync's
+    // pull path + ReconnectLoopAsync's push path). Ensures only ONE RegisterAsync runs at a
+    // time so concurrent triggers join the same attempt instead of racing two TeardownChannelAsync
+    // /create-channel sequences (which would orphan a live channel and corrupt _registered).
+    private Task? _registerInFlight;
+    private readonly object _registerLock = new();
 
     // Handlers currently subscribed to _wsChannel — captured so they can be unsubscribed
     // before the old channel is disposed on reconnect (fixes the latent handler/channel leak).
@@ -155,7 +163,54 @@ public sealed class GvSipTransport : IAsyncDisposable
             _logger.LogInformation("Re-registering: registered={Registered}, wsConnected={WsConnected}",
                 _registered, _wsChannel?.IsConnected ?? false);
             _registered = false;  // Force full re-registration
-            await RegisterAsync(ct).ConfigureAwait(false);
+
+            // Funnel through the shared single-flight register so a concurrent push reconnect
+            // (Closed event / keep-alive failure → ReconnectLoopAsync) and this pull path never
+            // both enter RegisterAsync at once. Joins an in-flight attempt or starts one, and
+            // awaits its outcome so InitiateAsync still blocks until registered (or it fails).
+            await EnsureSingleRegisterAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// De-dupes the actual REGISTER. Under <see cref="_registerLock"/>, returns the existing
+    /// in-flight register task if one is running, otherwise starts <see cref="RegisterAsync"/>
+    /// and stores it, clearing the slot when it completes. Both the pull path
+    /// (<see cref="EnsureRegisteredAsync"/>) and the push path (<see cref="ReconnectLoopAsync"/>)
+    /// await this so there is exactly one RegisterAsync in flight; all awaiters observe the same
+    /// outcome (exception or success). NOTE: by design this does NOT add backoff — the reconnect
+    /// loop owns the inter-attempt delay; this is purely the dedup seam.
+    /// </summary>
+    private Task EnsureSingleRegisterAsync(CancellationToken ct)
+    {
+        lock (_registerLock)
+        {
+            if (_registerInFlight is { IsCompleted: false } existing)
+                return existing;
+
+            // Start the attempt OUTSIDE any await but still under the lock so two callers can't
+            // both observe a null slot. Task.Run is not needed: RegisterAsync runs synchronously
+            // up to its first await, which is fine here.
+            var task = RegisterAsync(ct);
+            _registerInFlight = task;
+
+            // Clear the slot when the attempt settles so the next trigger starts a fresh one.
+            // Continuation observes the task's exception (if any) only to clear state — awaiters
+            // of the returned task still see the original exception.
+            _ = task.ContinueWith(
+                _ =>
+                {
+                    lock (_registerLock)
+                    {
+                        if (ReferenceEquals(_registerInFlight, task))
+                            _registerInFlight = null;
+                    }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+
+            return task;
         }
     }
 
@@ -1254,7 +1309,26 @@ public sealed class GvSipTransport : IAsyncDisposable
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(_options.RegisterTimeout);
 
-        var success = await regTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        bool success;
+        try
+        {
+            success = await regTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // REGISTER timed out. Resolve regTcs to false so a LATE 200-OK arriving on this
+            // (now-doomed) channel can't run messageHandler and flip _registered=true /
+            // regTcs.TrySetResult(true) against a channel we're about to tear down. Also
+            // explicitly unsubscribe + null _registered so the stale channel can't fire into
+            // the transport before the next attempt's TeardownChannelAsync runs.
+            regTcs.TrySetResult(false);
+            _registered = false;
+            channel.MessageReceived -= messageHandler;
+            if (ReferenceEquals(_currentMessageHandler, messageHandler))
+                _currentMessageHandler = null;
+            throw new InvalidOperationException("SIP REGISTER failed");
+        }
+
         if (!success)
         {
             throw new InvalidOperationException("SIP REGISTER failed");
@@ -1357,7 +1431,9 @@ public sealed class GvSipTransport : IAsyncDisposable
             {
                 try
                 {
-                    await RegisterAsync(ct).ConfigureAwait(false);
+                    // Go through the shared single-flight register so a concurrent pull-path
+                    // EnsureRegisteredAsync joins THIS attempt instead of starting a parallel one.
+                    await EnsureSingleRegisterAsync(ct).ConfigureAwait(false);
                     if (_registered)
                     {
 #pragma warning disable CA1848, CA1873
@@ -1480,18 +1556,38 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     private void SendKeepAlivePing()
     {
-        var channel = _wsChannel;
-        if (channel is null || !channel.IsConnected || _disposed || _lifetimeCts.IsCancellationRequested)
+        // Bail BEFORE touching _lifetimeCts: DisposeAsync disposes the CTS after disposing the
+        // timer, so an already-dispatched callback racing dispose must not read it. The _disposed
+        // early-return plus capturing the token once here (while it is still safe) closes the race.
+        if (_disposed)
             return;
 
-        _ = SendKeepAlivePingAsync(channel);
+        var channel = _wsChannel;
+        if (channel is null || !channel.IsConnected)
+            return;
+
+        CancellationToken token;
+        try
+        {
+            token = _lifetimeCts.Token;
+        }
+        catch (ObjectDisposedException)
+        {
+            // Lost the race with DisposeAsync — nothing to ping.
+            return;
+        }
+
+        if (token.IsCancellationRequested)
+            return;
+
+        _ = SendKeepAlivePingAsync(channel, token);
     }
 
-    private async Task SendKeepAlivePingAsync(ISipWebSocketChannel channel)
+    private async Task SendKeepAlivePingAsync(ISipWebSocketChannel channel, CancellationToken ct)
     {
         try
         {
-            await channel.SendPingAsync(_lifetimeCts.Token).ConfigureAwait(false);
+            await channel.SendPingAsync(ct).ConfigureAwait(false);
 #pragma warning disable CA1848, CA1873
             _logger.LogDebug("Sent keep-alive ping (double-CRLF)");
 #pragma warning restore CA1848, CA1873
@@ -1502,13 +1598,15 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning restore CA1031
         {
             // A failed ping means the link is dead — trigger reconnect (single-flight guarded).
+            // Use ONLY the captured token + _disposed here; never touch _lifetimeCts directly,
+            // since it may already be disposed by a concurrent DisposeAsync.
 #pragma warning disable CA1848, CA1873
             _logger.LogWarning(ex, "Keep-alive ping failed — treating link as dropped, reconnecting");
 #pragma warning restore CA1848, CA1873
             _registered = false;
             StopKeepAlive();
-            if (!_disposed && !_lifetimeCts.IsCancellationRequested)
-                _ = ReconnectLoopAsync(_lifetimeCts.Token);
+            if (!_disposed && !ct.IsCancellationRequested)
+                _ = ReconnectLoopAsync(ct);
         }
     }
 

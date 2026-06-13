@@ -223,8 +223,12 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 5. Create SIP transport for call signaling + DTLS-SRTP audio
-        var httpClientFactory = new SingleHttpClientFactory(_httpClient);
+        // 5. Create SIP transport for call signaling + DTLS-SRTP audio.
+        // Resolve _httpClient INDIRECTLY (via the field) so cookie rotation / reload that swaps
+        // the field (ReloadCookiesAsync, TryRotateCookiesAsync) propagates to the cred provider's
+        // next sipregisterinfo/get — otherwise it would keep the OLD disposed client and throw
+        // ObjectDisposedException, breaking the 401-recovery reconnect this PR adds.
+        var httpClientFactory = new SingleHttpClientFactory(() => _httpClient!);
         var credProvider = new GvSipCredentialProvider(
             httpClientFactory, _config,
             _loggerFactory.CreateLogger<GvSipCredentialProvider>());
@@ -616,12 +620,13 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     }
 
     /// <summary>
-    /// Minimal IHttpClientFactory adapter that returns a pre-built HttpClient.
-    /// Used to bridge the existing cookie-authenticated HttpClient into the
-    /// GvSipCredentialProvider which expects IHttpClientFactory.
+    /// Minimal IHttpClientFactory adapter that resolves the CURRENT HttpClient via a factory
+    /// lambda. Holding a <see cref="Func{HttpClient}"/> (rather than a captured instance) means
+    /// every <see cref="CreateClient"/> call picks up the latest <c>_httpClient</c> after cookie
+    /// rotation/reload swaps it — so the cred provider never holds a disposed client.
     /// </summary>
-    private sealed class SingleHttpClientFactory(HttpClient client) : IHttpClientFactory
+    private sealed class SingleHttpClientFactory(Func<HttpClient> clientFactory) : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => client;
+        public HttpClient CreateClient(string name) => clientFactory();
     }
 }
