@@ -163,6 +163,40 @@ curl http://radio:5004/api/gvbridge/adapter/mode
 # Expected: {"activeMode":"BluetoothHfp","modes":[{"mode":"BluetoothHfp"},{"mode":"SipTrunk"},{"mode":"GVBrowser"}]}
 ```
 
+### GVApi SIP status fields (keep-alive / auto-reconnect)
+
+In `GVApi` mode, `GET /api/gvbridge/status` now reflects the **real** SIP-over-WebSocket
+signaling state, not a stale flag:
+
+```bash
+curl http://radio:5004/api/gvbridge/status
+# {"available":true,"activeMode":"GVApi","sipRegistered":true,
+#  "wsConnected":true,"lastConnectedAt":"2026-06-13T16:02:11Z",
+#  "cookiesValid":true,"psidtsAgeSeconds":420}
+```
+
+| Field | Meaning |
+|---|---|
+| `sipRegistered` | `true` only when registered **and** the socket is actually open (honest — a dead socket can no longer report `true`). |
+| `wsConnected` | Whether the SIP WebSocket is currently open. |
+| `lastConnectedAt` | UTC of the last successful REGISTER 200-OK. A **new** value after a gap means a reconnect happened. |
+| `psidtsAgeSeconds` | Age of the rotating freshness cookies (`__Secure-1PSIDTS/3PSIDTS`). A large age hints the next request may 401 even if `cookiesValid` last passed. |
+
+**Keep-alive:** the transport parses Google's RFC 6223 `keep=` (e.g. `keep=240`) from the
+REGISTER 200-OK Via and sends an RFC 5626 §3.5.1 double-CRLF (`\r\n\r\n`) ping every
+`max(15, keep/2)`s, plus a protocol-level `KeepAliveInterval`. Watch the logs for
+`Keep-alive armed: keep=…` and `Sent keep-alive ping`.
+
+**Auto-reconnect:** if the socket drops unexpectedly, the logs show
+`SIP WebSocket dropped unexpectedly … reconnecting` → backoff (1,2,4,8,16,30s ± jitter,
+single-flight) → `SIP reconnect succeeded`. During the gap `wsConnected` is `false`; after
+recovery it is `true` with a new `lastConnectedAt`.
+
+**Observing it works:** leave the line idle 6+ minutes (past the old ~256s drop) and poll
+`/api/gvbridge/status` — `wsConnected` should stay `true` and `lastConnectedAt` should NOT
+change (keep-alive kept the socket alive). Then place an inbound call without any manual
+cookie refresh; the phone should ring.
+
 ---
 
 ## Step 5: Test Mode Switching

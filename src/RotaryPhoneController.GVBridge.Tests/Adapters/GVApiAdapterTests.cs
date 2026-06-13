@@ -45,6 +45,27 @@ public class GVApiAdapterTests
             () => adapter.PlaceCallAsync("+15551234567"));
     }
 
+    [Fact]
+    public void IsWebSocketConnected_BeforeActivate_ReturnsFalse()
+    {
+        var adapter = CreateAdapter();
+        Assert.False(adapter.IsWebSocketConnected);
+    }
+
+    [Fact]
+    public void SipLastConnectedAt_BeforeActivate_ReturnsNull()
+    {
+        var adapter = CreateAdapter();
+        Assert.Null(adapter.SipLastConnectedAt);
+    }
+
+    [Fact]
+    public void PsidtsAgeSeconds_BeforeActivate_ReturnsNull()
+    {
+        var adapter = CreateAdapter();
+        Assert.Null(adapter.PsidtsAgeSeconds);
+    }
+
     private static GVApiAdapter CreateAdapter()
     {
         var config = Options.Create(new GVBridgeConfig

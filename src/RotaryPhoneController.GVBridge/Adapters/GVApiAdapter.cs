@@ -35,6 +35,16 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     private bool _disposed;
     private bool _areCookiesValid;
 
+    // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
+    private DateTime? _psidtsRefreshedAt;
+
+    // Browser-less PSIDTS refresh (RotateCookies). Injected for tests; lazily built otherwise.
+    private ICookieRotator? _cookieRotator;
+    private HttpClient? _rotatorHttpClient;
+
+    // Single-flight guard so concurrent AuthenticationFailed events don't stampede the refresh.
+    private int _refreshingCookies;
+
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
     private string? _negotiatedHt801RtpIp;
@@ -45,13 +55,36 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     /// <summary>
     /// Whether the SIP transport is currently registered with Google Voice.
+    /// Honest: backed by IsRegistered, which is now (_registered AND socket connected).
     /// </summary>
     public bool IsSipRegistered => _sipTransport?.IsRegistered ?? false;
+
+    /// <summary>
+    /// Whether the underlying SIP WebSocket is currently connected (independent of registration).
+    /// </summary>
+    public bool IsWebSocketConnected => _sipTransport?.IsConnected ?? false;
+
+    /// <summary>
+    /// UTC timestamp of the most recent successful SIP REGISTER 200-OK, if any.
+    /// </summary>
+    public DateTime? SipLastConnectedAt => _sipTransport?.LastConnectedAt;
 
     /// <summary>
     /// Whether the last cookie health check passed (cookies are still accepted by Google).
     /// </summary>
     public bool AreCookiesValid => _areCookiesValid;
+
+    /// <summary>
+    /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
+    /// based on when they were last loaded or refreshed. Null if no cookie set is loaded.
+    /// Google rotates PSIDTS on its own cadence (minutes–hours); a large age is a hint that
+    /// the next request may 401 with SESSION_COOKIE_INVALID even if the periodic health
+    /// check last passed. Used to make /api/gvbridge/status's cookiesValid less misleading.
+    /// </summary>
+    public long? PsidtsAgeSeconds =>
+        _psidtsRefreshedAt is { } refreshed
+            ? (long)Math.Max(0, (DateTime.UtcNow - refreshed).TotalSeconds)
+            : null;
 
     /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
@@ -83,10 +116,24 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         IOptions<GVBridgeConfig> config,
         ILogger<GVApiAdapter> logger,
         ILoggerFactory loggerFactory)
+        : this(config, logger, loggerFactory, cookieRotator: null)
+    {
+    }
+
+    /// <summary>
+    /// Test/extensibility constructor allowing a custom <see cref="ICookieRotator"/> to be
+    /// injected (defaults to a best-effort <see cref="GvCookieRotator"/> built lazily).
+    /// </summary>
+    internal GVApiAdapter(
+        IOptions<GVBridgeConfig> config,
+        ILogger<GVApiAdapter> logger,
+        ILoggerFactory loggerFactory,
+        ICookieRotator? cookieRotator)
     {
         _config = config.Value;
         _logger = logger;
         _loggerFactory = loggerFactory;
+        _cookieRotator = cookieRotator;
     }
 
     /// <summary>
@@ -141,6 +188,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
         _cookieSet = await _cookieStore.LoadAsync();
         LoadedAt = _cookieSet != null ? DateTime.UtcNow : null;
+        _psidtsRefreshedAt = _cookieSet != null ? DateTime.UtcNow : null;
 
         if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
@@ -175,8 +223,12 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             return;
         }
 
-        // 5. Create SIP transport for call signaling + DTLS-SRTP audio
-        var httpClientFactory = new SingleHttpClientFactory(_httpClient);
+        // 5. Create SIP transport for call signaling + DTLS-SRTP audio.
+        // Resolve _httpClient INDIRECTLY (via the field) so cookie rotation / reload that swaps
+        // the field (ReloadCookiesAsync, TryRotateCookiesAsync) propagates to the cred provider's
+        // next sipregisterinfo/get — otherwise it would keep the OLD disposed client and throw
+        // ObjectDisposedException, breaking the 401-recovery reconnect this PR adds.
+        var httpClientFactory = new SingleHttpClientFactory(() => _httpClient!);
         var credProvider = new GvSipCredentialProvider(
             httpClientFactory, _config,
             _loggerFactory.CreateLogger<GvSipCredentialProvider>());
@@ -185,6 +237,10 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _loggerFactory.CreateLogger<GvSipTransport>(),
             () => credProvider.GetCredentialsAsync(),
             _loggerFactory);
+
+        // Escalate real auth failures (post-Digest 401/403, or 401/403 from sipregisterinfo/get)
+        // to a cookie refresh. NOT triggered by plain network drops.
+        _sipTransport.AuthenticationFailed += HandleAuthenticationFailed;
 
         _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
         _sipTransport.CallStatusChanged += (_, e) =>
@@ -229,9 +285,14 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         if (_sipTransport != null)
         {
             _sipTransport.IncomingCallReceived -= HandleSipIncomingCall;
+            _sipTransport.AuthenticationFailed -= HandleAuthenticationFailed;
             await _sipTransport.DisposeAsync();
             _sipTransport = null;
         }
+
+        // Dispose rotator HttpClient (if we built one)
+        _rotatorHttpClient?.Dispose();
+        _rotatorHttpClient = null;
 
         // Dispose HttpClient
         _httpClient?.Dispose();
@@ -243,6 +304,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _areCookiesValid = false;
         LoadedAt = null;
         LastValidatedAt = null;
+        _psidtsRefreshedAt = null;
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
@@ -271,6 +333,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         _cookieSet = newCookies;
         LoadedAt = DateTime.UtcNow;
+        _psidtsRefreshedAt = DateTime.UtcNow;
 
         // Re-create authenticated HttpClient with updated cookies
         _httpClient?.Dispose();
@@ -397,6 +460,115 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         OnIncomingCall?.Invoke(e.CallInfo.CallerNumber);
     }
 
+    /// <summary>
+    /// Auth-failure escalation handler. Fired by the transport ONLY on a real auth rejection
+    /// (post-Digest 401/403 or 401/403 from sipregisterinfo/get), never on a plain network drop.
+    /// Runs the recovery ladder, then lets the transport's reconnect backoff pick up the refreshed
+    /// creds on its next attempt.
+    /// </summary>
+    private void HandleAuthenticationFailed(object? sender, AuthenticationFailedEventArgs e)
+    {
+        // Single-flight: collapse concurrent auth failures into one refresh.
+        if (Interlocked.CompareExchange(ref _refreshingCookies, 1, 0) != 0)
+            return;
+
+        _ = RecoverFromAuthFailureAsync(e.Reason);
+    }
+
+    private async Task RecoverFromAuthFailureAsync(string reason)
+    {
+        try
+        {
+            _logger.LogWarning("GVApi: SIP auth failure ({Reason}) — attempting cookie recovery", reason);
+            _areCookiesValid = false;
+
+            // PRIMARY: browser-less RotateCookies refresh of the rotating PSIDTS from the
+            // stored long-lived __Secure-1PSID. Best-effort; falls back on any failure.
+            if (_config.EnableCookieRotation && _cookieSet != null)
+            {
+                var rotated = await TryRotateCookiesAsync();
+                if (rotated)
+                {
+                    _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS — reconnect backoff will retry");
+                    return;
+                }
+            }
+
+            // FALLBACK: re-read cookies from disk (in case an out-of-band CDP refresh updated
+            // them) and re-run the health check. The CDP refresh-from-browser endpoint remains
+            // the operator's manual path for a genuinely dead login.
+            var reloaded = await ReloadCookiesAsync();
+            if (!reloaded)
+            {
+                _logger.LogWarning(
+                    "GVApi: cookie recovery failed. Long-lived session may be dead — run " +
+                    "POST /api/gvbridge/cookies/refresh-from-browser against a logged-in Chrome.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: error during auth-failure cookie recovery");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshingCookies, 0);
+        }
+    }
+
+    /// <summary>
+    /// Attempt the browser-less RotateCookies refresh, overlay the fresh PSIDTS onto the
+    /// in-memory + on-disk cookie set, and re-create the authenticated HttpClient. Returns
+    /// true only if cookies were actually rotated and re-verified healthy.
+    /// </summary>
+    private async Task<bool> TryRotateCookiesAsync()
+    {
+        var current = _cookieSet;
+        if (current == null)
+            return false;
+
+        var rotator = _cookieRotator ??= BuildDefaultCookieRotator();
+
+        var result = await rotator.RotateAsync(current);
+        if (!result.Rotated)
+            return false;
+
+        // Overlay the refreshed PSIDTS so ToCookieHeader() stops replaying the stale values.
+        var refreshed = current.WithRefreshedPsidts(result.Psidts1, result.Psidts3);
+        _cookieSet = refreshed;
+        _psidtsRefreshedAt = DateTime.UtcNow;
+
+        // Persist so a restart / other paths pick up the fresh cookies.
+        if (_cookieStore != null)
+        {
+            try { await _cookieStore.SaveAsync(refreshed); }
+            catch (Exception ex) { _logger.LogWarning(ex, "GVApi: failed to persist rotated cookies"); }
+        }
+
+        // Re-create the authenticated HttpClient with the refreshed cookie set.
+        _httpClient?.Dispose();
+        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieSet!));
+        _httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            BaseAddress = new Uri("https://clients6.google.com/")
+        };
+        _accountClient = new GvAccountClient(
+            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
+            _loggerFactory.CreateLogger<GvAccountClient>());
+
+        var healthy = await _accountClient.IsHealthyAsync();
+        _areCookiesValid = healthy;
+        LastValidatedAt = DateTime.UtcNow;
+        return healthy;
+    }
+
+    private ICookieRotator BuildDefaultCookieRotator()
+    {
+        // RotateCookies sends its own Cookie header (no SAPISIDHASH), so use a plain client.
+        _rotatorHttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        return new GvCookieRotator(_rotatorHttpClient, _loggerFactory.CreateLogger<GvCookieRotator>());
+    }
+
     private void OnHealthCheckTimer(object? state)
     {
         _ = RunHealthCheckAsync();
@@ -448,12 +620,13 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     }
 
     /// <summary>
-    /// Minimal IHttpClientFactory adapter that returns a pre-built HttpClient.
-    /// Used to bridge the existing cookie-authenticated HttpClient into the
-    /// GvSipCredentialProvider which expects IHttpClientFactory.
+    /// Minimal IHttpClientFactory adapter that resolves the CURRENT HttpClient via a factory
+    /// lambda. Holding a <see cref="Func{HttpClient}"/> (rather than a captured instance) means
+    /// every <see cref="CreateClient"/> call picks up the latest <c>_httpClient</c> after cookie
+    /// rotation/reload swaps it — so the cred provider never holds a disposed client.
     /// </summary>
-    private sealed class SingleHttpClientFactory(HttpClient client) : IHttpClientFactory
+    private sealed class SingleHttpClientFactory(Func<HttpClient> clientFactory) : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => client;
+        public HttpClient CreateClient(string name) => clientFactory();
     }
 }
