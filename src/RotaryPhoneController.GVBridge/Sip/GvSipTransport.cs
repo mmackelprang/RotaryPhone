@@ -53,24 +53,57 @@ public sealed class GvSipTransport : IAsyncDisposable
     private readonly ILogger<GvSipTransport> _logger;
     private readonly Func<Task<SipCredentials>> _getCredentials;
     private readonly ConcurrentDictionary<string, SipCallSession> _activeCalls = new();
+    private readonly Func<Uri, ILogger, ISipWebSocketChannel> _channelFactory;
+    private readonly ReconnectOptions _options;
+    private readonly TimeProvider _timeProvider;
 
-    private GvSipWebSocketChannel? _wsChannel;
+    // Cancelled in DisposeAsync so the keep-alive timer + reconnect loop stop on shutdown.
+    private readonly CancellationTokenSource _lifetimeCts = new();
+
+    private ISipWebSocketChannel? _wsChannel;
     private SipCredentials? _credentials;
     private string? _serviceRoute;
     private string? _regContactUser;
     private string? _regWsHost;
     private bool _registered;
+    private bool _disposed;
+
+    // Negotiated keep-alive frequency (RFC 6223 keep= from the REGISTER 200-OK Via).
+    private int _keepAliveIntervalSeconds;
+    private ITimer? _keepAliveTimer;
+
+    // Single-flight reconnect guard (0 = idle, 1 = reconnect in flight).
+    private int _reconnecting;
+
+    // Handlers currently subscribed to _wsChannel — captured so they can be unsubscribed
+    // before the old channel is disposed on reconnect (fixes the latent handler/channel leak).
+    private EventHandler<SipMessageEventArgs>? _currentMessageHandler;
+    private EventHandler<WebSocketClosedEventArgs>? _currentClosedHandler;
 
     /// <summary>
-    /// Whether SIP registration with Google Voice is currently active.
+    /// Whether SIP registration with Google Voice is currently active AND the underlying
+    /// socket is open. A dead socket can never report registered-true (honest status).
     /// </summary>
-    public bool IsRegistered => _registered;
+    public bool IsRegistered => _registered && IsConnected;
+
+    /// <summary>Whether the underlying SIP WebSocket is currently connected.</summary>
+    public bool IsConnected => _wsChannel?.IsConnected ?? false;
+
+    /// <summary>UTC timestamp of the most recent successful REGISTER 200-OK, if any.</summary>
+    public DateTime? LastConnectedAt { get; private set; }
 
     public event EventHandler<IncomingCallEventArgs>? IncomingCallReceived;
 
     public event EventHandler<AudioDataEventArgs>? AudioReceived;
 
     public event EventHandler<CallStatusChangedEventArgs>? CallStatusChanged;
+
+    /// <summary>
+    /// Raised when REGISTER is genuinely rejected after the Digest re-send, or when the
+    /// credential fetch returns HTTP 401/403. The adapter subscribes to escalate to a
+    /// cookie refresh (RotateCookies primary, CDP fallback). NOT raised on plain network drops.
+    /// </summary>
+    public event EventHandler<AuthenticationFailedEventArgs>? AuthenticationFailed;
 
     /// <param name="logger">Logger</param>
     /// <param name="getCredentials">Async factory that calls sipregisterinfo/get and returns credentials</param>
@@ -79,11 +112,32 @@ public sealed class GvSipTransport : IAsyncDisposable
         ILogger<GvSipTransport> logger,
         Func<Task<SipCredentials>> getCredentials,
         ILoggerFactory? loggerFactory = null)
+        : this(logger, getCredentials, loggerFactory, channelFactory: null, options: null, timeProvider: null)
+    {
+    }
+
+    /// <summary>
+    /// Test/extensibility constructor. Allows injecting a fake channel factory, tuned
+    /// reconnect/keep-alive options, and a TimeProvider so timing-sensitive paths are
+    /// deterministic. Production code uses the public 3-arg overload, which defaults all three.
+    /// </summary>
+    internal GvSipTransport(
+        ILogger<GvSipTransport> logger,
+        Func<Task<SipCredentials>> getCredentials,
+        ILoggerFactory? loggerFactory,
+        Func<Uri, ILogger, ISipWebSocketChannel>? channelFactory,
+        ReconnectOptions? options,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(getCredentials);
         _logger = logger;
         _getCredentials = getCredentials;
+        _options = options ?? ReconnectOptions.Default;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _channelFactory = channelFactory
+            ?? ((uri, log) => new GvSipWebSocketChannel(
+                uri, log, TimeSpan.FromSeconds(_options.DefaultKeepAliveSeconds)));
 
         // Route SIPSorcery internal logs (including DTLS diagnostics) through our logging pipeline
         if (loggerFactory is not null)
@@ -742,11 +796,15 @@ public sealed class GvSipTransport : IAsyncDisposable
 
         var creds = await _getCredentials().ConfigureAwait(false);
 
+        // Tear down any prior channel BEFORE creating a new one: unsubscribe the previous
+        // handlers and dispose the old channel so reconnects don't leak channels or stack
+        // duplicate MessageReceived handlers (which would cause duplicate PRACK/ACK sends).
+        await TeardownChannelAsync().ConfigureAwait(false);
+
         // Connect to Google's SIP proxy via our custom WebSocket channel
         // (bypasses SSL cert name mismatch for raw IP connection)
-        _wsChannel = new GvSipWebSocketChannel(
-            new Uri(WssUrl),
-            _logger);
+        var channel = _channelFactory(new Uri(WssUrl), _logger);
+        _wsChannel = channel;
 
         var regTcs = new TaskCompletionSource<bool>();
 
@@ -761,10 +819,22 @@ public sealed class GvSipTransport : IAsyncDisposable
         var regContactUser = Guid.NewGuid().ToString("N")[..8];
         var regDeviceUuid = Guid.NewGuid().ToString("D");
 
-        // Listen for SIP responses on the WebSocket
-        _wsChannel.MessageReceived += (sender, args) =>
+        // Named handler captured in a local so it can be unsubscribed on the next register
+        // (stored in _currentMessageHandler below). Listen for SIP responses on the WebSocket.
+        EventHandler<SipMessageEventArgs> messageHandler = (sender, args) =>
         {
             var message = args.Message;
+
+            // RFC 5626 §3.5.1 keep-alive pong is a bare CRLF — recognize and early-return
+            // (it matches none of the SIP dispatch prefixes below anyway). Log at debug.
+            if (message == "\r\n" || string.IsNullOrWhiteSpace(message))
+            {
+#pragma warning disable CA1848, CA1873
+                _logger.LogDebug("Received keep-alive pong (bare CRLF)");
+#pragma warning restore CA1848, CA1873
+                return;
+            }
+
 #pragma warning disable CA1848, CA1873
             _logger.LogInformation("SIP received ({Length} chars):\n{Message}",
                 message.Length, message[..Math.Min(800, message.Length)]);
@@ -777,10 +847,19 @@ public sealed class GvSipTransport : IAsyncDisposable
                     var resp = SIPResponse.ParseSIPResponse(message);
                     if (resp.Header.CSeqMethod == SIPMethodsEnum.REGISTER)
                     {
+                        // Was this REGISTER already authenticated (carries our Digest)?
+                        // Distinguishes the FIRST 401 (normal challenge) from a post-Digest 401.
+                        var cseqNum = resp.Header.CSeq;
+
                         if (resp.Status == SIPResponseStatusCodesEnum.Ok)
                         {
                             LogRegistered(_logger, null);
                             _registered = true;
+                            LastConnectedAt = _timeProvider.GetUtcNow().UtcDateTime;
+
+                            // RFC 6223 keep= negotiated send-frequency (seconds) from the first
+                            // response Via. RFC 5626 §3.5.1 CRLF is the keep-alive METHOD.
+                            _keepAliveIntervalSeconds = ParseKeepInterval(message);
 
                             // Extract Service-Route for INVITE routing
                             var srIdx = message.IndexOf("Service-Route:", StringComparison.OrdinalIgnoreCase);
@@ -790,48 +869,76 @@ public sealed class GvSipTransport : IAsyncDisposable
                                 _serviceRoute = message[(srIdx + 15)..srEnd].Trim();
                             }
 
+                            // (Re)start the keep-alive timer now that we are registered.
+                            StartKeepAlive();
+
                             regTcs.TrySetResult(true);
                         }
-                        else if ((int)resp.Status == 401)
+                        else if ((int)resp.Status is 401 or 407)
                         {
-                            // 401 challenge — extract nonce and resend with Digest auth
-#pragma warning disable CA1848, CA1873
-                            _logger.LogInformation("Got 401 challenge, computing Digest auth...");
-#pragma warning restore CA1848, CA1873
-                            // Parse nonce from raw WWW-Authenticate header
-                            var wwwAuth = message;
-                            var nonceIdx = wwwAuth.IndexOf("nonce=\"", StringComparison.Ordinal);
-                            if (nonceIdx >= 0)
+                            // A 401 on the FIRST REGISTER (cseq 1) is the NORMAL Digest challenge —
+                            // answer it. A 401 on the SECOND REGISTER (cseq >= 2, our Digest already
+                            // sent) is a REAL post-Digest auth failure → escalate.
+                            if (cseqNum >= 2)
                             {
-                                nonceIdx += 7;
-                                var nonceEnd = wwwAuth.IndexOf('"', nonceIdx);
-                                var nonce = wwwAuth[nonceIdx..nonceEnd];
-                                var realm = SipDomain;
+#pragma warning disable CA1848, CA1873
+                                _logger.LogWarning(
+                                    "Post-Digest REGISTER rejected ({Status}) — real auth failure, escalating",
+                                    (int)resp.Status);
+#pragma warning restore CA1848, CA1873
+                                RaiseAuthenticationFailed($"REGISTER {(int)resp.Status} after Digest");
+                                regTcs.TrySetResult(false);
+                            }
+                            else
+                            {
+                                // Normal 401 challenge — extract nonce and resend with Digest auth
+#pragma warning disable CA1848, CA1873
+                                _logger.LogInformation("Got 401 challenge, computing Digest auth...");
+#pragma warning restore CA1848, CA1873
+                                // Parse nonce from raw WWW-Authenticate header
+                                var wwwAuth = message;
+                                var nonceIdx = wwwAuth.IndexOf("nonce=\"", StringComparison.Ordinal);
+                                if (nonceIdx >= 0)
+                                {
+                                    nonceIdx += 7;
+                                    var nonceEnd = wwwAuth.IndexOf('"', nonceIdx);
+                                    var nonce = wwwAuth[nonceIdx..nonceEnd];
+                                    var realm = SipDomain;
 
-                                // Compute MD5 Digest response
-                                // HA1 = MD5(username:realm:password)
-                                // HA2 = MD5(REGISTER:sip:domain)
-                                // response = MD5(HA1:nonce:HA2)
-                                var username = creds.SipUsername;
-                                var password = creds.BearerToken; // Token used as password for Digest
-                                var uri = $"sip:{SipDomain}";
+                                    // Compute MD5 Digest response
+                                    // HA1 = MD5(username:realm:password)
+                                    // HA2 = MD5(REGISTER:sip:domain)
+                                    // response = MD5(HA1:nonce:HA2)
+                                    var username = creds.SipUsername;
+                                    var password = creds.BearerToken; // Token used as password for Digest
+                                    var uri = $"sip:{SipDomain}";
 
-                                var ha1 = Md5Hash($"{username}:{realm}:{password}");
-                                var ha2 = Md5Hash($"REGISTER:{uri}");
-                                var digestResponse = Md5Hash($"{ha1}:{nonce}:{ha2}");
+                                    var ha1 = Md5Hash($"{username}:{realm}:{password}");
+                                    var ha2 = Md5Hash($"REGISTER:{uri}");
+                                    var digestResponse = Md5Hash($"{ha1}:{nonce}:{ha2}");
 
-                                var authLine = $"Authorization: Digest algorithm=MD5, username=\"{username}\", " +
-                                    $"realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{digestResponse}\"";
+                                    var authLine = $"Authorization: Digest algorithm=MD5, username=\"{username}\", " +
+                                        $"realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{digestResponse}\"";
 
-                                var reg2 = BuildRegister(username, regCallId, regTag, regWsHost, regContactUser,
-                                    regDeviceUuid, 2, authLine);
+                                    var reg2 = BuildRegister(username, regCallId, regTag, regWsHost, regContactUser,
+                                        regDeviceUuid, 2, authLine);
 
 #pragma warning disable CA1848, CA1873
-                                _logger.LogInformation("Sending SIP REGISTER with Digest auth...");
+                                    _logger.LogInformation("Sending SIP REGISTER with Digest auth...");
 #pragma warning restore CA1848, CA1873
 
-                                _ = SendSipMessageAsync(reg2);
+                                    _ = SendSipMessageAsync(reg2);
+                                }
                             }
+                        }
+                        else if ((int)resp.Status == 403)
+                        {
+                            // 403 Forbidden on REGISTER is always a real auth rejection.
+#pragma warning disable CA1848, CA1873
+                            _logger.LogWarning("REGISTER rejected 403 Forbidden — real auth failure, escalating");
+#pragma warning restore CA1848, CA1873
+                            RaiseAuthenticationFailed("REGISTER 403");
+                            regTcs.TrySetResult(false);
                         }
                         else
                         {
@@ -1099,7 +1206,17 @@ public sealed class GvSipTransport : IAsyncDisposable
             }
         };
 
-        await _wsChannel.ConnectAsync(ct).ConfigureAwait(false);
+        // Subscribe and remember the handlers so they can be unsubscribed on the next
+        // register / teardown (the old channel is also disposed, but explicit -= avoids
+        // any chance of a stale channel firing into the transport after teardown).
+        channel.MessageReceived += messageHandler;
+        _currentMessageHandler = messageHandler;
+
+        EventHandler<WebSocketClosedEventArgs> closedHandler = OnChannelClosed;
+        channel.Closed += closedHandler;
+        _currentClosedHandler = closedHandler;
+
+        await channel.ConnectAsync(ct).ConfigureAwait(false);
 
         // Store credentials for INVITE
         _credentials = creds;
@@ -1116,16 +1233,267 @@ public sealed class GvSipTransport : IAsyncDisposable
         _logger.LogInformation("Sending SIP REGISTER (no auth):\n{Register}", reg1);
 #pragma warning restore CA1848, CA1873
 
-        await _wsChannel.SendAsync(reg1, ct).ConfigureAwait(false);
+        await channel.SendAsync(reg1, ct).ConfigureAwait(false);
 
         // Wait for 401 or 200
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+        timeoutCts.CancelAfter(_options.RegisterTimeout);
 
         var success = await regTcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
         if (!success)
         {
             throw new InvalidOperationException("SIP REGISTER failed");
+        }
+    }
+
+    /// <summary>
+    /// Unsubscribe the current channel's handlers and dispose it. Safe to call when no
+    /// channel exists. Stops the keep-alive timer too (it is restarted on the next REGISTER).
+    /// </summary>
+    private async Task TeardownChannelAsync()
+    {
+        StopKeepAlive();
+
+        var channel = _wsChannel;
+        if (channel is null)
+            return;
+
+        if (_currentMessageHandler is not null)
+            channel.MessageReceived -= _currentMessageHandler;
+        if (_currentClosedHandler is not null)
+            channel.Closed -= _currentClosedHandler;
+        _currentMessageHandler = null;
+        _currentClosedHandler = null;
+
+        try
+        {
+            await channel.CloseAsync().ConfigureAwait(false);
+        }
+#pragma warning disable CA1031
+        catch (Exception ex)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug(ex, "Error closing previous WebSocket channel during teardown");
+#pragma warning restore CA1848, CA1873
+        }
+#pragma warning restore CA1031
+
+        channel.Dispose();
+        _wsChannel = null;
+    }
+
+    /// <summary>
+    /// Handles an unexpected channel close: marks unregistered, stops keep-alive, and kicks
+    /// the single-flight reconnect loop. Intentional closes (our own CloseAsync) are ignored.
+    /// </summary>
+    private void OnChannelClosed(object? sender, WebSocketClosedEventArgs e)
+    {
+        if (e.WasIntentional)
+            return; // we closed it on purpose (reconnect/teardown/dispose)
+
+        if (_disposed || _lifetimeCts.IsCancellationRequested)
+            return;
+
+        _registered = false;
+        StopKeepAlive();
+
+        if (_activeCalls.IsEmpty)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning("SIP WebSocket dropped unexpectedly ({Desc}) — reconnecting", e.Description ?? "no detail");
+#pragma warning restore CA1848, CA1873
+        }
+        else
+        {
+            // OQ2: reconnect SIGNALING only; leave the active call's RTCPeerConnection /
+            // DTLS-SRTP media alone (media is peer-to-peer and can outlive a signaling gap).
+            // TODO(follow-up): optionally tear down the active call so the user isn't left
+            // on a dead line if the media also dies. See plan §2 Part B.5 / OQ2.
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "SIP WebSocket dropped MID-CALL ({Desc}) — reconnecting signaling; " +
+                "leaving {ActiveCalls} active call(s)' media untouched",
+                e.Description ?? "no detail", _activeCalls.Count);
+#pragma warning restore CA1848, CA1873
+        }
+
+        // Fire-and-forget; single-flight guarded inside ReconnectLoopAsync.
+        _ = ReconnectLoopAsync(_lifetimeCts.Token);
+    }
+
+    /// <summary>
+    /// Single-flight reconnect with capped exponential backoff + jitter. Retries indefinitely
+    /// (Google may be briefly unreachable; the phone must still ring) until a REGISTER succeeds
+    /// or the transport is disposed/cancelled. All reconnect triggers (Closed event, keep-alive
+    /// send failure, an outbound call's EnsureRegisteredAsync) funnel through here so there is
+    /// exactly one in-flight reconnect — no parallel reconnect path.
+    /// </summary>
+    private async Task ReconnectLoopAsync(CancellationToken ct)
+    {
+        // Single-flight guard: only one reconnect runs at a time.
+        if (Interlocked.CompareExchange(ref _reconnecting, 1, 0) != 0)
+            return;
+
+        try
+        {
+            var schedule = _options.BackoffScheduleSeconds;
+            var attempt = 0;
+            while (!ct.IsCancellationRequested && !_disposed)
+            {
+                try
+                {
+                    await RegisterAsync(ct).ConfigureAwait(false);
+                    if (_registered)
+                    {
+#pragma warning disable CA1848, CA1873
+                        _logger.LogInformation("SIP reconnect succeeded after {Attempts} attempt(s)", attempt + 1);
+#pragma warning restore CA1848, CA1873
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+#pragma warning disable CA1031
+                catch (Exception ex)
+                {
+#pragma warning disable CA1848, CA1873
+                    _logger.LogWarning(ex, "SIP reconnect attempt {Attempt} failed", attempt + 1);
+#pragma warning restore CA1848, CA1873
+                }
+#pragma warning restore CA1031
+
+                // Capped exponential backoff with ±jitter.
+                var idx = Math.Min(attempt, schedule.Count - 1);
+                var baseSeconds = schedule[idx];
+                var jitter = 1.0 + ((Random.Shared.NextDouble() * 2 - 1) * _options.BackoffJitterFraction);
+                var delay = TimeSpan.FromSeconds(Math.Max(0.0, baseSeconds * jitter));
+                attempt++;
+
+                try
+                {
+                    await Task.Delay(delay, _timeProvider, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _reconnecting, 0);
+        }
+    }
+
+    private void RaiseAuthenticationFailed(string reason) =>
+        AuthenticationFailed?.Invoke(this, new AuthenticationFailedEventArgs(reason));
+
+    /// <summary>
+    /// Parse the RFC 6223 <c>keep=&lt;n&gt;</c> recommended keep-alive frequency (seconds) from
+    /// the first Via header of a REGISTER 200-OK. Returns the configured default
+    /// (<see cref="ReconnectOptions.DefaultKeepAliveSeconds"/>) when the parameter is absent,
+    /// flag-only, or unparseable.
+    /// </summary>
+    internal int ParseKeepInterval(string message) => ParseKeepInterval(message, _options.DefaultKeepAliveSeconds);
+
+    /// <summary>Pure helper for parsing the RFC 6223 keep= Via parameter; testable with an explicit default.</summary>
+    internal static int ParseKeepInterval(string message, int defaultSeconds)
+    {
+        if (string.IsNullOrEmpty(message))
+            return defaultSeconds;
+
+        // Find the first Via header line.
+        var viaIdx = message.IndexOf("Via:", StringComparison.OrdinalIgnoreCase);
+        if (viaIdx < 0)
+            return defaultSeconds;
+
+        var lineEnd = message.IndexOf("\r\n", viaIdx, StringComparison.Ordinal);
+        var viaLine = lineEnd < 0 ? message[viaIdx..] : message[viaIdx..lineEnd];
+
+        // Look for ";keep=<n>" (RFC 6223). A bare ";keep" flag (no value) is not a frequency.
+        var keepIdx = viaLine.IndexOf("keep=", StringComparison.OrdinalIgnoreCase);
+        if (keepIdx < 0)
+            return defaultSeconds;
+
+        var valueStart = keepIdx + "keep=".Length;
+        var end = valueStart;
+        while (end < viaLine.Length && char.IsDigit(viaLine[end]))
+            end++;
+
+        if (end == valueStart)
+            return defaultSeconds; // "keep=" with non-numeric value
+
+        if (int.TryParse(viaLine.AsSpan(valueStart, end - valueStart),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var keep) && keep > 0)
+        {
+            return keep;
+        }
+
+        return defaultSeconds;
+    }
+
+    /// <summary>
+    /// (Re)start the keep-alive timer. Sends the RFC 5626 §3.5.1 double-CRLF ping every
+    /// <c>max(floor, keep/2)</c> seconds. A send failure is the earliest drop signal → reconnect.
+    /// </summary>
+    private void StartKeepAlive()
+    {
+        StopKeepAlive();
+
+        if (_disposed || _lifetimeCts.IsCancellationRequested)
+            return;
+
+        var keep = _keepAliveIntervalSeconds > 0 ? _keepAliveIntervalSeconds : _options.DefaultKeepAliveSeconds;
+        var periodSeconds = Math.Max(_options.KeepAliveFloorSeconds, keep / 2);
+        var period = TimeSpan.FromSeconds(periodSeconds);
+
+#pragma warning disable CA1848, CA1873
+        _logger.LogInformation("Keep-alive armed: keep={Keep}s, pinging every {Period}s", keep, periodSeconds);
+#pragma warning restore CA1848, CA1873
+
+        _keepAliveTimer = _timeProvider.CreateTimer(_ => SendKeepAlivePing(), null, period, period);
+    }
+
+    private void StopKeepAlive()
+    {
+        _keepAliveTimer?.Dispose();
+        _keepAliveTimer = null;
+    }
+
+    private void SendKeepAlivePing()
+    {
+        var channel = _wsChannel;
+        if (channel is null || !channel.IsConnected || _disposed || _lifetimeCts.IsCancellationRequested)
+            return;
+
+        _ = SendKeepAlivePingAsync(channel);
+    }
+
+    private async Task SendKeepAlivePingAsync(ISipWebSocketChannel channel)
+    {
+        try
+        {
+            await channel.SendPingAsync(_lifetimeCts.Token).ConfigureAwait(false);
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug("Sent keep-alive ping (double-CRLF)");
+#pragma warning restore CA1848, CA1873
+        }
+        catch (OperationCanceledException) { /* shutting down */ }
+#pragma warning disable CA1031
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            // A failed ping means the link is dead — trigger reconnect (single-flight guarded).
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(ex, "Keep-alive ping failed — treating link as dropped, reconnecting");
+#pragma warning restore CA1848, CA1873
+            _registered = false;
+            StopKeepAlive();
+            if (!_disposed && !_lifetimeCts.IsCancellationRequested)
+                _ = ReconnectLoopAsync(_lifetimeCts.Token);
         }
     }
 
@@ -1218,20 +1586,46 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+            return;
+        _disposed = true;
+
+        // Cancel lifetime so the keep-alive timer + any in-flight reconnect loop stop.
+        try { await _lifetimeCts.CancelAsync().ConfigureAwait(false); }
+#pragma warning disable CA1031
+        catch (Exception ex)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug(ex, "Error cancelling lifetime CTS during dispose");
+#pragma warning restore CA1848, CA1873
+        }
+#pragma warning restore CA1031
+
+        StopKeepAlive();
+
         foreach (var session in _activeCalls.Values)
         {
             session.Dispose();
         }
         _activeCalls.Clear();
 
-        // _userAgent and _sipTransport not used in current implementation
-        if (_wsChannel is not null)
+        // Unsubscribe handlers + close/dispose the channel.
+        var channel = _wsChannel;
+        if (channel is not null)
         {
-            await _wsChannel.CloseAsync().ConfigureAwait(false);
-            _wsChannel.Dispose();
+            if (_currentMessageHandler is not null)
+                channel.MessageReceived -= _currentMessageHandler;
+            if (_currentClosedHandler is not null)
+                channel.Closed -= _currentClosedHandler;
+            _currentMessageHandler = null;
+            _currentClosedHandler = null;
+
+            await channel.CloseAsync().ConfigureAwait(false);
+            channel.Dispose();
+            _wsChannel = null;
         }
 
-        await Task.CompletedTask.ConfigureAwait(false);
+        _lifetimeCts.Dispose();
     }
 }
 
