@@ -149,4 +149,95 @@ public class SipAdapterTests
         Assert.Equal(5004, port);
         Assert.Equal("192.168.86.22", ip);
     }
+
+    // ---------------------------------------------------------------------
+    // 200 OK answer to an HT801 outbound-call INVITE (the UAS path).
+    //
+    // Regression coverage for the malformed 200 OK that left outbound calls
+    // with 0 RTP in both directions: the response carried an SDP body and a
+    // Content-Length but no Content-Type, so the HT801 silently discarded the
+    // SDP and never learned RotaryPhone's RTP port (49000). SIPSorcery's Body
+    // setter does NOT set Content-Type; it must be set explicitly. A
+    // dialog-establishing 2xx also MUST carry a To-tag (RFC 3261 §12.1.1).
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Builds a representative HT801 outbound-call INVITE: a To header with no
+    /// tag (as a UAC's initial INVITE has) and a G.711 SDP offer.
+    /// </summary>
+    private static SIPSorcery.SIP.SIPRequest BuildHT801OutboundInvite()
+    {
+        var targetUri = SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:9193718044@192.168.86.50:5060");
+        var fromHeader = new SIPSorcery.SIP.SIPFromHeader(
+            "rotaryphone",
+            SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:rotaryphone@192.168.86.250:5060"),
+            SIPSorcery.SIP.CallProperties.CreateNewTag());
+        // UAC's initial INVITE: To header carries NO tag.
+        var toHeader = new SIPSorcery.SIP.SIPToHeader(null, targetUri, null);
+
+        var invite = SIPSorcery.SIP.SIPRequest.GetRequest(
+            SIPSorcery.SIP.SIPMethodsEnum.INVITE, targetUri, toHeader, fromHeader);
+
+        invite.Header.ContentType = "application/sdp";
+        invite.Body =
+            "v=0\r\n" +
+            "o=- 12345 12345 IN IP4 192.168.86.250\r\n" +
+            "s=GrandStream\r\n" +
+            "c=IN IP4 192.168.86.250\r\n" +
+            "t=0 0\r\n" +
+            "m=audio 5004 RTP/AVP 0 101\r\n" +
+            "a=rtpmap:0 PCMU/8000\r\n" +
+            "a=sendrecv\r\n";
+        return invite;
+    }
+
+    [Fact]
+    public void BuildInviteOkResponse_SetsContentTypeApplicationSdp()
+    {
+        var invite = BuildHT801OutboundInvite();
+
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+
+        // The whole point of the fix: a 200 OK with an SDP body MUST declare
+        // Content-Type: application/sdp or the HT801 ignores the SDP.
+        Assert.Equal("application/sdp", response.Header.ContentType);
+    }
+
+    [Fact]
+    public void BuildInviteOkResponse_CarriesSdpBodyWithBridgeRtpPort()
+    {
+        var invite = BuildHT801OutboundInvite();
+
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+
+        Assert.False(string.IsNullOrEmpty(response.Body));
+        // SDP must advertise the bridge bind port (49000) and our local IP so the
+        // HT801 sends its RTP to the right destination.
+        Assert.Contains("m=audio 49000 RTP/AVP", response.Body);
+        Assert.Contains("c=IN IP4 192.168.86.50", response.Body);
+    }
+
+    [Fact]
+    public void BuildInviteOkResponse_AddsNonEmptyToTag()
+    {
+        var invite = BuildHT801OutboundInvite();
+        Assert.True(string.IsNullOrEmpty(invite.Header.To.ToTag)); // precondition: UAC INVITE has no To-tag
+
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+
+        // A UAS MUST add a To-tag to a dialog-establishing 2xx (RFC 3261 §12.1.1).
+        Assert.False(string.IsNullOrEmpty(response.Header.To.ToTag));
+    }
+
+    [Fact]
+    public void BuildInviteOkResponse_Returns200OkWithContactHeader()
+    {
+        var invite = BuildHT801OutboundInvite();
+
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+
+        Assert.Equal(SIPSorcery.SIP.SIPResponseStatusCodesEnum.Ok, response.Status);
+        Assert.NotNull(response.Header.Contact);
+        Assert.NotEmpty(response.Header.Contact);
+    }
 }
