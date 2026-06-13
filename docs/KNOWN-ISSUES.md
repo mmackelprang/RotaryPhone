@@ -1,5 +1,28 @@
 # Known Issues
 
+## Outbound: bridge started at placement → errno-101 blip + early-audio clipping (RESOLVED 2026-06-13)
+
+**Status:** ✅ Resolved by the outbound InCall-ordering PR (`fix/outbound-incall-ordering`).
+**Symptom (was):** On an outbound call (rotary → cell), the HT801↔GV audio bridge started and the
+state flipped to `InCall` at call *placement* — roughly 6–10s before the far end actually answered.
+This streamed audio while the far end was still ringing (potential clipped first syllable) and produced
+a one-shot `errno-101` "Network is unreachable" cold-send blip as RTP was pushed before the peer was up.
+The genuine answer signal (GV `CallStatusType.Active` → `OnCallAnswered`) was ignored for outbound
+because the answer handler guarded on `Ringing` and the call was already `InCall`.
+**Note:** This was NOT the 0-RTP / one-way-audio bug — that was fixed separately by the HT801
+`Content-Type: application/sdp` fix (PR #35) and the outbound-RTP-port-from-INVITE-SDP fix (PR #34),
+both shipped and UAT-verified. This ordering fix is purely about *when* the (working) bridge starts.
+**Fix:** `PlaceGvCallAsync` now stays in `Dialing` after sending the GV INVITE (stashing the negotiated
+RTP details), and defers both the bridge-start and the `InCall` transition to the GV-answered path.
+`HandleCallAnsweredOnCellPhone` gained an outbound-`Dialing` branch that starts the bridge and goes
+`InCall` when `Active` arrives — mirroring the proven BT outbound path (`HandleDeviceCallActive`). A
+~45s outbound no-answer timeout resets a never-answered call cleanly to `Idle`. The bridge-start is
+idempotent (guarded by `_outboundConnectPending`) so a duplicate `Active` (e.g. re-INVITE 200 OK)
+starts it at most once.
+**Verify in UAT:** Outbound two-way audio still works; no early audio/clipping before answer;
+`State changed to: InCall` now logs at answer time (not ~6–10s earlier at placement); the `errno-101`
+cold-send blip is gone (or, if present, a single benign blip). Inbound ring + answer unaffected.
+
 ## GV BYE not terminating calls (2026-05-25)
 
 **Status:** Workaround in place (SRTP media teardown forces Google timeout)

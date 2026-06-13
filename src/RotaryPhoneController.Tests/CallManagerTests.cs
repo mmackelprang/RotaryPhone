@@ -274,4 +274,210 @@ public class CallManagerTests
         // Assert — number should be accepted (not filtered by non-numeric guard)
         Assert.Equal(number, _callManager.DialedNumber);
     }
+
+    #region Outbound GV InCall-ordering (defer bridge-start/InCall until cell answers)
+
+    /// <summary>
+    /// Builds a CallManager bound to a mock GV adapter, plus the registry/adapter mocks
+    /// so tests can drive the outbound answer event (OnCallAnswered).
+    /// outboundDialingTimeout lets the no-answer timeout test run fast.
+    /// </summary>
+    private (CallManager Cm, Mock<ICallAdapter> Adapter, Mock<ICallAdapterRegistry> Registry) BuildGvCallManager(
+        TimeSpan? outboundDialingTimeout = null)
+    {
+        var mockAdapterRegistry = new Mock<ICallAdapterRegistry>();
+        var mockAdapter = new Mock<ICallAdapter>();
+        mockAdapter.Setup(a => a.Mode).Returns(CallAdapterMode.GVApi);
+        mockAdapter.Setup(a => a.PlaceCallAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("call-123");
+        mockAdapter.Setup(a => a.OnCallAnsweredOnRotaryPhoneAsync()).Returns(Task.CompletedTask);
+        mockAdapterRegistry.Setup(r => r.ActiveAdapter).Returns(mockAdapter.Object);
+
+        var cm = new CallManager(
+            _mockSipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            adapterRegistry: mockAdapterRegistry.Object,
+            outboundDialingTimeout: outboundDialingTimeout
+        );
+        cm.Initialize();
+        return (cm, mockAdapter, mockAdapterRegistry);
+    }
+
+    [Fact]
+    public void Outbound_AfterPlaceCall_StaysDialing_UntilAnswered()
+    {
+        // Arrange
+        var (cm, adapter, _) = BuildGvCallManager();
+
+        // Act — off-hook then dial (digits-while-idle path also routes here)
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+
+        // Assert — PlaceCallAsync was invoked, but we remain in Dialing and the
+        // audio bridge has NOT started yet (deferred to the GV answer).
+        adapter.Verify(a => a.PlaceCallAsync("9193718044", It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Equal(CallState.Dialing, cm.CurrentState);
+        Assert.Null(cm.CallStartedAtUtc);
+        adapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Never);
+    }
+
+    [Fact]
+    public void Outbound_OnGvActive_StartsBridge_AndGoesInCall()
+    {
+        // Arrange — place the call first (stays Dialing)
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+        Assert.Equal(CallState.Dialing, cm.CurrentState);
+
+        // Act — GV signals the cell answered (CallStatusType.Active → OnCallAnswered)
+        adapter.Raise(a => a.OnCallAnswered += null);
+
+        // Assert — now we start the bridge and go InCall
+        Assert.Equal(CallState.InCall, cm.CurrentState);
+        Assert.NotNull(cm.CallStartedAtUtc);
+        adapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Once);
+    }
+
+    [Fact]
+    public void Outbound_OnGvActive_DoesNotCancelInvite()
+    {
+        // Arrange
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+
+        // Act — answer
+        adapter.Raise(a => a.OnCallAnswered += null);
+
+        // Assert — the HT801 INVITE leg must stay up (it was already 200-OK'd);
+        // CancelPendingInvite is the inbound-stop-ringing action and must NOT fire here.
+        _mockSipAdapter.Verify(s => s.CancelPendingInvite(), Times.Never);
+    }
+
+    [Fact]
+    public void Outbound_DuplicateGvActive_StartsBridgeOnce()
+    {
+        // Arrange
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+
+        // Act — GV emits Active more than once (e.g. re-INVITE 200 OK)
+        adapter.Raise(a => a.OnCallAnswered += null);
+        adapter.Raise(a => a.OnCallAnswered += null);
+
+        // Assert — bridge starts exactly once, state stays InCall
+        Assert.Equal(CallState.InCall, cm.CurrentState);
+        adapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Once);
+    }
+
+    [Fact]
+    public async Task Outbound_PlacementFailure_ResetsToIdle()
+    {
+        // Arrange — adapter throws on PlaceCallAsync
+        var mockAdapterRegistry = new Mock<ICallAdapterRegistry>();
+        var mockAdapter = new Mock<ICallAdapter>();
+        mockAdapter.Setup(a => a.Mode).Returns(CallAdapterMode.GVApi);
+        mockAdapter.Setup(a => a.PlaceCallAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        mockAdapterRegistry.Setup(r => r.ActiveAdapter).Returns(mockAdapter.Object);
+
+        var cm = new CallManager(
+            _mockSipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            adapterRegistry: mockAdapterRegistry.Object
+        );
+        cm.Initialize();
+
+        // Act
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+
+        // PlaceGvCallAsync is fire-and-forget; its catch resets to Idle on a continuation
+        // thread. Poll briefly for the state change rather than asserting synchronously.
+        await WaitForStateAsync(cm, CallState.Idle, TimeSpan.FromSeconds(2));
+
+        // Assert — existing catch resets to Idle; bridge never started
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        mockAdapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Never);
+    }
+
+    /// <summary>Polls until the CallManager reaches the expected state or the deadline elapses.</summary>
+    private static async Task WaitForStateAsync(CallManager cm, CallState expected, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (cm.CurrentState != expected && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
+    public async Task Outbound_NoAnswer_TimesOutToIdle()
+    {
+        // Arrange — short outbound-dialing timeout so the test is fast
+        var (cm, adapter, _) = BuildGvCallManager(outboundDialingTimeout: TimeSpan.FromMilliseconds(150));
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+        Assert.Equal(CallState.Dialing, cm.CurrentState);
+
+        // Act — never raise OnCallAnswered; wait past the timeout
+        await Task.Delay(500);
+
+        // Assert — clean return to Idle, bridge never started
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        adapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Never);
+    }
+
+    [Fact]
+    public async Task Outbound_AnswerBeforeTimeout_DoesNotResetToIdle()
+    {
+        // Arrange — short timeout, but answer arrives first
+        var (cm, adapter, _) = BuildGvCallManager(outboundDialingTimeout: TimeSpan.FromMilliseconds(300));
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+
+        // Act — answer well before the timeout, then wait past it
+        adapter.Raise(a => a.OnCallAnswered += null);
+        Assert.Equal(CallState.InCall, cm.CurrentState);
+        await Task.Delay(600);
+
+        // Assert — timeout was cancelled on answer; stays InCall
+        Assert.Equal(CallState.InCall, cm.CurrentState);
+    }
+
+    [Fact]
+    public void Outbound_HangUpMidDialing_ResetsToIdle_AndClearsPending()
+    {
+        // Arrange — place call (Dialing), then hang up before answer
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.HandleHookChange(true);
+        cm.HandleDigitsReceived("9193718044");
+        Assert.Equal(CallState.Dialing, cm.CurrentState);
+
+        // Act — on-hook before the cell answers
+        cm.HandleHookChange(false);
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+
+        // A late/duplicate GV Active after hangup must NOT start a bridge or
+        // mis-route the next call (pending flag cleared on hangup).
+        adapter.Raise(a => a.OnCallAnswered += null);
+
+        // Assert
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        adapter.Verify(a => a.OnCallAnsweredOnRotaryPhoneAsync(), Times.Never);
+    }
+
+    #endregion
 }

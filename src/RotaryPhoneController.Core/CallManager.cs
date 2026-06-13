@@ -18,11 +18,32 @@ public class CallManager
     private ICallAdapter? _boundAdapter;
     private readonly int _rtpPort;
     private CancellationTokenSource? _ringingTimeoutCts;
+    private CancellationTokenSource? _outboundDialingTimeoutCts;
+    private readonly TimeSpan _outboundDialingTimeout;
     private CallState _currentState;
     private string _dialedNumber = string.Empty;
     private CallHistoryEntry? _currentCallHistory;
     private bool _isHangingUp;
     private string? _activeDeviceAddress;
+
+    // Set to 1 after an outbound GV INVITE is placed; the call stays in Dialing until
+    // GV signals the cell answered (CallStatusType.Active -> OnCallAnswered). Distinguishes
+    // an outbound-placed Dialing call from an inbound-ringing one in the answer handler.
+    //
+    // Two threads race to act on the pending outbound call — the GV-answer event (may also
+    // fire more than once, e.g. on a re-INVITE 200 OK) and the no-answer timeout continuation
+    // (TaskScheduler.Default thread). Both go through TryClaimOutboundConnect(), which uses
+    // Interlocked.CompareExchange(1 -> 0) so EXACTLY ONE caller wins. This makes the
+    // bridge-start idempotent AND closes the TOCTOU window where a late timeout could
+    // HangUp() a call the answer path just bridged.
+    private int _outboundConnectPending;
+
+    /// <summary>
+    /// Atomically claims the pending outbound connect. Returns true to exactly one caller
+    /// (answer event OR no-answer timeout); all subsequent callers get false.
+    /// </summary>
+    private bool TryClaimOutboundConnect() =>
+        Interlocked.CompareExchange(ref _outboundConnectPending, 0, 1) == 1;
 
     // RTP port details negotiated from HT801's 200 OK SDP response
     private int? _negotiatedRtpPort;
@@ -75,7 +96,8 @@ public class CallManager
         int rtpPort = 49000,
         ICallHistoryService? callHistoryService = null,
         IBluetoothDeviceManager? deviceManager = null,
-        ICallAdapterRegistry? adapterRegistry = null)
+        ICallAdapterRegistry? adapterRegistry = null,
+        TimeSpan? outboundDialingTimeout = null)
     {
         _sipAdapter = sipAdapter;
         _bluetoothAdapter = bluetoothAdapter;
@@ -86,6 +108,10 @@ public class CallManager
         _callHistoryService = callHistoryService;
         _deviceManager = deviceManager;
         _adapterRegistry = adapterRegistry;
+        // If an outbound GV call is placed but never reaches Active (cell never answers),
+        // reset cleanly to Idle after this timeout so the call doesn't hang in Dialing.
+        // Default ~45s; injectable for fast, deterministic unit tests.
+        _outboundDialingTimeout = outboundDialingTimeout ?? TimeSpan.FromSeconds(45);
         _currentState = CallState.Idle;
     }
 
@@ -391,6 +417,34 @@ public class CallManager
     {
         _logger.LogInformation("Call answered on cell phone device");
 
+        // OUTBOUND (GV) answered: the cell we dialed picked up. The call has been sitting
+        // in Dialing since placement (PlaceGvCallAsync deferred the bridge-start). Start the
+        // HT801<->GV audio bridge NOW and transition to InCall. Mirrors the proven BT outbound
+        // path (HandleDeviceCallActive). TryClaimOutboundConnect() atomically wins the pending
+        // connect exactly once, so a duplicate Active (e.g. re-INVITE 200 OK) — or a racing
+        // no-answer timeout — cannot double-start the bridge.
+        if (CurrentState == CallState.Dialing && TryClaimOutboundConnect())
+        {
+            _outboundDialingTimeoutCts?.Cancel();
+
+            _logger.LogInformation(
+                "Outbound GV call answered on cell — starting audio bridge " +
+                "(HT801 RTP={Ip}:{Port}, localRtpPort={LocalPort})",
+                _negotiatedRtpIp ?? "(null)", _negotiatedRtpPort?.ToString() ?? "(null)", _rtpPort);
+
+            // Negotiated RTP was already stashed at placement (PlaceGvCallAsync). Do NOT
+            // CancelPendingInvite here — the HT801 leg was already answered with 200 OK and
+            // must stay up to carry audio.
+            if (_boundAdapter != null)
+            {
+                _ = _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
+            }
+
+            CallStartedAtUtc = DateTime.UtcNow;
+            CurrentState = CallState.InCall;
+            return;
+        }
+
         if (CurrentState != CallState.Ringing)
         {
             _logger.LogWarning("Call answered on cell phone but not in Ringing state. Current state: {State}", CurrentState);
@@ -602,10 +656,13 @@ public class CallManager
 
     /// <summary>
     /// Places an outbound call through the Google Voice adapter.
-    /// After PlaceCallAsync returns a call ID, sets negotiated RTP details and starts
-    /// the audio bridge. For outbound calls the HT801 handset is already off-hook
-    /// (user lifted it to dial), so the audio bridge must start immediately — unlike
-    /// incoming calls where OnCallAnsweredOnRotaryPhoneAsync fires when the handset is lifted.
+    /// After PlaceCallAsync returns a call ID, the negotiated RTP details are stashed but the
+    /// call stays in Dialing — the audio bridge start and the InCall transition are DEFERRED
+    /// until GV signals the cell actually answered (CallStatusType.Active -> OnCallAnswered ->
+    /// HandleCallAnsweredOnCellPhone). Starting the bridge at placement (before the far end is
+    /// up) streamed early audio and produced a one-shot errno-101 cold-send blip. Deferring it
+    /// mirrors the proven BT outbound path (HandleDeviceCallActive: Dialing -> InCall on
+    /// call_active). A no-answer timeout resets to Idle if Active never arrives.
     /// </summary>
     private async Task PlaceGvCallAsync(string number)
     {
@@ -616,25 +673,53 @@ public class CallManager
 
             // The HT801's outbound INVITE was already answered by SIPSorceryAdapter with
             // an SDP containing _rtpPort (49000). HT801 is sending RTP to that port.
-            // Pass the negotiated RTP details so the audio bridge binds correctly.
+            // Stash the negotiated RTP details NOW so the audio bridge can bind correctly
+            // when it actually starts (on GV answer). The details are captured here but only
+            // CONSUMED at answer time.
             _boundAdapter.SetNegotiatedRtpDetails(_negotiatedRtpPort, _negotiatedRtpIp, _rtpPort);
 
-            // Start the audio bridge (HT801 <-> GV). For incoming calls this happens in
-            // AnswerCall -> OnCallAnsweredOnRotaryPhoneAsync, but for outbound the handset
-            // is already off-hook so we trigger it directly.
+            // Stay in Dialing. The bridge-start + InCall now happen in
+            // HandleCallAnsweredOnCellPhone when GV reports the cell answered (Active).
+            // Arm the pending flag BEFORE starting the timeout so the timeout's claim is valid.
+            Volatile.Write(ref _outboundConnectPending, 1);
+            StartOutboundDialingTimeout(number);
             _logger.LogInformation(
-                "Starting GV audio bridge for outbound call (HT801 RTP={Ip}:{Port}, localRtpPort={LocalPort})",
+                "Outbound GV call placed — staying Dialing until cell answers " +
+                "(negotiated HT801 RTP={Ip}:{Port}, localRtpPort={LocalPort})",
                 _negotiatedRtpIp ?? "(null)", _negotiatedRtpPort?.ToString() ?? "(null)", _rtpPort);
-            await _boundAdapter.OnCallAnsweredOnRotaryPhoneAsync();
-
-            CallStartedAtUtc = DateTime.UtcNow;
-            CurrentState = CallState.InCall;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to place GV outbound call to {Number}", number);
+            Volatile.Write(ref _outboundConnectPending, 0);
+            _outboundDialingTimeoutCts?.Cancel();
             CurrentState = CallState.Idle;
         }
+    }
+
+    /// <summary>
+    /// Starts (or restarts) the outbound no-answer timeout. If an outbound GV call placed in
+    /// Dialing never reaches Active within _outboundDialingTimeout, hang up cleanly so the
+    /// state machine doesn't sit in Dialing forever. Cancelled on answer and on hangup.
+    /// </summary>
+    private void StartOutboundDialingTimeout(string number)
+    {
+        _outboundDialingTimeoutCts?.Cancel();
+        _outboundDialingTimeoutCts = new CancellationTokenSource();
+        var cts = _outboundDialingTimeoutCts;
+        _ = Task.Delay(_outboundDialingTimeout, cts.Token).ContinueWith(t =>
+        {
+            // TryClaimOutboundConnect() atomically wins the pending connect. If the answer
+            // event already claimed it (the call was just bridged), this returns false and we
+            // do NOT tear down a live call — closing the timeout-vs-answer TOCTOU window.
+            if (!t.IsCanceled && CurrentState == CallState.Dialing && TryClaimOutboundConnect())
+            {
+                _logger.LogWarning(
+                    "Outbound dialing timeout ({Seconds:N0}s) — cell never answered {Number}, resetting to Idle",
+                    _outboundDialingTimeout.TotalSeconds, number);
+                HangUp();
+            }
+        }, TaskScheduler.Default);
     }
 
     public void HangUp()
@@ -647,6 +732,7 @@ public class CallManager
 
         _isHangingUp = true;
         _ringingTimeoutCts?.Cancel();
+        _outboundDialingTimeoutCts?.Cancel();
         _logger.LogInformation("Hanging up");
         var previousState = CurrentState;
 
@@ -690,6 +776,7 @@ public class CallManager
             _activeDeviceAddress = null;
             _negotiatedRtpPort = null;
             _negotiatedRtpIp = null;
+            Volatile.Write(ref _outboundConnectPending, 0);
             _logger.LogInformation("Call terminated. State reset. Previous state was: {PreviousState}", previousState);
         }
         finally

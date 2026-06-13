@@ -252,6 +252,21 @@ curl -X PUT http://radio:5004/api/gvbridge/adapter/mode \
 2. Enter a phone number and click "Dial via GV Trunk"
 3. **Expected:** The GV web UI initiates the call
 
+#### Outbound state transitions (GV modes)
+
+As of `fix/outbound-incall-ordering`, an outbound GV call (rotary → cell) stays in **`Dialing`**
+after the INVITE is placed and only transitions to **`InCall`** — starting the HT801↔GV audio
+bridge — when Google Voice reports the cell actually answered (`CallStatusType.Active`). This
+mirrors the Bluetooth outbound path. Previously the bridge started and the state flipped to
+`InCall` at *placement* (~6–10s early), which streamed audio before the far end was up and caused
+a one-shot `errno-101` cold-send blip.
+
+- **What to watch in the log:** `State changed to: InCall` should appear at *answer* time, not at
+  dial time. Between dialing and answer the rotary earpiece should carry no GV audio.
+- **No-answer timeout:** if the cell never answers, the call resets cleanly to `Idle` after ~45s.
+- **Hang up mid-ring:** placing the handset on-hook before answer returns to `Idle` with no stuck
+  bridge.
+
 ---
 
 ## Step 7: Test SMS
