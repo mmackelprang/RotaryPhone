@@ -267,10 +267,6 @@ public class SIPSorceryAdapter : ISipAdapter
                 return;
             }
 
-            // Always answer the INVITE to establish the SIP dialog and stop
-            // the HT801 from retransmitting.
-            var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
-
             // Resolve actual local IP when listening on 0.0.0.0 — the SDP must
             // contain a routable IP so HT801 knows where to send its RTP.
             // Without this, the SDP has c=IN IP4 0.0.0.0 which is a hold indicator
@@ -282,18 +278,13 @@ public class SIPSorceryAdapter : ISipAdapter
                 _logger.Information("Resolved local SDP address to {LocalIP} for INVITE response", localIP);
             }
 
-            // Add Contact header to response (required)
-            response.Header.Contact = new List<SIPContactHeader>
-            {
-                new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
-                    SIPEndPoint.ParseSIPEndPoint($"{localIP}:{_localPort}")))
-            };
-
-            // Add SDP to response (negotiate codec)
-            // Use the same RTP port the audio bridge will bind (49000) so HT801
-            // sends its RTP to the correct destination once the bridge starts.
-            var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), 49000);
-            response.Body = CreateBasicSDP(localEndpoint);
+            // Always answer the INVITE to establish the SIP dialog and stop
+            // the HT801 from retransmitting. The 200 OK carries the SDP that tells
+            // the HT801 where to send its RTP (port 49000, the bridge bind port).
+            // The response MUST be well-formed — Content-Type: application/sdp plus
+            // a To-tag — or the HT801 silently discards the SDP, never learns our
+            // RTP port, and never starts its RTP transmitter (0 RTP both ways).
+            var response = BuildInviteOkResponse(sipRequest, localIP, _localPort, 49000);
 
             _logger.Information("INVITE 200 OK SDP: RTP at {IP}:{Port}", localIP, 49000);
 
@@ -604,7 +595,57 @@ public class SIPSorceryAdapter : ISipAdapter
         return (port > 0 ? port : -1, ip);
     }
 
-    private string CreateBasicSDP(SIPEndPoint localEndpoint)
+    /// <summary>
+    /// Builds the 200 OK answer to an HT801 outbound-call INVITE.
+    /// </summary>
+    /// <remarks>
+    /// This is the UAS-side answer. SIPSorcery's <see cref="SIPResponse.Body"/> setter only
+    /// stores the bytes — it does NOT set <c>Content-Type</c> (Content-Length is auto-fixed at
+    /// send time, Content-Type never is). A 200 OK with an SDP body but no
+    /// <c>Content-Type: application/sdp</c> is malformed per RFC 3261 §20.15, and the Grandstream
+    /// HT801 silently ignores the SDP — so it never learns our RTP port and never starts its RTP
+    /// transmitter (0 RTP in both directions). We must set Content-Type explicitly here.
+    ///
+    /// We also add a To-tag: a UAS MUST add a tag to the To header of any 2xx response that
+    /// establishes a dialog (RFC 3261 §12.1.1). The minted tag matches the convention used by
+    /// the UAC INVITE path (<see cref="CallProperties.CreateNewTag"/>).
+    ///
+    /// Extracted as a static, side-effect-free method so the response shape can be unit-tested
+    /// without a live SIP transport.
+    /// </remarks>
+    internal static SIPResponse BuildInviteOkResponse(
+        SIPRequest sipRequest, string localIP, int localPort, int rtpPort)
+    {
+        var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
+
+        // A UAS MUST add a tag to the To header of a dialog-establishing 2xx (RFC 3261 §12.1.1).
+        if (string.IsNullOrEmpty(response.Header.To.ToTag))
+        {
+            response.Header.To.ToTag = CallProperties.CreateNewTag();
+        }
+
+        // Add Contact header to response (required).
+        response.Header.Contact = new List<SIPContactHeader>
+        {
+            new SIPContactHeader(null, new SIPURI(SIPSchemesEnum.sip,
+                SIPEndPoint.ParseSIPEndPoint($"{localIP}:{localPort}")))
+        };
+
+        // Add SDP to response (negotiate codec). Use the same RTP port the audio
+        // bridge will bind so the HT801 sends its RTP to the correct destination
+        // once the bridge starts.
+        var localEndpoint = new SIPEndPoint(SIPProtocolsEnum.udp, IPAddress.Parse(localIP), rtpPort);
+        response.Body = CreateBasicSDP(localEndpoint);
+
+        // CRITICAL: the Body setter does NOT set Content-Type. Without this the
+        // 200 OK is malformed (body + Content-Length but no Content-Type) and the
+        // HT801 discards the SDP. See <remarks>.
+        response.Header.ContentType = "application/sdp";
+
+        return response;
+    }
+
+    private static string CreateBasicSDP(SIPEndPoint localEndpoint)
     {
         // Create a basic SDP for G.711 PCMU (codec 0)
         // RFC 4566 requires \r\n line endings in SDP
