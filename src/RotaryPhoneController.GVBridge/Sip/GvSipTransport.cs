@@ -1270,6 +1270,79 @@ public sealed class GvSipTransport : IAsyncDisposable
                     }
                 }
             }
+            else if (message.StartsWith("CANCEL ", StringComparison.Ordinal))
+            {
+                // Inbound CANCEL — the caller hung up BEFORE the call was answered (RFC 3261 §9).
+                // GV sends this for an inbound INVITE that has not yet been confirmed (no ACK).
+                // Without this branch the CANCEL was silently dropped, no Completed event fired,
+                // and the HT801 kept ringing forever. Mirror the BYE handler above: 200-OK the
+                // CANCEL (echo ALL Via headers) and drive the same teardown chain via Completed.
+                var cancelCallId = ExtractHeaderValue(message, "Call-ID");
+                var cancelToHeader = ExtractHeader(message, "To");
+                var cancelFromHeader = ExtractHeader(message, "From");
+                var cancelVias = ExtractAllHeaders(message, "Via"); // ALL Via headers for proper routing
+                var cancelCSeq = ExtractHeaderValue(message, "CSeq");
+
+#pragma warning disable CA1848, CA1873
+                _logger.LogInformation("Received CANCEL for call {CallId} ({ViaCount} Via headers) — caller hung up before answer, sending 200 OK",
+                    cancelCallId, cancelVias.Count);
+#pragma warning restore CA1848, CA1873
+
+                if (cancelCallId is not null && cancelVias.Count > 0)
+                {
+                    // 1) 200 OK to the CANCEL transaction — must echo ALL Via headers (same as BYE).
+                    var cancelOk = "SIP/2.0 200 OK\r\n";
+                    foreach (var via in cancelVias)
+                    {
+                        cancelOk += $"Via: {via}\r\n";
+                    }
+                    cancelOk +=
+                        $"To: {cancelToHeader}\r\n" +
+                        $"From: {cancelFromHeader}\r\n" +
+                        $"Call-ID: {cancelCallId}\r\n" +
+                        $"CSeq: {cancelCSeq}\r\n" +
+                        $"Content-Length: 0\r\n" +
+                        $"\r\n";
+
+                    _ = SendSipMessageAsync(cancelOk); // 200 OK to CANCEL is critical but we're in an event handler
+
+                    // 2) RFC 3261 §15: terminate the original INVITE transaction with 487.
+                    // The CSeq method on a 487 is INVITE (the request being terminated), not CANCEL.
+                    var inviteCSeq = cancelCSeq is not null
+                        ? cancelCSeq.Replace("CANCEL", "INVITE", StringComparison.OrdinalIgnoreCase)
+                        : cancelCSeq;
+                    var terminated = "SIP/2.0 487 Request Terminated\r\n";
+                    foreach (var via in cancelVias)
+                    {
+                        terminated += $"Via: {via}\r\n";
+                    }
+                    terminated +=
+                        $"To: {cancelToHeader}\r\n" +
+                        $"From: {cancelFromHeader}\r\n" +
+                        $"Call-ID: {cancelCallId}\r\n" +
+                        $"CSeq: {inviteCSeq}\r\n" +
+                        $"Content-Length: 0\r\n" +
+                        $"\r\n";
+
+                    _ = SendSipMessageAsync(terminated);
+
+                    // 3) Drive teardown via the SAME Completed event the BYE path uses. The
+                    // _activeCalls.TryRemove makes this idempotent against a following BYE
+                    // (retransmission / post-answer hangup): only the first removal fires.
+                    // Completed -> GVApiAdapter.OnCallEnded -> CallManager.HangUp ->
+                    // CancelPendingInvite (sends SIP CANCEL to the HT801 so it stops ringing).
+#pragma warning disable CA2000
+                    if (_activeCalls.TryRemove(cancelCallId, out var cancelSession))
+#pragma warning restore CA2000
+                    {
+                        var oldCancelStatus = cancelSession.Status;
+                        cancelSession.Status = CallStatusType.Completed;
+                        CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(cancelCallId, oldCancelStatus, CallStatusType.Completed));
+                        cancelSession.Dispose();
+                        LogCallEnded(_logger, cancelCallId, null);
+                    }
+                }
+            }
             else if (message.StartsWith("INVITE ", StringComparison.Ordinal))
             {
                 HandleIncomingInvite(message);
