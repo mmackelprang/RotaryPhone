@@ -10,13 +10,13 @@
 #   1. Installs Chromium (if needed) — Google Chrome blocks --load-extension
 #   2. Copies the extension to a snap-accessible path
 #   3. Creates a systemd user service for the GV Bridge Chromium instance
-#   4. Installs Chromium policies for notification/autoplay permissions
+#   4. Installs Chromium policies (suppresses notifications, allows autoplay)
 #   5. Creates a desktop shortcut to start the GV Bridge browser
 #   6. Creates an autostart entry as backup
 #
 # After running:
 #   - Start the GV Chrome: systemctl --user start gv-bridge-chrome
-#   - FIRST TIME: Log into Google Voice and grant notification permission
+#   - FIRST TIME: Log into Google Voice (call notifications are suppressed by policy)
 #   - The extension auto-connects to the RotaryPhone server
 # =============================================================================
 
@@ -86,6 +86,7 @@ ExecStart=${CHROME_BIN} \\
     --no-first-run \\
     --disable-default-apps \\
     --disable-popup-blocking \\
+    --disable-notifications \\
     --disable-background-timer-throttling \\
     --disable-renderer-backgrounding \\
     --disable-backgrounding-occluded-windows \\
@@ -112,7 +113,8 @@ log "Installing Chromium notification/autoplay policies..."
 sudo mkdir -p /etc/chromium/policies/managed
 sudo tee /etc/chromium/policies/managed/gv-bridge.json > /dev/null << 'POLICYEOF'
 {
-  "NotificationsAllowedForUrls": ["https://voice.google.com"],
+  "DefaultNotificationsSetting": 2,
+  "NotificationsBlockedForUrls": ["https://voice.google.com"],
   "AutoplayAllowlist": ["https://voice.google.com"]
 }
 POLICYEOF
@@ -137,7 +139,7 @@ cat > "${AUTOSTART_DIR}/gv-bridge-chrome.desktop" << EOF
 [Desktop Entry]
 Name=GV Bridge Chrome
 Comment=Google Voice Bridge for RotaryPhone
-Exec=${CHROME_BIN} --load-extension=${EXTENSION_DEPLOY_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required --mute-audio --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland --remote-debugging-port=9224 https://voice.google.com
+Exec=${CHROME_BIN} --load-extension=${EXTENSION_DEPLOY_DIR} --user-data-dir=${CHROME_PROFILE_DIR} --no-first-run --disable-default-apps --disable-notifications --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required --mute-audio --window-size=800,600 --window-position=10000,10000 --ozone-platform=wayland --remote-debugging-port=9224 https://voice.google.com
 Terminal=false
 Type=Application
 X-GNOME-Autostart-enabled=true
@@ -170,17 +172,20 @@ echo "     systemctl --user daemon-reload && systemctl --user restart gv-bridge-
 echo ""
 echo "  3. Log into Google Voice at voice.google.com"
 echo ""
-echo "  4. Grant notification permission:"
-echo "     Click the lock icon in the address bar → Site settings → Notifications → Allow"
+echo "     NOTE: Desktop call notifications are intentionally suppressed."
+echo "     The managed Chromium policy blocks notifications for voice.google.com"
+echo "     (and --disable-notifications is set), so no permission prompt should"
+echo "     appear. Call detection runs over the .NET SIP transport + extension"
+echo "     DOM observer, so notifications are not needed."
 echo ""
-echo "  5. Move window back off-screen:"
+echo "  4. Move window back off-screen:"
 echo "     Change --window-position back to 10000,10000 and restart"
 echo ""
-echo "  6. Switch to GVBrowser mode:"
+echo "  5. Switch to GVBrowser mode:"
 echo "     curl -X PUT http://localhost:5004/api/gvbridge/adapter/mode \\"
 echo "       -H 'Content-Type: application/json' -d '{\"mode\":\"GVBrowser\"}'"
 echo ""
-echo "  7. Verify:"
+echo "  6. Verify:"
 echo "     curl -s http://localhost:5004/api/gvbridge/status"
 echo "     curl -s http://localhost:5004/api/diagnostics/status | python3 -m json.tool"
 echo ""
