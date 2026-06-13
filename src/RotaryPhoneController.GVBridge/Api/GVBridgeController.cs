@@ -42,13 +42,16 @@ public class GVBridgeController : ControllerBase
     [HttpGet("status")]
     public IActionResult GetStatus()
     {
-        return Ok(new
-        {
-            available = _adapter.IsAvailable,
-            activeMode = _registry.ActiveMode.ToString(),
-            sipRegistered = _adapter.IsSipRegistered,
-            cookiesValid = _adapter.AreCookiesValid
-        });
+        // Typed DTO; the original four field names (available, activeMode, sipRegistered,
+        // cookiesValid) are preserved exactly via [JsonPropertyName] for contract stability.
+        return Ok(new GvBridgeStatusDto(
+            Available: _adapter.IsAvailable,
+            ActiveMode: _registry.ActiveMode.ToString(),
+            SipRegistered: _adapter.IsSipRegistered,
+            WsConnected: _adapter.IsWebSocketConnected,
+            LastConnectedAt: _adapter.SipLastConnectedAt,
+            CookiesValid: _adapter.AreCookiesValid,
+            PsidtsAgeSeconds: _adapter.PsidtsAgeSeconds));
     }
 
     [HttpGet("adapter/mode")]

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace RotaryPhoneController.GVBridge.Api;
 
 /// <summary>
@@ -10,6 +12,22 @@ public record GvCookieStatusDto(
   DateTime? LoadedAt,
   int? CookieCount,
   string? SapisidPrefix);
+
+/// <summary>
+/// Typed response for GET /api/gvbridge/status. Serializes to camelCase JSON.
+/// The first four field NAMES (available, activeMode, sipRegistered, cookiesValid)
+/// are part of the established contract and must not be renamed. WsConnected,
+/// LastConnectedAt, and PsidtsAgeSeconds were added by the keep-alive/reconnect work
+/// so the endpoint reflects real socket + cookie freshness rather than stale flags.
+/// </summary>
+public record GvBridgeStatusDto(
+  [property: JsonPropertyName("available")] bool Available,
+  [property: JsonPropertyName("activeMode")] string ActiveMode,
+  [property: JsonPropertyName("sipRegistered")] bool SipRegistered,
+  [property: JsonPropertyName("wsConnected")] bool WsConnected,
+  [property: JsonPropertyName("lastConnectedAt")] DateTime? LastConnectedAt,
+  [property: JsonPropertyName("cookiesValid")] bool CookiesValid,
+  [property: JsonPropertyName("psidtsAgeSeconds")] long? PsidtsAgeSeconds);
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

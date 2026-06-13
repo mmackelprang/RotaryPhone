@@ -55,6 +55,33 @@ public class GVBridgeControllerTests
   }
 
   [Fact]
+  public void GetStatus_IncludesWsConnectedAndLastConnectedAt()
+  {
+    var controller = CreateController();
+
+    var result = controller.GetStatus();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    // New honest-status fields exist (camelCase JSON).
+    Assert.True(root.TryGetProperty("wsConnected", out var wsConnected));
+    Assert.True(root.TryGetProperty("lastConnectedAt", out var lastConnectedAt));
+
+    // Defaults on an inactive adapter: not connected, no last-connected timestamp.
+    Assert.False(wsConnected.GetBoolean());
+    Assert.Equal(JsonValueKind.Null, lastConnectedAt.ValueKind);
+
+    // The original four fields are still present (contract preserved).
+    Assert.True(root.TryGetProperty("available", out _));
+    Assert.True(root.TryGetProperty("activeMode", out _));
+    Assert.True(root.TryGetProperty("sipRegistered", out _));
+    Assert.True(root.TryGetProperty("cookiesValid", out _));
+  }
+
+  [Fact]
   public void GetCookies_ReturnsAllSixFields()
   {
     var controller = CreateController();

@@ -35,6 +35,9 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     private bool _disposed;
     private bool _areCookiesValid;
 
+    // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
+    private DateTime? _psidtsRefreshedAt;
+
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
     private string? _negotiatedHt801RtpIp;
@@ -45,13 +48,36 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     /// <summary>
     /// Whether the SIP transport is currently registered with Google Voice.
+    /// Honest: backed by IsRegistered, which is now (_registered AND socket connected).
     /// </summary>
     public bool IsSipRegistered => _sipTransport?.IsRegistered ?? false;
+
+    /// <summary>
+    /// Whether the underlying SIP WebSocket is currently connected (independent of registration).
+    /// </summary>
+    public bool IsWebSocketConnected => _sipTransport?.IsConnected ?? false;
+
+    /// <summary>
+    /// UTC timestamp of the most recent successful SIP REGISTER 200-OK, if any.
+    /// </summary>
+    public DateTime? SipLastConnectedAt => _sipTransport?.LastConnectedAt;
 
     /// <summary>
     /// Whether the last cookie health check passed (cookies are still accepted by Google).
     /// </summary>
     public bool AreCookiesValid => _areCookiesValid;
+
+    /// <summary>
+    /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
+    /// based on when they were last loaded or refreshed. Null if no cookie set is loaded.
+    /// Google rotates PSIDTS on its own cadence (minutes–hours); a large age is a hint that
+    /// the next request may 401 with SESSION_COOKIE_INVALID even if the periodic health
+    /// check last passed. Used to make /api/gvbridge/status's cookiesValid less misleading.
+    /// </summary>
+    public long? PsidtsAgeSeconds =>
+        _psidtsRefreshedAt is { } refreshed
+            ? (long)Math.Max(0, (DateTime.UtcNow - refreshed).TotalSeconds)
+            : null;
 
     /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
@@ -141,6 +167,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
         _cookieSet = await _cookieStore.LoadAsync();
         LoadedAt = _cookieSet != null ? DateTime.UtcNow : null;
+        _psidtsRefreshedAt = _cookieSet != null ? DateTime.UtcNow : null;
 
         if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
@@ -243,6 +270,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         _areCookiesValid = false;
         LoadedAt = null;
         LastValidatedAt = null;
+        _psidtsRefreshedAt = null;
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
@@ -271,6 +299,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
         _cookieSet = newCookies;
         LoadedAt = DateTime.UtcNow;
+        _psidtsRefreshedAt = DateTime.UtcNow;
 
         // Re-create authenticated HttpClient with updated cookies
         _httpClient?.Dispose();
