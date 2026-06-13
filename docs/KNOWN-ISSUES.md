@@ -1,5 +1,33 @@
 # Known Issues
 
+## Inbound: rotary keeps ringing after the cell caller hangs up pre-answer (RESOLVED 2026-06-13)
+
+**Status:** ✅ Resolved by the deferred-answer PR (`feat/deferred-gv-answer`), building on the
+inbound-CANCEL handler shipped in PR #39 (`fix/gv-inbound-cancel-stops-ringing`).
+**Symptom (was):** On an inbound GV call, if the cell caller hung up *before* the rotary handset was
+lifted, the rotary phone kept ringing for ~30s (until GV's RTCP media timeout) instead of stopping
+promptly.
+**Root cause:** `GvSipTransport.HandleIncomingInvite` auto-answered every inbound INVITE — it sent
+`200 OK` immediately. Because GV believed the call was already answered, it never sent a SIP `CANCEL`
+on caller-hangup; it only stopped media. So the #39 CANCEL handler had nothing to fire on, and the
+ring continued until the media-timeout teardown.
+**Fix:** Defer the inbound answer. `HandleIncomingInvite` now sends `180 Ringing`, pre-computes the
+`200 OK` (SDP answer) but **holds** it in `SipCallSession.PendingOkMessage`, sets the session to
+`Ringing`, and rings the HT801. The held `200 OK` is sent only when the handset lifts, via the new
+`GvSipTransport.AcceptIncomingCallAsync` (called from `GVApiAdapter.OnCallAnsweredOnRotaryPhoneAsync`
+before the audio bridge starts). Leaving the call un-answered during the ring makes GV send a proper
+SIP `CANCEL` on caller-hangup, which the #39 handler turns into a prompt teardown (200-OK the CANCEL,
+`487` the INVITE, fire `Completed` → `CancelPendingInvite` stops the HT801 ring). The #39 CANCEL
+handler was tightened to fire the `487`/teardown only for a still-`Ringing` (pre-200) session, so a
+late CANCEL after answer no longer falsely tears down an established call (RFC 3261 §9.2). A pre-200
+local hangup now declines with `480 Temporarily Unavailable` (echoing the INVITE's Via/To/From/CSeq),
+never a BYE, since there is no confirmed dialog to terminate.
+**Verify in UAT:** (1) caller hangs up before answer → rotary ring stops within ~1s (GV CANCEL →
+487); (2) normal inbound answer → two-way audio as before; (3) ~60s ring-timeout → 480; (4) outbound
+calls unaffected (AcceptIncomingCallAsync is a no-op for the already-`Active` outbound session).
+**Revert path:** single `git revert` of the squash-merge commit restores the auto-answer behavior.
+**PRs:** #39 (inbound CANCEL handler), `feat/deferred-gv-answer` (deferred answer — this fix).
+
 ## Outbound: bridge started at placement → errno-101 blip + early-audio clipping (RESOLVED 2026-06-13)
 
 **Status:** ✅ Resolved by the outbound InCall-ordering PR (`fix/outbound-incall-ordering`).
