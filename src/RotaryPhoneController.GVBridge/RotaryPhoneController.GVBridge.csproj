@@ -10,6 +10,11 @@
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Expose internal test hooks + reconnect/keep-alive options to the unit tests. -->
+    <InternalsVisibleTo Include="RotaryPhoneController.GVBridge.Tests" />
+  </ItemGroup>
+
   <ItemGroup Condition="$(TargetFramework.Contains('windows'))">
     <ProjectReference Include="..\RotaryPhoneController.Core\RotaryPhoneController.Core.csproj"
                       SetTargetFramework="TargetFramework=net10.0-windows10.0.19041.0" />

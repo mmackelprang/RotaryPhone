@@ -6,6 +6,30 @@ public sealed record SipCredentials(
     string PhoneNumber,
     int ExpirySeconds);
 
+/// <summary>
+/// Raised when the SIP-over-WebSocket channel's receive loop exits.
+/// <see cref="WasIntentional"/> is true when WE closed the socket (via
+/// <c>CloseAsync</c>/reconnect/disposal), false when Google closed it or a
+/// receive error tore it down — the latter is what should drive auto-reconnect.
+/// </summary>
+public sealed class WebSocketClosedEventArgs(bool wasIntentional, string? description) : EventArgs
+{
+    public bool WasIntentional { get; } = wasIntentional;
+    public string? Description { get; } = description;
+}
+
+/// <summary>
+/// Raised when a REGISTER is genuinely rejected after the Digest re-send
+/// (post-Digest 401/403) or when the credential fetch (<c>sipregisterinfo/get</c>)
+/// returns an HTTP 401/403. Distinct from the normal 401 Digest challenge, which
+/// is answered automatically and is NOT an auth failure. The adapter subscribes
+/// to this to escalate to a cookie refresh (RotateCookies primary, CDP fallback).
+/// </summary>
+public sealed class AuthenticationFailedEventArgs(string reason) : EventArgs
+{
+    public string Reason { get; } = reason;
+}
+
 public sealed record TransportCallResult(
     string CallId,
     bool Success,
