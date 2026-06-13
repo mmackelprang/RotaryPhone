@@ -30,6 +30,23 @@ public sealed class AuthenticationFailedEventArgs(string reason) : EventArgs
     public string Reason { get; } = reason;
 }
 
+/// <summary>
+/// Thrown by the credential fetch when <c>sipregisterinfo/get</c> returns HTTP 401/403 —
+/// the real stale rotating-cookie failure (typically SESSION_COOKIE_INVALID). The transport
+/// catches this in its register/reconnect path and raises <see cref="AuthenticationFailedEventArgs"/>
+/// so the adapter can escalate to a cookie refresh. A 5xx / network error is NOT this type and
+/// must not trigger cookie work.
+/// </summary>
+public sealed class GvAuthException : Exception
+{
+    public int StatusCode { get; }
+
+    public GvAuthException(int statusCode, string message) : base(message) => StatusCode = statusCode;
+    public GvAuthException() { }
+    public GvAuthException(string message) : base(message) { }
+    public GvAuthException(string message, Exception innerException) : base(message, innerException) { }
+}
+
 public sealed record TransportCallResult(
     string CallId,
     bool Success,

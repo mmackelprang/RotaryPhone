@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -59,6 +60,18 @@ public sealed class GvSipCredentialProvider
             _logger.LogError("sipregisterinfo/get failed: {Status} ({Length} chars)",
                 (int)response.StatusCode, json.Length);
 #pragma warning restore CA1848, CA1873
+
+            // 401/403 is the REAL stale rotating-cookie failure (SESSION_COOKIE_INVALID):
+            // surface it as a typed auth exception so the transport can escalate to a cookie
+            // refresh. Any other non-success (5xx / transient) falls through to the generic
+            // throw and is treated as a plain failure that does NOT touch cookies.
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                throw new GvAuthException(
+                    (int)response.StatusCode,
+                    $"sipregisterinfo/get returned {(int)response.StatusCode} (likely stale cookies)");
+            }
+
             response.EnsureSuccessStatusCode(); // throws
         }
 

@@ -22,6 +22,11 @@ public class GVBridgeConfig
     // Chrome DevTools Protocol (CDP) for automated cookie extraction
     public int ChromeCdpPort { get; set; } = 9224;
 
+    // Browser-less rotating-cookie (PSIDTS) refresh via accounts.google.com/RotateCookies.
+    // PRIMARY 401-recovery on the headless box; falls back to CDP refresh-from-browser.
+    // Enabled by default but best-effort — see GvCookieRotator TODO (request shape unconfirmed).
+    public bool EnableCookieRotation { get; set; } = true;
+
     // Signaler (kept for potential future use)
     public string SignalerBaseUrl { get; set; } = "https://signaler-pa.clients6.google.com";
 

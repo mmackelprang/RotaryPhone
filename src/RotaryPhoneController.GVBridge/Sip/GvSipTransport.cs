@@ -794,7 +794,22 @@ public sealed class GvSipTransport : IAsyncDisposable
     {
         LogRegistering(_logger, null);
 
-        var creds = await _getCredentials().ConfigureAwait(false);
+        SipCredentials creds;
+        try
+        {
+            creds = await _getCredentials().ConfigureAwait(false);
+        }
+        catch (GvAuthException ex)
+        {
+            // sipregisterinfo/get returned 401/403 — the real stale-cookie failure.
+            // Escalate so the adapter can refresh cookies (RotateCookies primary, CDP fallback),
+            // then let the reconnect backoff retry. Rethrow so the current attempt counts as failed.
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(ex, "Credential fetch auth-failed ({Status}) — escalating cookie refresh", ex.StatusCode);
+#pragma warning restore CA1848, CA1873
+            RaiseAuthenticationFailed($"sipregisterinfo/get {ex.StatusCode}");
+            throw;
+        }
 
         // Tear down any prior channel BEFORE creating a new one: unsubscribe the previous
         // handlers and dispose the old channel so reconnects don't leak channels or stack

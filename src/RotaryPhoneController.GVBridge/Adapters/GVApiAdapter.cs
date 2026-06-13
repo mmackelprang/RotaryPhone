@@ -38,6 +38,13 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
     private DateTime? _psidtsRefreshedAt;
 
+    // Browser-less PSIDTS refresh (RotateCookies). Injected for tests; lazily built otherwise.
+    private ICookieRotator? _cookieRotator;
+    private HttpClient? _rotatorHttpClient;
+
+    // Single-flight guard so concurrent AuthenticationFailed events don't stampede the refresh.
+    private int _refreshingCookies;
+
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
     private string? _negotiatedHt801RtpIp;
@@ -109,10 +116,24 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         IOptions<GVBridgeConfig> config,
         ILogger<GVApiAdapter> logger,
         ILoggerFactory loggerFactory)
+        : this(config, logger, loggerFactory, cookieRotator: null)
+    {
+    }
+
+    /// <summary>
+    /// Test/extensibility constructor allowing a custom <see cref="ICookieRotator"/> to be
+    /// injected (defaults to a best-effort <see cref="GvCookieRotator"/> built lazily).
+    /// </summary>
+    internal GVApiAdapter(
+        IOptions<GVBridgeConfig> config,
+        ILogger<GVApiAdapter> logger,
+        ILoggerFactory loggerFactory,
+        ICookieRotator? cookieRotator)
     {
         _config = config.Value;
         _logger = logger;
         _loggerFactory = loggerFactory;
+        _cookieRotator = cookieRotator;
     }
 
     /// <summary>
@@ -213,6 +234,10 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             () => credProvider.GetCredentialsAsync(),
             _loggerFactory);
 
+        // Escalate real auth failures (post-Digest 401/403, or 401/403 from sipregisterinfo/get)
+        // to a cookie refresh. NOT triggered by plain network drops.
+        _sipTransport.AuthenticationFailed += HandleAuthenticationFailed;
+
         _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
         _sipTransport.CallStatusChanged += (_, e) =>
         {
@@ -256,9 +281,14 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         if (_sipTransport != null)
         {
             _sipTransport.IncomingCallReceived -= HandleSipIncomingCall;
+            _sipTransport.AuthenticationFailed -= HandleAuthenticationFailed;
             await _sipTransport.DisposeAsync();
             _sipTransport = null;
         }
+
+        // Dispose rotator HttpClient (if we built one)
+        _rotatorHttpClient?.Dispose();
+        _rotatorHttpClient = null;
 
         // Dispose HttpClient
         _httpClient?.Dispose();
@@ -424,6 +454,115 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         Interlocked.Exchange(ref _activeCallId, e.CallInfo.CallId);
         _logger.LogInformation("SIP incoming call from {Number}", e.CallInfo.CallerNumber);
         OnIncomingCall?.Invoke(e.CallInfo.CallerNumber);
+    }
+
+    /// <summary>
+    /// Auth-failure escalation handler. Fired by the transport ONLY on a real auth rejection
+    /// (post-Digest 401/403 or 401/403 from sipregisterinfo/get), never on a plain network drop.
+    /// Runs the recovery ladder, then lets the transport's reconnect backoff pick up the refreshed
+    /// creds on its next attempt.
+    /// </summary>
+    private void HandleAuthenticationFailed(object? sender, AuthenticationFailedEventArgs e)
+    {
+        // Single-flight: collapse concurrent auth failures into one refresh.
+        if (Interlocked.CompareExchange(ref _refreshingCookies, 1, 0) != 0)
+            return;
+
+        _ = RecoverFromAuthFailureAsync(e.Reason);
+    }
+
+    private async Task RecoverFromAuthFailureAsync(string reason)
+    {
+        try
+        {
+            _logger.LogWarning("GVApi: SIP auth failure ({Reason}) — attempting cookie recovery", reason);
+            _areCookiesValid = false;
+
+            // PRIMARY: browser-less RotateCookies refresh of the rotating PSIDTS from the
+            // stored long-lived __Secure-1PSID. Best-effort; falls back on any failure.
+            if (_config.EnableCookieRotation && _cookieSet != null)
+            {
+                var rotated = await TryRotateCookiesAsync();
+                if (rotated)
+                {
+                    _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS — reconnect backoff will retry");
+                    return;
+                }
+            }
+
+            // FALLBACK: re-read cookies from disk (in case an out-of-band CDP refresh updated
+            // them) and re-run the health check. The CDP refresh-from-browser endpoint remains
+            // the operator's manual path for a genuinely dead login.
+            var reloaded = await ReloadCookiesAsync();
+            if (!reloaded)
+            {
+                _logger.LogWarning(
+                    "GVApi: cookie recovery failed. Long-lived session may be dead — run " +
+                    "POST /api/gvbridge/cookies/refresh-from-browser against a logged-in Chrome.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: error during auth-failure cookie recovery");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshingCookies, 0);
+        }
+    }
+
+    /// <summary>
+    /// Attempt the browser-less RotateCookies refresh, overlay the fresh PSIDTS onto the
+    /// in-memory + on-disk cookie set, and re-create the authenticated HttpClient. Returns
+    /// true only if cookies were actually rotated and re-verified healthy.
+    /// </summary>
+    private async Task<bool> TryRotateCookiesAsync()
+    {
+        var current = _cookieSet;
+        if (current == null)
+            return false;
+
+        var rotator = _cookieRotator ??= BuildDefaultCookieRotator();
+
+        var result = await rotator.RotateAsync(current);
+        if (!result.Rotated)
+            return false;
+
+        // Overlay the refreshed PSIDTS so ToCookieHeader() stops replaying the stale values.
+        var refreshed = current.WithRefreshedPsidts(result.Psidts1, result.Psidts3);
+        _cookieSet = refreshed;
+        _psidtsRefreshedAt = DateTime.UtcNow;
+
+        // Persist so a restart / other paths pick up the fresh cookies.
+        if (_cookieStore != null)
+        {
+            try { await _cookieStore.SaveAsync(refreshed); }
+            catch (Exception ex) { _logger.LogWarning(ex, "GVApi: failed to persist rotated cookies"); }
+        }
+
+        // Re-create the authenticated HttpClient with the refreshed cookie set.
+        _httpClient?.Dispose();
+        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieSet!));
+        _httpClient = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            BaseAddress = new Uri("https://clients6.google.com/")
+        };
+        _accountClient = new GvAccountClient(
+            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
+            _loggerFactory.CreateLogger<GvAccountClient>());
+
+        var healthy = await _accountClient.IsHealthyAsync();
+        _areCookiesValid = healthy;
+        LastValidatedAt = DateTime.UtcNow;
+        return healthy;
+    }
+
+    private ICookieRotator BuildDefaultCookieRotator()
+    {
+        // RotateCookies sends its own Cookie header (no SAPISIDHASH), so use a plain client.
+        _rotatorHttpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        return new GvCookieRotator(_rotatorHttpClient, _loggerFactory.CreateLogger<GvCookieRotator>());
     }
 
     private void OnHealthCheckTimer(object? state)
