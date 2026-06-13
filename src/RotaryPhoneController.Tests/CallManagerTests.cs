@@ -480,4 +480,66 @@ public class CallManagerTests
     }
 
     #endregion
+
+    #region Adapter OnCallEnded teardown (inbound CANCEL → stop HT801 ringing)
+
+    [Fact]
+    public void AdapterOnCallEnded_WhileRinging_ResetsToIdle_AndCancelsInvite()
+    {
+        // Arrange — inbound call ringing the HT801 (SimulateIncomingCall sends the INVITE).
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.SimulateIncomingCall();
+        Assert.Equal(CallState.Ringing, cm.CurrentState);
+        Assert.Equal("Unknown", cm.IncomingPhoneNumber);
+
+        // Act — GV signals the call ended (inbound CANCEL → CallStatusChanged(Completed)
+        // → GVApiAdapter.OnCallEnded). This is the event the new CANCEL branch produces.
+        adapter.Raise(a => a.OnCallEnded += null);
+
+        // Assert — state returns to Idle, incoming number cleared, and the pending HT801
+        // INVITE is cancelled exactly once so the rotary phone stops ringing.
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        Assert.Null(cm.IncomingPhoneNumber);
+        _mockSipAdapter.Verify(s => s.CancelPendingInvite(), Times.Once);
+    }
+
+    [Fact]
+    public void AdapterOnCallEnded_WhenAlreadyIdle_IsNoOp()
+    {
+        // Arrange — bound GV adapter, no active call (state Idle).
+        var (cm, adapter, _) = BuildGvCallManager();
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+
+        // Act — a stray/duplicate OnCallEnded while Idle (e.g. CANCEL then BYE for the same
+        // already-torn-down call) must short-circuit without re-running teardown.
+        adapter.Raise(a => a.OnCallEnded += null);
+
+        // Assert — stays Idle and does NOT fire CancelPendingInvite again.
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        _mockSipAdapter.Verify(s => s.CancelPendingInvite(), Times.Never);
+    }
+
+    [Fact]
+    public void AdapterOnCallEnded_AfterAnswered_SingleTeardown_NoDoubleFire()
+    {
+        // Arrange — inbound call answered on the rotary phone (InCall).
+        var (cm, adapter, _) = BuildGvCallManager();
+        cm.SimulateIncomingCall();
+        Assert.Equal(CallState.Ringing, cm.CurrentState);
+        cm.HandleHookChange(true); // Off-hook = answer
+        Assert.Equal(CallState.InCall, cm.CurrentState);
+
+        // Act — call ends (remote hangup). A CANCEL-then-BYE pair (or a single BYE) both route
+        // here as OnCallEnded; raise it twice to prove the HangUp re-entry / Idle guard collapses
+        // them into a single teardown.
+        adapter.Raise(a => a.OnCallEnded += null);
+        adapter.Raise(a => a.OnCallEnded += null);
+
+        // Assert — one clean teardown to Idle; CancelPendingInvite fired once, not twice.
+        Assert.Equal(CallState.Idle, cm.CurrentState);
+        Assert.Null(cm.IncomingPhoneNumber);
+        _mockSipAdapter.Verify(s => s.CancelPendingInvite(), Times.Once);
+    }
+
+    #endregion
 }
