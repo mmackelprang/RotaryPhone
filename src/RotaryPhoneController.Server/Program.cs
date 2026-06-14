@@ -107,8 +107,9 @@ if (appConfig.EnableCallHistory)
 {
     builder.Services.AddSingleton<ICallHistoryService>(sp =>
     {
-        var logger = sp.GetRequiredService<ILogger<CallHistoryService>>();
-        return new CallHistoryService(logger, appConfig.MaxCallHistoryEntries);
+        var logger = sp.GetRequiredService<ILogger<SqliteCallHistoryService>>();
+        var dbPath = Path.Combine(AppContext.BaseDirectory, "data/call-history.db");
+        return new SqliteCallHistoryService(logger, dbPath, appConfig.MaxCallHistoryEntries);
     });
 }
 
