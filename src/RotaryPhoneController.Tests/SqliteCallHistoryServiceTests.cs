@@ -40,6 +40,9 @@ public class SqliteCallHistoryServiceTests : IDisposable
         Assert.Contains("111", numbers);
         Assert.Contains("222", numbers);
         Assert.Contains("333", numbers);
+        Assert.Equal(1, read.Count(e => e.PhoneNumber == "111"));
+        Assert.Equal(1, read.Count(e => e.PhoneNumber == "222"));
+        Assert.Equal(1, read.Count(e => e.PhoneNumber == "333"));
     }
 
     [Fact]

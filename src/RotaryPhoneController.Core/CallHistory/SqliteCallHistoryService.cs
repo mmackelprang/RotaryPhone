@@ -97,16 +97,16 @@ public class SqliteCallHistoryService : ICallHistoryService, IDisposable
                 using var trim = _connection.CreateCommand();
                 trim.CommandText = @"
                     DELETE FROM CallHistory WHERE Id NOT IN (
-                        SELECT Id FROM CallHistory ORDER BY StartTime DESC LIMIT @max
+                        SELECT Id FROM CallHistory ORDER BY StartTime DESC, Id DESC LIMIT @max
                     );";
                 trim.Parameters.AddWithValue("@max", _maxEntries);
                 var trimmed = trim.ExecuteNonQuery();
                 if (trimmed > 0)
                     _logger.LogDebug("Trimmed {Count} old entries from call history", trimmed);
             }
-
-            OnCallHistoryAdded?.Invoke(entry);
         }
+
+        OnCallHistoryAdded?.Invoke(entry);
     }
 
     public void UpdateCallHistory(CallHistoryEntry entry)
@@ -220,10 +220,10 @@ public class SqliteCallHistoryService : ICallHistoryService, IDisposable
             Id = Guid.Parse(reader.GetString(0)),
             PhoneNumber = reader.GetString(1),
             CallerName = reader.IsDBNull(2) ? null : reader.GetString(2),
-            Direction = Enum.Parse<CallDirection>(reader.GetString(3)),
-            AnsweredOn = Enum.Parse<CallAnsweredOn>(reader.GetString(4)),
-            StartTime = DateTime.Parse(reader.GetString(5)),
-            EndTime = reader.IsDBNull(6) ? null : DateTime.Parse(reader.GetString(6)),
+            Direction = Enum.TryParse<CallDirection>(reader.GetString(3), out var dir) ? dir : CallDirection.Incoming,
+            AnsweredOn = Enum.TryParse<CallAnsweredOn>(reader.GetString(4), out var ans) ? ans : CallAnsweredOn.NotAnswered,
+            StartTime = DateTime.ParseExact(reader.GetString(5), "O", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind),
+            EndTime = reader.IsDBNull(6) ? null : DateTime.ParseExact(reader.GetString(6), "O", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind),
             PhoneId = reader.GetString(7)
         };
     }
