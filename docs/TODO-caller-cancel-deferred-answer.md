@@ -1,6 +1,16 @@
 # TODO — Caller-cancel-keeps-ringing (inbound) — future fix via deferred answer
 
-**Status:** OPEN (deferred). Logged 2026-06-13 per user request.
+> **✅ IMPLEMENTED (v2) — `feat/deferred-gv-answer-v2`, pending live UAT.** Approach A was
+> re-implemented as the SECOND attempt after PR #40 was reverted (#41) for breaking inbound answering.
+> The v2 fix keeps the `Ringing` session alive through the ring (a pre-200 CANCEL/BYE marks it
+> `Cancelled` IN PLACE instead of evicting it), makes `AcceptIncomingCallAsync` robust (reads status;
+> never silently no-ops a live answer), and adds the MANDATORY real-path integration test
+> (`GVApiAdapterInboundAnswerIntegrationTests`) that asserts a NORMAL inbound answer sends the held
+> `200 OK` — the gap that let #40 ship broken. See `docs/KNOWN-ISSUES.md` (top entry) for the full
+> writeup. Remaining: live UAT on `radio` (normal answer FIRST, then caller-cancel) before declaring
+> done. The analysis below is retained as the historical record.
+
+**Status:** ✅ IMPLEMENTED v2 (was OPEN/deferred). Logged 2026-06-13 per user request; v2 shipped same day.
 **Severity:** minor — calls work both directions; only affects the case where the caller hangs up *before* the rotary handset is lifted.
 
 ## Symptom

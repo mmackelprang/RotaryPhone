@@ -443,6 +443,35 @@ public sealed class GvSipTransport : IAsyncDisposable
             return;
         }
 
+        // Pre-200 (Ringing) inbound call: the dialog was never confirmed, so a BYE is wrong — there
+        // is no established dialog to terminate. This is a LOCAL pre-200 hangup (e.g. the 60s ring
+        // timeout). Decline the INVITE with a 480 instead (DeclineIncomingCallAsync owns removal).
+        if (session.Status == CallStatusType.Ringing)
+        {
+            await DeclineIncomingCallAsync(callId, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Cancelled/Completed inbound call: the caller already hung up during the ring. The CANCEL
+        // handler already 200+487'd GV and marked the session Cancelled IN PLACE (NOT removed), so
+        // this HangupAsync (reached via the Completed -> OnCallEnded -> HangUp -> OnCallHungUpAsync
+        // chain) is the SINGLE FINAL TEARDOWN: just remove + dispose, no BYE (no confirmed dialog),
+        // no 480 (we already 487'd the INVITE).
+        if (session.Status is CallStatusType.Cancelled or CallStatusType.Completed)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "HangupAsync: call {CallId} already {Status} (caller cancelled pre-200) — final teardown, no BYE",
+                callId, session.Status);
+#pragma warning restore CA1848, CA1873
+            if (_activeCalls.TryRemove(callId, out var cancelledSession))
+            {
+                cancelledSession.Status = CallStatusType.Completed;
+                cancelledSession.Dispose();
+            }
+            return;
+        }
+
         if (_wsChannel is null)
         {
 #pragma warning disable CA1848, CA1873
@@ -756,12 +785,29 @@ public sealed class GvSipTransport : IAsyncDisposable
             ToHeader = invFrom,        // Remote party (caller) goes in To for our BYE
             FromHeader = ourFromForBye, // Us (callee + dialog tag) goes in From for our BYE
             RouteSet = [.. recordRoutes],
-            Status = CallStatusType.Active,
+            // DEFERRED ANSWER: the call is RINGING (180 sent), NOT yet answered. We do NOT send
+            // the 200 OK here — we HOLD it until the handset is lifted (AcceptIncomingCallAsync).
+            // Leaving the call un-answered is what makes Google Voice send a proper SIP CANCEL if
+            // the cell caller hangs up during the ring; the CANCEL handler then tears the call down
+            // promptly. (Auto-answering suppressed that CANCEL — GV signalled caller-hangup only by
+            // stopping media, so the HT801 rang for the full ~30s RTCP timeout.)
+            //
+            // CRITICAL (PR #40 regression fix): this Ringing session STAYS in _activeCalls and is
+            // NOT removed by any interim signaling. A pre-200 CANCEL marks it Cancelled IN PLACE; it
+            // is removed only by a single final teardown (HangupAsync via the Completed chain). That
+            // guarantees AcceptIncomingCallAsync(_activeCallId) can always look it up on handset-lift.
+            Status = CallStatusType.Ringing,
+            InviteVias = [.. invVias],
+            // 480/487 responses must echo the request's To (with our dialog tag — consistent with the
+            // 180 Ringing already sent), From, and CSeq per RFC 3261 §8.2.6.
+            InviteToHeader = $"{invTo};tag={dialogTag}",
+            InviteFromHeader = invFrom,
+            InviteCSeqHeader = invCSeq,
         };
         inSession.RouteSet.Reverse();
-        _activeCalls[invCallId] = inSession;
 
-        // Send 200 OK with SDP answer — same tag as 180
+        // Pre-build the 200 OK with the SDP answer — same dialog To-tag as the 180 Ringing — but
+        // HOLD it. AcceptIncomingCallAsync sends this exact message when the handset is lifted.
         var ok200 = "SIP/2.0 200 OK\r\n";
         foreach (var via in invVias)
             ok200 += $"Via: {via}\r\n";
@@ -779,15 +825,158 @@ public sealed class GvSipTransport : IAsyncDisposable
             $"\r\n" +
             answer.sdp;
 
-        _ = SendSipMessageAsync(ok200);
+        inSession.PendingOkMessage = ok200;
+        _activeCalls[invCallId] = inSession;
 
 #pragma warning disable CA1848, CA1873
-        _logger.LogInformation("Answered incoming call from {Caller}, Call-ID={CallId}", callerNumber, invCallId);
+        _logger.LogInformation("Incoming GV call queued (deferred answer) from {Caller}, Call-ID={CallId}", callerNumber, invCallId);
 #pragma warning restore CA1848, CA1873
 
-        // Fire event to UI
+        // Fire event to UI so the HT801 starts ringing immediately (the 200 OK is still held).
         IncomingCallReceived?.Invoke(this, new IncomingCallEventArgs(
             new IncomingCallInfo(invCallId, callerNumber)));
+    }
+
+    /// <summary>
+    /// Send the HELD 200 OK for a ringing inbound call once the handset is lifted, transitioning the
+    /// call from Ringing to Active. This is the single live-answer entry point and it NEVER silently
+    /// no-ops a genuine answer:
+    /// <list type="bullet">
+    ///   <item>Ringing → send the held 200 OK, mark Active, fire CallStatusChanged(Active), arm the
+    ///         session timer.</item>
+    ///   <item>Cancelled/Completed → the caller already hung up during the ring; do NOT send a 200 OK
+    ///         (the caller is gone) and do NOT re-fire Completed — the CANCEL/BYE handler already fired
+    ///         it and teardown is in flight. True no-op.</item>
+    ///   <item>Not found / WS dropped / no held 200 → can't answer; log and drive teardown so we never
+    ///         strand a half-answered session.</item>
+    /// </list>
+    /// Unlike PR #40 this does NOT TryRemove-to-claim the session: removal-on-accept is exactly what
+    /// raced the CANCEL handler and lost the session at handset-lift. We read status off the still-
+    /// present session, flip it IN PLACE, and let a single final teardown (HangupAsync) own removal.
+    /// </summary>
+    public async Task AcceptIncomingCallAsync(string callId, CancellationToken ct = default)
+    {
+        if (!_activeCalls.TryGetValue(callId, out var session))
+        {
+            // Genuinely no session. Per spec, NEVER silently no-op a live answer: log and drive the
+            // same Completed teardown the BYE/CANCEL paths use so the HT801 ring is cleared.
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "AcceptIncomingCallAsync: no session for call {CallId} — firing Completed for teardown", callId);
+#pragma warning restore CA1848, CA1873
+            CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, CallStatusType.Unknown, CallStatusType.Completed));
+            return;
+        }
+
+        // Already cancelled/completed: the caller hung up during the ring (a pre-200 CANCEL set the
+        // session Cancelled IN PLACE — see the CANCEL handler). The answer-vs-cancelled distinction is
+        // read straight off the still-present session. Do NOT send a 200 OK to a caller who is gone, and
+        // do NOT re-fire Completed: the CANCEL/BYE handler ALREADY fired Completed and the single final
+        // teardown (HangupAsync via that Completed chain) is already in flight. Re-firing here would
+        // double-drive teardown (a second OnCallEnded -> HangUp). This is a true no-op by design.
+        if (session.Status is CallStatusType.Cancelled or CallStatusType.Completed)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "AcceptIncomingCallAsync: call {CallId} already {Status} (caller cancelled during ring) — " +
+                "no-op (no 200 OK; teardown already in flight from the CANCEL/BYE handler)", callId, session.Status);
+#pragma warning restore CA1848, CA1873
+            return;
+        }
+
+        if (session.Status != CallStatusType.Ringing)
+        {
+            // Not a deferred-answer inbound call (e.g. an outbound call whose session is already
+            // Active, or a double-accept after we already went Active). Expected no-op — log at Debug.
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug(
+                "AcceptIncomingCallAsync: call {CallId} is not ringing (status={Status}) — nothing to answer",
+                callId, session.Status);
+#pragma warning restore CA1848, CA1873
+            return;
+        }
+
+        if (_wsChannel is null || session.PendingOkMessage is null)
+        {
+            // The signaling channel dropped (or the held 200 OK is gone) while ringing. We can't
+            // answer; mark the session terminal IN PLACE and drive teardown via the same Completed
+            // chain the BYE/CANCEL paths use (HangupAsync removes + disposes it).
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "AcceptIncomingCallAsync: WS channel/held-200 unavailable for call {CallId} — firing Completed for teardown",
+                callId);
+#pragma warning restore CA1848, CA1873
+            var droppedOld = session.Status;
+            session.Status = CallStatusType.Completed;
+            CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, droppedOld, CallStatusType.Completed));
+            return;
+        }
+
+#pragma warning disable CA1848, CA1873
+        _logger.LogInformation("Handset lifted — sending held 200 OK for call {CallId} (Ringing -> Active)", callId);
+#pragma warning restore CA1848, CA1873
+
+        // Capture the held 200 OK before clearing it, then flip to Active IN PLACE (no remove/reinsert).
+        var heldOk = session.PendingOkMessage;
+        var oldStatus = session.Status;
+        session.Status = CallStatusType.Active;
+        session.PendingOkMessage = null;
+
+        // Session timer: refresh at half the negotiated Session-Expires (90s -> re-INVITE every 45s).
+        // We offered Session-Expires: 90;refresher=uac in the 200 OK, so we own the refresh.
+        const int sessionExpiresSeconds = 90;
+        var refreshMs = (sessionExpiresSeconds / 2) * 1000;
+        session.SessionTimer = new Timer(_ => SendSessionRefresh(callId), null, refreshMs, refreshMs);
+
+        await SendSipMessageAsync(heldOk, ct).ConfigureAwait(false);
+        CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Active));
+    }
+
+    /// <summary>
+    /// Decline a ringing inbound call (handset not lifted, or local hangup before answer): send
+    /// 480 Temporarily Unavailable echoing the INVITE's Via headers, mark the session Completed,
+    /// remove + dispose it, and fire Completed. Used for a pre-200 local hangup (e.g. 60s ring
+    /// timeout) — never a BYE, since there is no confirmed dialog to terminate.
+    /// </summary>
+    public async Task DeclineIncomingCallAsync(string callId, CancellationToken ct = default)
+    {
+        if (!_activeCalls.TryGetValue(callId, out var session) || session.Status != CallStatusType.Ringing)
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning("DeclineIncomingCallAsync: no ringing session for call {CallId} — ignoring", callId);
+#pragma warning restore CA1848, CA1873
+            return;
+        }
+
+#pragma warning disable CA1848, CA1873
+        _logger.LogInformation("Declining ringing inbound call {CallId} — sending 480 Temporarily Unavailable", callId);
+#pragma warning restore CA1848, CA1873
+
+        // 480 to the INVITE transaction — echo the INVITE's Via stack, To (with our dialog tag),
+        // From, Call-ID, and CSeq per RFC 3261 §8.2.6 so GV accepts it and clears the transaction.
+        var decline = "SIP/2.0 480 Temporarily Unavailable\r\n";
+        foreach (var via in session.InviteVias)
+            decline += $"Via: {via}\r\n";
+        decline +=
+            $"To: {session.InviteToHeader}\r\n" +
+            $"From: {session.InviteFromHeader}\r\n" +
+            $"Call-ID: {callId}\r\n" +
+            $"CSeq: {session.InviteCSeqHeader}\r\n" +
+            $"User-Agent: {UserAgent}\r\n" +
+            $"Content-Length: 0\r\n" +
+            $"\r\n";
+
+        await SendSipMessageAsync(decline, ct).ConfigureAwait(false);
+
+        // This IS the final teardown for a declined call — remove + dispose here. Gate on a
+        // successful TryRemove so a racing CANCEL teardown doesn't double-dispose.
+        if (_activeCalls.TryRemove(callId, out var removed))
+        {
+            var oldStatus = removed.Status;
+            removed.Status = CallStatusType.Completed;
+            CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Completed));
+            removed.Dispose();
+        }
     }
 
     private void SendSessionRefresh(string callId)
@@ -1257,9 +1446,28 @@ public sealed class GvSipTransport : IAsyncDisposable
 
                     _ = SendSipMessageAsync(byeOk); // 200 OK to BYE is critical but we're in an event handler
 
-                    // Clean up the call session (only on first BYE, ignore retransmissions)
+                    // PR #40 regression guard: if a BYE arrives while the inbound call is still
+                    // RINGING (pre-200), DO NOT TryRemove the session out from under a pending answer.
+                    // (GV's standards-compliant un-answered-call signaling can emit a CANCEL *or* a BYE
+                    // during the ring window.) Mark it Cancelled IN PLACE and fire Completed; the single
+                    // final teardown (HangupAsync via the Completed chain) removes + disposes it. A
+                    // slightly-late AcceptIncomingCallAsync then reads Cancelled and won't send a 200 OK.
+                    if (_activeCalls.TryGetValue(byeCallId, out var ringingByeSession)
+                        && ringingByeSession.Status == CallStatusType.Ringing)
+                    {
+#pragma warning disable CA1848, CA1873
+                        _logger.LogInformation(
+                            "BYE for call {CallId} arrived while still RINGING (pre-200) — marking Cancelled in place " +
+                            "(not removing), firing Completed for teardown", byeCallId);
+#pragma warning restore CA1848, CA1873
+                        ringingByeSession.Status = CallStatusType.Cancelled;
+                        CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(byeCallId, CallStatusType.Ringing, CallStatusType.Completed));
+                        LogCallEnded(_logger, byeCallId, null);
+                    }
+                    // Clean up the call session (only on first BYE, ignore retransmissions). This is the
+                    // post-answer (Active) path — there IS a confirmed dialog, so remove + dispose here.
 #pragma warning disable CA2000
-                    if (_activeCalls.TryRemove(byeCallId, out var byeSession))
+                    else if (_activeCalls.TryRemove(byeCallId, out var byeSession))
 #pragma warning restore CA2000
                     {
                         var oldByeStatus = byeSession.Status;
@@ -1291,6 +1499,7 @@ public sealed class GvSipTransport : IAsyncDisposable
                 if (cancelCallId is not null && cancelVias.Count > 0)
                 {
                     // 1) 200 OK to the CANCEL transaction — must echo ALL Via headers (same as BYE).
+                    //    Always polite to acknowledge the CANCEL request itself, regardless of state.
                     var cancelOk = "SIP/2.0 200 OK\r\n";
                     foreach (var via in cancelVias)
                     {
@@ -1306,39 +1515,64 @@ public sealed class GvSipTransport : IAsyncDisposable
 
                     _ = SendSipMessageAsync(cancelOk); // 200 OK to CANCEL is critical but we're in an event handler
 
-                    // 2) RFC 3261 §15: terminate the original INVITE transaction with 487.
-                    // The CSeq method on a 487 is INVITE (the request being terminated), not CANCEL.
-                    var inviteCSeq = cancelCSeq is not null
-                        ? cancelCSeq.Replace("CANCEL", "INVITE", StringComparison.OrdinalIgnoreCase)
-                        : cancelCSeq;
-                    var terminated = "SIP/2.0 487 Request Terminated\r\n";
-                    foreach (var via in cancelVias)
+                    // With deferred answer, a CANCEL only legitimately terminates a call that is still
+                    // RINGING (pre-200). RFC 3261 §9.2: a CANCEL arriving after the INVITE already got a
+                    // final 200 OK has NO effect on the now-established dialog — we must NOT fabricate a
+                    // 487 or tear it down (the real hangup arrives later as a BYE). So only send the 487
+                    // + drive teardown when the matched session is still pre-200.
+                    var isRinging = _activeCalls.TryGetValue(cancelCallId, out var ringingSession)
+                        && ringingSession.Status == CallStatusType.Ringing;
+
+                    if (!isRinging)
                     {
-                        terminated += $"Via: {via}\r\n";
+#pragma warning disable CA1848, CA1873
+                        _logger.LogInformation(
+                            "CANCEL for call {CallId} matched no ringing (pre-200) session — 200-OK'd the CANCEL only, " +
+                            "no 487/teardown (call already answered, already cancelled, or unknown)", cancelCallId);
+#pragma warning restore CA1848, CA1873
                     }
-                    terminated +=
-                        $"To: {cancelToHeader}\r\n" +
-                        $"From: {cancelFromHeader}\r\n" +
-                        $"Call-ID: {cancelCallId}\r\n" +
-                        $"CSeq: {inviteCSeq}\r\n" +
-                        $"Content-Length: 0\r\n" +
-                        $"\r\n";
-
-                    _ = SendSipMessageAsync(terminated);
-
-                    // 3) Drive teardown via the SAME Completed event the BYE path uses. The
-                    // _activeCalls.TryRemove makes this idempotent against a following BYE
-                    // (retransmission / post-answer hangup): only the first removal fires.
-                    // Completed -> GVApiAdapter.OnCallEnded -> CallManager.HangUp ->
-                    // CancelPendingInvite (sends SIP CANCEL to the HT801 so it stops ringing).
-#pragma warning disable CA2000
-                    if (_activeCalls.TryRemove(cancelCallId, out var cancelSession))
-#pragma warning restore CA2000
+                    else
                     {
-                        var oldCancelStatus = cancelSession.Status;
-                        cancelSession.Status = CallStatusType.Completed;
+                        // 2) RFC 3261 §15 / §9.2: terminate the original (still-pending) INVITE
+                        //    transaction with 487. The 487 is a response to the INVITE TRANSACTION, so
+                        //    per §17.2.3 it MUST carry the INVITE's Via stack (not the CANCEL's), and per
+                        //    §8.2.6.2 its To MUST carry the dialog tag we already put in the 180 Ringing
+                        //    (and To/From/Call-ID/CSeq from the INVITE). We captured all of these on the
+                        //    Ringing session at INVITE time, so use them rather than echoing the CANCEL's
+                        //    headers (CANCEL copies the INVITE branch per §9.1, but the CANCEL's To has no
+                        //    dialog tag — using the captured INVITE headers keeps the 487 consistent with
+                        //    the 180 GV already received). CSeq method on a 487 is INVITE (the request
+                        //    being terminated); InviteCSeqHeader is already the raw INVITE CSeq ("N INVITE").
+                        var terminated = "SIP/2.0 487 Request Terminated\r\n";
+                        foreach (var via in ringingSession!.InviteVias)
+                        {
+                            terminated += $"Via: {via}\r\n";
+                        }
+                        terminated +=
+                            $"To: {ringingSession.InviteToHeader}\r\n" +
+                            $"From: {ringingSession.InviteFromHeader}\r\n" +
+                            $"Call-ID: {cancelCallId}\r\n" +
+                            $"CSeq: {ringingSession.InviteCSeqHeader}\r\n" +
+                            $"Content-Length: 0\r\n" +
+                            $"\r\n";
+
+                        _ = SendSipMessageAsync(terminated);
+
+                        // 3) CRITICAL (PR #40 regression fix): do NOT TryRemove the Ringing session here.
+                        //    PR #40 removed it, which raced a concurrent handset-lift — by the time
+                        //    AcceptIncomingCallAsync(_activeCallId) ran, the session was gone, the held
+                        //    200 OK was never sent, and inbound answering broke. Instead mark the session
+                        //    Cancelled IN PLACE and leave it in _activeCalls. A slightly-late accept then
+                        //    finds it, reads Cancelled, and correctly declines to send a 200 OK. The
+                        //    SINGLE final teardown (HangupAsync, reached via the Completed chain below)
+                        //    removes + disposes it.
+                        //
+                        //    Completed -> GVApiAdapter.OnCallEnded -> CallManager.HangUp ->
+                        //    CancelPendingInvite (SIP CANCEL to the HT801 so it stops ringing) +
+                        //    OnCallHungUpAsync -> HangupAsync (final teardown of this Cancelled session).
+                        var oldCancelStatus = ringingSession!.Status;
+                        ringingSession.Status = CallStatusType.Cancelled;
                         CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(cancelCallId, oldCancelStatus, CallStatusType.Completed));
-                        cancelSession.Dispose();
                         LogCallEnded(_logger, cancelCallId, null);
                     }
                 }
@@ -1823,7 +2057,20 @@ internal sealed class SipCallSession : IDisposable
     public SIPSorcery.Net.RTCPeerConnection? PeerConnection { get; set; }
     public Concentus.IOpusEncoder? OpusEncoder { get; set; }
     public Concentus.IOpusDecoder? OpusDecoder { get; set; }
-    public CallStatusType Status { get; set; } = CallStatusType.Unknown;
+
+    // Status is written by the SIP message-handler thread (CANCEL/BYE mark a Ringing session
+    // Cancelled in place) and read by the handset-lift path (AcceptIncomingCallAsync) and HangupAsync
+    // on a DIFFERENT thread. The _activeCalls ConcurrentDictionary lookup gives no happens-before for
+    // the subsequent field read, and this service runs on ARM/Linux (the `radio` box) whose weaker
+    // memory model can otherwise cache/reorder the value. Back it with a volatile int so the
+    // Ringing -> Cancelled transition is promptly visible to a concurrent accept (a stale read would
+    // let accept send a 200 OK to a caller who just cancelled — the exact PR #40 failure mode).
+    private volatile int _status = (int)CallStatusType.Unknown;
+    public CallStatusType Status
+    {
+        get => (CallStatusType)_status;
+        set => _status = (int)value;
+    }
 
     // Per-call CSeq tracking (fields, not properties, to support Interlocked.Increment)
     public int InviteCSeq;
@@ -1834,6 +2081,18 @@ internal sealed class SipCallSession : IDisposable
     public string? ToHeader { get; set; }
     public string? FromHeader { get; set; }
     public List<string> RouteSet { get; set; } = [];
+
+    // Deferred-answer state (inbound). The 200 OK is fully built at INVITE time (SDP answer
+    // pre-computed) but HELD until the handset is lifted. Storing it lets AcceptIncomingCallAsync
+    // send the exact same answer the 180-Ringing dialog promised, with the consistent To-tag.
+    public string? PendingOkMessage { get; set; }
+
+    // The INVITE's Via headers + To/From/CSeq, captured so a deferred DECLINE (480) can echo them
+    // per RFC 3261 §8.2.6 (a response MUST copy the request's To, From, Call-ID, CSeq, and Via).
+    public List<string> InviteVias { get; set; } = [];
+    public string? InviteToHeader { get; set; }
+    public string? InviteFromHeader { get; set; }
+    public string? InviteCSeqHeader { get; set; }
 
     // Session timer
     public Timer? SessionTimer { get; set; }

@@ -56,7 +56,21 @@ public sealed record TransportCallStatus(
     string CallId,
     CallStatusType Status);
 
-public enum CallStatusType { Unknown, Ringing, Active, Completed, Failed }
+/// <summary>
+/// Lifecycle of a SIP call session.
+///
+/// Inbound deferred-answer flow uses these states so a Ringing session is never evicted from
+/// <c>_activeCalls</c> out from under a pending answer (the bug that broke PR #40):
+///   Ringing   — 180 sent, 200 OK HELD. The session stays in _activeCalls so AcceptIncomingCallAsync
+///               can always find it on handset-lift.
+///   Active    — held 200 OK sent (handset lifted); media bridge runs.
+///   Cancelled — a pre-200 caller-hangup (CANCEL) arrived during the ring. We 200+487 the CANCEL and
+///               mark the session Cancelled IN PLACE (NOT removed), so a slightly-late
+///               AcceptIncomingCallAsync still finds it, reads Cancelled, and correctly declines to
+///               send a 200 OK. A single final teardown (HangupAsync via the Completed chain) removes it.
+///   Completed — terminal; the session has been (or is being) removed and disposed.
+/// </summary>
+public enum CallStatusType { Unknown, Ringing, Active, Completed, Failed, Cancelled }
 
 public sealed class AudioDataEventArgs(string callId, ReadOnlyMemory<byte> pcmData, int sampleRate) : EventArgs
 {
