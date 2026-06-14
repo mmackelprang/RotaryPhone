@@ -31,7 +31,7 @@ The system consists of two main components:
   - Windows Core Audio integration (via NAudio)
   - Automatic routing to rotary phone or cell phone
 - **Configuration File Support**: JSON-based configuration
-- **Call History Logging**: Comprehensive call tracking
+- **Call History Logging**: Comprehensive call tracking, persisted to SQLite (`data/call-history.db`) so it survives restarts and deploys
 - **Multiple Phone Support**: Architecture supports multiple rotary phone instances
 
 ### Web UI (Planned Migration to TypeScript)

@@ -40,9 +40,9 @@ public class CallHistoryService : ICallHistoryService
                 _callHistory.RemoveRange(0, toRemove);
                 _logger.LogDebug("Trimmed {Count} old entries from call history", toRemove);
             }
-
-            OnCallHistoryAdded?.Invoke(entry);
         }
+
+        OnCallHistoryAdded?.Invoke(entry);
     }
 
     public void UpdateCallHistory(CallHistoryEntry entry)
