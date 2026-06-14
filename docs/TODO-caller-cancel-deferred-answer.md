@@ -30,3 +30,22 @@ Additive media-inactivity teardown that never touches the answer path: when GV m
 - Reverted: PR #40 (deferred-answer) <- reverted by PR #41.
 - On main: PR #39 (inbound CANCEL handler -- dormant until A makes GV send a CANCEL).
 - Live evidence: caller-hangup window shows only `RTCP ... no activity for over 30 seconds`; `Answered incoming call` (auto-200) fires at INVITE time.
+
+## Captured evidence — GV web-client reference behavior (2026-06-13)
+
+Captured the gv-bridge Chrome's voice.google.com SIP-over-WSS frames via CDP (auto-attach to page + workers), with `rotary-phone` stopped so the call stayed un-answered. GV's own web client is the reference callee — it does NOT auto-answer. Observed flow for an inbound call the caller hung up before answering (client -> GV, in order):
+
+- `SIP/2.0 100 Trying`            (CSeq: 1 INVITE)
+- `SIP/2.0 180 Ringing`           (CSeq: 1 INVITE)
+- `SIP/2.0 183 Session Progress`  (CSeq: 1 INVITE) — WITH SDP answer (`Content-Type: application/sdp`) as early media; still NOT a 200 OK
+- *(caller hangs up)*
+- `SIP/2.0 200 OK`                (CSeq: 1 **CANCEL**) — ACKs GV's CANCEL
+- `SIP/2.0 487 Request Terminated`(CSeq: 1 INVITE) — final response to the INVITE
+
+### Conclusions (Approach A confirmed sound)
+1. **GV DOES send a SIP `CANCEL` over the WS when the caller hangs up on an un-answered call** — proven by the client's `200 OK (CSeq CANCEL)` + `487` responses. Our auto-answer (immediate 200 OK) is exactly why we never observed the CANCEL.
+2. Correct callee response to that CANCEL = **`200 OK` to the CANCEL + `487 Request Terminated` to the INVITE** — already implemented by PR #39's CANCEL handler.
+3. GV's web-client inbound pattern = **`100` -> `180` -> `183`(+SDP early media) -> [hold] -> `200 OK` only on user-answer.** The deferred-answer fix should mirror this: send `180` (optionally `183` with the SDP answer for ringback/early media), hold the `200 OK` until handset-lift; on a pre-200 CANCEL, reply `200`+`487`.
+
+### Remaining work is implementation-only
+Approach A's protocol assumption is now verified. The next attempt just needs: (a) fix the `_activeCalls` session retention/lookup that broke PR #40 (`AcceptIncomingCallAsync: no session`), and (b) a mandatory regression test asserting a NORMAL inbound answer sends the held `200 OK`. (Capture limitation: only the client->GV direction was recorded; GV's exact CANCEL request bytes weren't, but the client responses unambiguously prove GV sent it, and #39 already parses an incoming CANCEL.)
