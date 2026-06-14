@@ -407,16 +407,6 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _negotiatedHt801RtpIp ?? "(config)", _negotiatedHt801RtpPort?.ToString() ?? "(config)",
             _inviteRtpPort?.ToString() ?? "(config)");
 
-        // DEFERRED ANSWER: an inbound GV INVITE is held at 180 Ringing (no 200 OK yet). Now the
-        // handset is lifted, so send the held 200 OK to actually answer the GV call BEFORE bringing
-        // up the audio bridge. For an inbound call _activeCallId was armed by HandleSipIncomingCall.
-        // AcceptIncomingCallAsync is a no-op for any non-ringing session (e.g. an outbound call whose
-        // _activeCallId session is already Active), so this is safe to call unconditionally.
-        if (_sipTransport != null && _activeCallId != null)
-        {
-            await _sipTransport.AcceptIncomingCallAsync(_activeCallId).ConfigureAwait(false);
-        }
-
         if (_audioBridge != null && _sipTransport != null && _activeCallId != null)
         {
             _audioBridge.SetSipTransport(_sipTransport, _activeCallId);
