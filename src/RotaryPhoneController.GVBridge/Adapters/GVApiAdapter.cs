@@ -242,14 +242,7 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         // to a cookie refresh. NOT triggered by plain network drops.
         _sipTransport.AuthenticationFailed += HandleAuthenticationFailed;
 
-        _sipTransport.IncomingCallReceived += HandleSipIncomingCall;
-        _sipTransport.CallStatusChanged += (_, e) =>
-        {
-            if (e.NewStatus == CallStatusType.Active)
-                OnCallAnswered?.Invoke();
-            else if (e.NewStatus == CallStatusType.Completed)
-                OnCallEnded?.Invoke();
-        };
+        WireSipTransportEvents(_sipTransport);
 
         // 6. Register SIP transport with Google Voice (enables incoming + outgoing calls)
         try
@@ -281,10 +274,14 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _healthCheckTimer = null;
         }
 
-        // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
+        // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs). Unsubscribe ALL
+        // handlers WireSipTransportEvents added (IncomingCallReceived + CallStatusChanged) plus the
+        // auth handler, so no event can fire into a deactivated adapter (matters most when a transport
+        // outlives the adapter, e.g. AttachSipTransportForTest in tests).
         if (_sipTransport != null)
         {
             _sipTransport.IncomingCallReceived -= HandleSipIncomingCall;
+            _sipTransport.CallStatusChanged -= HandleSipCallStatusChanged;
             _sipTransport.AuthenticationFailed -= HandleAuthenticationFailed;
             await _sipTransport.DisposeAsync();
             _sipTransport = null;
@@ -407,6 +404,18 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             _negotiatedHt801RtpIp ?? "(config)", _negotiatedHt801RtpPort?.ToString() ?? "(config)",
             _inviteRtpPort?.ToString() ?? "(config)");
 
+        // DEFERRED ANSWER: an inbound GV INVITE is held at 180 Ringing (no 200 OK yet). Now the
+        // handset is lifted, so send the held 200 OK to actually answer the GV call BEFORE bringing
+        // up the audio bridge. For an inbound call _activeCallId was armed by HandleSipIncomingCall.
+        // AcceptIncomingCallAsync is a no-op for any non-ringing session (e.g. an outbound call whose
+        // _activeCallId session is already Active), so this is safe to call unconditionally. If the
+        // caller cancelled during the ring, the session is Cancelled and no 200 OK is sent (the
+        // transport fires Completed to drive teardown instead) — see AcceptIncomingCallAsync.
+        if (_sipTransport != null && _activeCallId != null)
+        {
+            await _sipTransport.AcceptIncomingCallAsync(_activeCallId).ConfigureAwait(false);
+        }
+
         if (_audioBridge != null && _sipTransport != null && _activeCallId != null)
         {
             _audioBridge.SetSipTransport(_sipTransport, _activeCallId);
@@ -458,6 +467,43 @@ public class GVApiAdapter : ICallAdapter, IDisposable
         Interlocked.Exchange(ref _activeCallId, e.CallInfo.CallId);
         _logger.LogInformation("SIP incoming call from {Number}", e.CallInfo.CallerNumber);
         OnIncomingCall?.Invoke(e.CallInfo.CallerNumber);
+    }
+
+    private void HandleSipCallStatusChanged(object? sender, CallStatusChangedEventArgs e)
+    {
+        if (e.NewStatus == CallStatusType.Active)
+            OnCallAnswered?.Invoke();
+        else if (e.NewStatus == CallStatusType.Completed)
+            OnCallEnded?.Invoke();
+    }
+
+    /// <summary>
+    /// Subscribe the adapter to a SIP transport's call-lifecycle events. This is the SINGLE place
+    /// the inbound chain is wired (INVITE -> IncomingCallReceived -> HandleSipIncomingCall arms
+    /// _activeCallId; CallStatusChanged(Active/Completed) -> OnCallAnswered/OnCallEnded). Production
+    /// (<see cref="ActivateAsync"/>) and the integration tests both go through here so a test can
+    /// drive the genuine production wiring rather than a hand-rolled approximation (the gap that let
+    /// PR #40 ship with broken inbound answering).
+    /// </summary>
+    private void WireSipTransportEvents(GvSipTransport transport)
+    {
+        transport.IncomingCallReceived += HandleSipIncomingCall;
+        transport.CallStatusChanged += HandleSipCallStatusChanged;
+    }
+
+    /// <summary>
+    /// Test-only seam: attach an externally-constructed <see cref="GvSipTransport"/> (built over a
+    /// fake WebSocket channel) and wire it with the EXACT production subscriptions, optionally with
+    /// an audio bridge. Lets integration tests exercise the real
+    /// INVITE -> HandleSipIncomingCall -> _activeCallId -> OnCallAnsweredOnRotaryPhoneAsync ->
+    /// AcceptIncomingCallAsync(_activeCallId) chain without cookies/network. NOT used in production.
+    /// </summary>
+    internal void AttachSipTransportForTest(GvSipTransport transport, GVAudioBridgeService? audioBridge = null)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        _sipTransport = transport;
+        _audioBridge = audioBridge;
+        WireSipTransportEvents(transport);
     }
 
     /// <summary>
