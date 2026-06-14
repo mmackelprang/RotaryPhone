@@ -1,7 +1,8 @@
 # TODO — Caller-cancel-keeps-ringing (inbound) — future fix via deferred answer
 
-**Status:** OPEN (deferred). Logged 2026-06-13 per user request.
+**Status:** OPEN (deferred). Logged 2026-06-13 per user request. Updated 2026-06-13 after PR #45/#46 (v2) — see "v2/v3 attempt" below.
 **Severity:** minor — calls work both directions; only affects the case where the caller hangs up *before* the rotary handset is lifted.
+**Deployed state (stable):** `origin/main @ 89282e4` (revert of #45). Running = pre-#45 build (auto-answer + clean rotary-hangup) + #44 SQLite call-history + #39 dormant CANCEL handler. **Do NOT re-attempt without reading the v2/v3 landmine section first.**
 
 ## Symptom
 Inbound GV call (cell → Google Voice → RotaryPhone → HT801 rings). If the **caller hangs up before the rotary handset is lifted**, the HT801 keeps ringing ~30s (until SIPSorcery's media-inactivity timeout) instead of stopping promptly.
@@ -49,3 +50,56 @@ Captured the gv-bridge Chrome's voice.google.com SIP-over-WSS frames via CDP (au
 
 ### Remaining work is implementation-only
 Approach A's protocol assumption is now verified. The next attempt just needs: (a) fix the `_activeCalls` session retention/lookup that broke PR #40 (`AcceptIncomingCallAsync: no session`), and (b) a mandatory regression test asserting a NORMAL inbound answer sends the held `200 OK`. (Capture limitation: only the client->GV direction was recorded; GV's exact CANCEL request bytes weren't, but the client responses unambiguously prove GV sent it, and #39 already parses an incoming CANCEL.)
+
+---
+
+## v2/v3 attempt (PR #45 → reverted by #46) — the **hangup-propagation landmine**
+
+PR #45 ("deferred-answer v2") was the second implementation of Approach A. It got **further than #40** but was reverted by **PR #46** for a *different* regression. This section captures exactly what v2 fixed, exactly what it broke, and the v3 requirement so the next session does not re-learn it.
+
+### What v2 got RIGHT (keep these wins)
+- Fixed the #40 session-retention bug: the `Ringing` session is now **kept in `_activeCalls` through the whole ring** (not removed when the auto-send was dropped), so `AcceptIncomingCallAsync(_activeCallId)` **found** the session on handset-lift. No more `AcceptIncomingCallAsync: no session`.
+- **Normal inbound answer worked** — handset-lift sent the held `200 OK` to GV, two-way audio flowed. (UAT confirmed: *"Called, answered, audio works"*.)
+- **Caller-cancel worked** — caller hangs up before answer → GV sends a real `CANCEL` → #39's handler tears down → HT801 stops ringing promptly. (UAT confirmed: *"Calling and hanging up before answering did stop ringing the RF"*.)
+
+### What v2 BROKE (the reason for revert #46)
+**Rotary-hangup no longer tore down the GV/cell leg.** UAT: *"Called, answered, audio works, but hanging up the RF didn't hang up my cell call."* The cell call stayed up after the handset went back on the hook — no BYE reached GV.
+
+### Root cause of the v2 regression (the landmine)
+Deferring the `200 OK` to handset-lift means the answer now flows through `GvSipTransport.AcceptIncomingCallAsync`, which fires `CallStatusChanged(Active)`. That event is wired:
+
+```
+GvSipTransport.AcceptIncomingCallAsync  →  fires CallStatusChanged(Active)
+  →  GVApiAdapter.OnCallAnswered
+  →  CallManager.HandleCallAnsweredOnCellPhone   ← THE LANDMINE
+```
+
+`HandleCallAnsweredOnCellPhone` (CallManager.cs ~:390-415) is the **"the far party answered on their cell"** path: it marks the call as already-bridged-elsewhere, keeps audio where it is, and **cancels the local ring WITHOUT arming the rotary-hangup→BYE propagation.** So when the handset later goes on-hook, CallManager no longer believes it owns a leg that needs a BYE → **no BYE to GV → cell call lingers** (until GV's own media-timeout, ~30s).
+
+In the **auto-answer (pre-#45, current stable)** flow this never happens: the `200 OK` is sent at INVITE time by `HandleIncomingInvite`, the InCall transition + media bridge are driven from the **handset/InCall path**, and rotary-hangup correctly sends BYE. Deferring the 200 re-routed the "answered" signal through the wrong CallManager entry point.
+
+### v3 requirement — send the held 200 OK WITHOUT tripping the "answered on cell" path
+The next attempt must keep all three v2 wins **and** preserve rotary-hangup→BYE. Concretely:
+
+1. **Decouple the held-`200 OK` send from `CallStatusChanged(Active)`.** Sending the deferred 200 to GV must NOT route into `HandleCallAnsweredOnCellPhone`. Drive the InCall transition + media bridge from the **handset-lift / local-answer path** (mirroring how the stable auto-answer flow does it), so CallManager still owns the leg and still arms rotary-hangup→BYE.
+   - Options to evaluate: (a) a dedicated "local answer completed" event distinct from the "remote/cell answered" `OnCallAnswered`; (b) a flag on the answer so `GVApiAdapter.OnCallAnswered` skips `HandleCallAnsweredOnCellPhone` for *inbound-deferred* answers; (c) have `AcceptIncomingCallAsync` send the 200 but let the existing handset/InCall path (not `CallStatusChanged(Active)`) own the state transition. Pick after reading both call sites — don't guess.
+2. **Add a mandatory hangup-propagation regression test:** inbound INVITE → defer → handset-lift (held 200 sent) → **rotary BYE → assert a BYE is sent to GV** (and the cell/GV leg is torn down). This is the gap #45's tests missed — they verified answering + caller-cancel but never asserted rotary-hangup still BYEs after a deferred answer.
+3. Keep #40's mandatory test (normal answer sends the held 200) and #45's session-retention fix.
+4. **UAT order (do not ship if any earlier step regresses):**
+   (a) normal inbound answer → two-way audio;
+   (b) **rotary-hangup after answer → cell call ends promptly (BYE to GV)**  ← the #45 regression, test this explicitly;
+   (c) caller-cancel before answer → HT801 stops ringing promptly.
+
+### The full set of coupled landmines (all three must hold simultaneously)
+A correct v3 has to satisfy **all** of these at once — fixing one previously broke another:
+| Concern | Broke in | Mechanism |
+|---|---|---|
+| Session found on handset-lift | #40 | session not retained in `_activeCalls` after auto-send removed → `AcceptIncomingCallAsync: no session` |
+| Caller-cancel stops ring | (the original bug) | auto-answer suppresses GV's CANCEL → only media-stop (~30s) |
+| Rotary-hangup BYEs the GV leg | #45 | deferred 200's `CallStatusChanged(Active)` → `HandleCallAnsweredOnCellPhone` → no BYE armed |
+
+### References (v2/v3)
+- Reverted: **PR #45** (deferred-answer v2) ← reverted by **PR #46** (`2b392dc`). Stable HEAD = `89282e4`.
+- Earlier reverted: PR #40 ← reverted by #41 (session-retention break).
+- On main (dormant until A makes GV send a CANCEL): PR #39 inbound CANCEL handler.
+- Key code sites: `GvSipTransport.AcceptIncomingCallAsync` (fires `CallStatusChanged(Active)`); `GVApiAdapter.OnCallAnswered`; `CallManager.HandleCallAnsweredOnCellPhone` (~:390-415, the landmine) vs. the handset/InCall path that correctly arms rotary-hangup→BYE.
