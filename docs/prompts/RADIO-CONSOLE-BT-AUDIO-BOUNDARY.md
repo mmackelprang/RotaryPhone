@@ -139,6 +139,8 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | GET | `/api/gvbridge/sms/threads` | SMS thread list | 4 (PR3) |
 | GET | `/api/gvbridge/sms/...` | SMS thread/message read endpoints | 4 (PR3) |
 | POST | `/api/gvbridge/sms/send` | Send an SMS (account write — ships dark behind `EnableSmsSend`) | 4 (PR4) |
+| POST | `/api/gvbridge/voicemail/{id}/read` | Mark a voicemail read (`{ "isRead": bool }` → returns `VoicemailItemDto`; GV write-through; **contract ratified, build HELD** behind `EnableMarkRead`) | 4 (mark-read FF) |
+| POST | `/api/gvbridge/sms/threads/{threadId}/read` | Mark an SMS thread read (`{ "isRead": bool }` → returns `SmsThreadDto`, `hasUnread=false`; GV write-through; **contract ratified, build HELD** behind `EnableMarkRead`) | 4 (mark-read FF) |
 | GET | `/api/gvtrunk/status` | VoIP.ms SIP trunk registration state | A (existing) |
 | GET | `/api/gvtrunk/calls` | Call history (last 50) | A (existing) |
 | GET | `/api/gvtrunk/sms` | SMS history (last 20, in-memory) | A (existing) |
@@ -155,6 +157,17 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 **JSON conventions:** All response payloads are camelCase or PascalCase depending on whether the controller returns an anonymous object (camelCase) or a typed DTO/record (PascalCase). RTest's `Radio.Web` configures `JsonSerializerOptions.PropertyNameCaseInsensitive = true` so both work transparently. **New endpoints should prefer typed records** for OpenAPI/Swagger schema clarity.
 
 **Inter-service auth (PR5, default-off):** ALL `/api/gvbridge/*` REST endpoints above **and** the `/hub` SignalR connection accept an **optional** `X-RotaryPhone-Auth: <key>` header. The header is **required only when** RotaryPhone's `GVBridge:InterServiceAuthKey` is set (default empty = LAN-only, no auth, no behavior change). When the key is set, requests/connections without a matching header get **401** (REST) or an **aborted connection** (hub); the compare is constant-time. **EXCEPTION:** `/api/gvbridge/event` (the browser-extension content-script callback) stays open — never gated. The secret is supplied at runtime out-of-source (env `GVBridge__InterServiceAuthKey` / user-secrets), never committed. See the Cookie Management Security note and the handoff (`docs/handoffs/radioconsole-gv-voicemail-sms-ui-handoff.md`) for how RTest sends it.
+
+**SignalR `/hub` events for GV voicemail/SMS (push, on the existing `RotaryHub`):** RadioConsole
+subscribes to these alongside the call events — RotaryPhone polls GV and pushes; RadioConsole never polls
+GV directly.
+
+| Event | Payload | Fired when | Phase added |
+|-------|---------|------------|:-----------:|
+| `VoicemailReceived` | `VoicemailItemDto` | Poller detects a new voicemail | 4 (PR3) |
+| `SmsReceived` | `SmsMessageDto` (inbound) | Poller detects a new inbound SMS | 4 (PR3) |
+| `SmsSent` | `SmsMessageDto` (outbound echo) | Successful send / poller surfaces an outbound | 4 (PR4) |
+| `ReadStateChanged` | `{ kind: "Voicemail"\|"Sms", id, threadId, isRead, changedAtUtc }` (camelCase) | Read-state changes from any source — fired on a mark-read route call (path a); poller-detected externally-originated read flip (phone/GV web) is a fast-follow (path b). **Contract ratified, build HELD.** | 4 (mark-read FF) |
 
 **Polling cadence guidance for RTest:**
 
@@ -304,3 +317,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-05-25 | RotaryPhone session | Phase B PR2: cookie management endpoints `GET /api/gvbridge/cookies` (status metadata, no secrets) and `POST /api/gvbridge/cookies` (paste-in from browser DevTools). Accepts RawCookieHeader or individual fields. LAN-only, no auth -- see Cookie Management Security note. `GvCookieManager` service extracts cookie lifecycle. `GVApiAdapter` gains `LoadedAt`, `LastValidatedAt`, `ReloadCookiesAsync`. |
 | 2026-05-25 | RotaryPhone session | Phase B PR3: `POST /api/gvbridge/cookies/refresh-from-browser` -- server-side CDP cookie extraction. Connects to Chrome's remote debugging port (default 9224), finds voice.google.com tab, extracts cookies via WebSocket Network.getCookies, feeds into existing SetCookiesAsync pipeline. No Playwright dependency, uses BCL HttpClient + ClientWebSocket only. `GVBridgeConfig.ChromeCdpPort` added. |
 | 2026-06-20 | RotaryPhone session | PR5: inter-service auth gate. New optional `GVBridge:InterServiceAuthKey` (default empty = LAN-only, no behavior change). When set, `X-RotaryPhone-Auth: <key>` is REQUIRED on all `/api/gvbridge/*` REST endpoints AND the `/hub` SignalR connection (header, or access_token query for browser WS); 401/abort otherwise; constant-time compare. `/api/gvbridge/event` (extension content-script) stays open. Secret supplied at runtime via env (`GVBridge__InterServiceAuthKey`) / user-secrets — never committed. REQUIRED before any non-LAN exposure of RotaryPhone. RadioConsole must send the header on REST + an access-token provider on its HubConnection once the key is set (cross-repo; handoff updated). |
+| 2026-06-20 | RotaryPhone session | **API only — no BT/audio change.** GV mark-read / durable read-state contract **RATIFIED** (build HELD by owner). Added two Integration-Points routes — `POST /api/gvbridge/voicemail/{id}/read` and `POST /api/gvbridge/sms/threads/{threadId}/read` (`{ "isRead": bool }` → returns the updated `VoicemailItemDto`/`SmsThreadDto`; **GV write-through** = Google is the single source of truth, no local store; 200 idempotent / 404 / 502) — and a new `/hub` event `ReadStateChanged` (`{ kind, id, threadId, isRead, changedAtUtc }`, fired on a mark route call now / on poller-detected external read flips as a fast-follow). Auth: auto-covered by the PR5 prefix gate (no special posture). Mark-unread is best-effort. Delete deferred. Decision record: `docs/architecture/decisions/2026-06-20-gv-markread-readstate-contract.md`; reply to RadioConsole: `docs/handoffs/radioconsole-gv-markread-reply.md`. Build ships dark behind `EnableMarkRead` (default off) when funded; first real `updateread` pending the ADR §11 live capture. |
