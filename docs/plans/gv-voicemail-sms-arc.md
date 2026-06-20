@@ -37,7 +37,7 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
 | 2. Designer UX spec + handoff | ✅ merged | PR #52 — `docs/design-handoffs/gv-voicemail-sms-radioconsole/` + spec |
 | 2. Architect API contract | ✅ folded into the spike ADR (§6) | ADR §6 / §6.1 DTOs |
 | 3. Planner (read-side PR1–3) | ✅ merged | PR #53 — `docs/superpowers/plans/2026-06-20-gv-pr{1,2,3}-*.md` |
-| 4a. Builder — PR1 read clients | 🟡 in progress | — |
+| 4a. Builder — PR1 read clients | ✅ merged | PR #54 — parser seam + GvThreadClient/GvVoicemailClient (list); parser provisional pending ADR §11 live capture |
 | 4b. Builder — PR2 voicemail REST + audio proxy | ⬜ depends on PR1 | — |
 | 4c. Builder — PR3 SMS read + poll push | ⬜ depends on PR1 | — |
 | 4d. Builder — PR4 SMS send | 🔒 owner-hold (ADR §12 #1) | — |
