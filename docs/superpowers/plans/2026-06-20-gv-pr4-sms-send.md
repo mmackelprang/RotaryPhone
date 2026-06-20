@@ -1,12 +1,15 @@
 # PR4 Plan — `feat(gv): SMS send`
 
-> ## 🔒 OWNER-HOLD — DO NOT BUILD OR MERGE WITHOUT EXPLICIT OWNER APPROVAL
-> **Reason:** This PR introduces an **irreversible, user-visible GV account write** (`sendsms` actually
-> delivers a text from the owner's real Google Voice number). The ADR (§4.2 #4, §10 row PR4, §12 #1)
-> classes it as a HOLD-for-owner item under the auto-merge policy. **Writing this plan is what was
-> requested; building it is gated on the owner saying "go."** Do not let a Builder pick this up off the
-> normal queue. The owner must explicitly green-light the build, and the PR must be merged by the owner
-> (not auto-merged on green gates), per CLAUDE.md "Still pause and check with me first … irreversible …".
+> ## ✅ OWNER-APPROVED TO BUILD — ships DARK behind a server-side `EnableSmsSend` flag (default FALSE)
+> **Status (2026-06-20):** the owner has **green-lit the build + auto-merge-on-green** for PR4 (arc rows
+> 4d/4e). The original owner-hold concern — an **irreversible, user-visible GV account write** (`sendsms`
+> actually delivers a text from the owner's real Google Voice number) — is now contained by shipping the
+> account-write code **DARK**: a **server-side `EnableSmsSend` feature flag, default FALSE** (Task 7),
+> makes `POST /api/gvbridge/sms/send` return a coded `send_disabled` response and perform **NO GV call**
+> until the owner flips the flag. This lets the write path merge safely. **The first REAL send remains
+> gated on the ADR §11 live capture** (Task 8 step 4) — fixture-tested only from dev; no live send from
+> the dev env. Builder may build + auto-merge on green gates per CLAUDE.md; only **enabling the flag**
+> (and the first live send) is the owner's explicit, separate action. (ADR §4.2 #4, §10 row PR4, §12 #1.)
 
 > **For agentic workers (once unheld):** REQUIRED SUB-SKILL — use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement task-by-task. Steps use checkbox (`- [ ]`)
@@ -18,7 +21,11 @@
 §6.2 (the `POST /api/gvbridge/sms/send` row), §10 row PR4, §11 step 4 (live capture), §12 #1.
 **Depends on:** PR3 (`GvSmsClient` read path, `GvThreadClient`, parser seam, `IGvAuthenticatedClientProvider`,
 `GvThreadPoller`, `RotaryHub` `SmsReceived` push) — **all merged** (#54/#56/#57).
-**Sensitivity:** 🔒 **HOLD — owner review** (irreversible GV account **write**).
+**RadioConsole UI contract (consumer):** `D:\prj\rtest\rtest\docs\design-handoffs\HANDOFF-phone-messages-voicemail-sms.md`
+— §"Outbound write-path bubble states", §"Compose / on-screen keyboard spec", §"Send-failure copy matrix".
+This plan's DTO shapes + error taxonomy are reconciled to that handoff (see Task 1 + the §"Error taxonomy" table).
+**Sensitivity:** ✅ **owner-approved to build + auto-merge on green**; ships DARK (`EnableSmsSend`=false) until
+the owner enables it. First real send pending ADR §11 (Task 8 step 4).
 
 ---
 
@@ -35,7 +42,7 @@ through the owner's GV number. Concretely:
    returning `SendSmsResponse` (ADR §6.1). On success it returns the created **outbound**
    `SmsMessageDto` so RadioConsole can echo it, **and** broadcasts it over `RotaryHub` (`SmsSent`) so
    every connected client converges (decision recorded in Task 6).
-3. **The §4.2 safety rules — the entire reason this PR is owner-held** — implemented explicitly:
+3. **The §4.2 safety rules — the entire reason this PR was owner-held, now contained by the dark flag** — implemented explicitly:
    E.164 normalization/validation, server-side rate-limiting (429), **no auto-retry**, honest status
    that never over-claims delivery, and correct new-recipient-vs-reply thread-id derivation.
 
@@ -45,14 +52,54 @@ Memory `project_gv_registration_603_incident.md`: a previous "rings but no audio
 **status that over-claimed success**. Apply the same discipline here. Per ADR §4.2 #3, `sendsms`
 returns a **transaction ack, not the echoed message** — so:
 
-- A 200 from Google means **queued**, *not* "delivered." `SendSmsResponse.Queued = true` means exactly
-  "Google accepted the send request," nothing stronger. Never report delivery we cannot observe.
+- A 200 from Google means **queued**, *not* "delivered." `SendSmsResponse.Queued = true` (and
+  `Code = "queued"`) means exactly "Google accepted the send request," nothing stronger. Never report
+  delivery we cannot observe.
 - The returned outbound `SmsMessageDto` is a **locally-synthesized optimistic echo** (text we sent +
   the resolved thread id + `Direction = "Outbound"`), clearly the request we made — not a parse of
-  Google's response body. The **authoritative** copy of the message arrives later via the normal
-  `GvThreadPoller` diff (ADR §4.2 #3) and the existing `SmsReceived`/read endpoints.
-- On any non-200 or ambiguous failure: `Queued = false`, populate `Error`, **do not retry** (ADR §4.2
-  #4). The UI owns the user's retry decision (handoff: "preserve the typed text … never auto-retry").
+  Google's response body. Its `Id` is the **stable `csid:` correlation id** (Task 1 Step 1b), NOT a
+  random guid, so the UI can collapse it against the re-surfaced copy without a visual jump. The
+  **authoritative** copy of the message arrives later via the `GvThreadPoller` outbound surface
+  (`OnSmsSent`, Task 1 Step 1c) and/or a thread re-fetch — same `Id` (ADR §4.2 #3).
+- On any non-200 or ambiguous failure: `Queued = false`, set the machine-readable `Code` (§"Error
+  taxonomy"), populate `Error`, **do not retry** (ADR §4.2 #4). The UI owns the user's retry decision
+  (handoff: "preserve the typed text … never auto-retry").
+
+## Error taxonomy — distinguishable, machine-readable outcomes (RadioConsole send-failure matrix)
+
+The RadioConsole handoff (§"Send-failure copy matrix") shows the UI **distinct copy per failure**. To let
+it pick that copy **without parsing prose**, `POST /api/gvbridge/sms/send` maps each outcome to a distinct
+**HTTP status** + a stable **`SendSmsResponse.Code`**. The UI switches on `Code`; `Error` is only for logs
++ a fallback string. This is the contract Task 6 implements.
+
+| Outcome | HTTP | `Code` | `Queued` | When | Handoff copy the UI shows |
+|---|---|---|---|---|---|
+| **Queued** | 200 | `queued` | true | GV returned 200 (accepted, not delivered) | bubble → "sent (queued)", single check |
+| **Send disabled (dark)** | 409 | `send_disabled` | false | server `EnableSmsSend`=false — **no GV call made** | Send hidden/disabled; "Texting unavailable" (handoff GV-unavailable affordance) |
+| **Invalid number** | 400 | `invalid_number` | false | E.164 normalize fails, OR GV `INVALID_ARGUMENT` | "That number doesn't look right. Check it and try again." |
+| **Empty text** | 400 | `invalid_text` | false | text null/whitespace | (compose Send stays disabled; defensive 400) |
+| **Rate-limited** | 429 | `rate_limited` | false | sliding-window limiter rejects (ADR §4.2 #4) | "Sending too fast — wait a moment." |
+| **Auth decay / adapter down** | 502 | `auth_unavailable` | false | no authenticated client (cookie decay / recovery window) | "Couldn't send — Google Voice needs to reconnect. Try again shortly." |
+| **Upstream GV failure** | 502 | `upstream_error` | false | GV returned a non-200, non-INVALID_ARGUMENT status | "Couldn't send your message. Try again." |
+| **Timeout / network** | 504 | `timeout` | false | request timed out / network exception (no response observed) | "No response — check the connection and try again." |
+| **Generic (last resort)** | 500 | `error` | false | anything unclassified | "Couldn't send your message. Try again." |
+
+**Mapping rules (so the codes are deterministic + testable):**
+- **`invalid_number` vs `upstream_error`:** local normalization failure → **400 `invalid_number`** before
+  any GV call. If GV itself returns the (rare) `INVALID_ARGUMENT` AFTER we send, the client surfaces that as
+  a distinct signal so the controller can ALSO return **400 `invalid_number`** (not a generic 502) — the UI
+  shows the same "number doesn't look right" copy either way. `GvSmsClient.SendAsync` must therefore
+  distinguish an INVALID_ARGUMENT body from other non-200s (extend `GvSmsSendResult` with the outcome —
+  see Task 5).
+- **`auth_unavailable` (502) vs `timeout` (504):** a **null authenticated client** (adapter down / cookie
+  decay) → 502 `auth_unavailable`; a **`TaskCanceledException`/timeout/`HttpRequestException` with no
+  response** → 504 `timeout`. Both are honest "we did not observe success."
+- **`send_disabled` (409):** returned by the feature-flag guard FIRST (Task 6 / Task 7), before the rate
+  limiter, with **no GV call** — see Task 7.
+- Every branch sets `Code` explicitly; there is no path that returns a body without a `Code` (the UI relies
+  on it). Tests assert the `(HTTP status, Code)` pair per row.
+
+---
 
 ## The stable seam: thread-id derivation (ADR §4.2 #1, UNVERIFIED — §11 step 4)
 
@@ -87,11 +134,14 @@ Api/
 ### Modified files
 
 ```
-Clients/GvSmsClient.cs                          -- add SendAsync (the write path; read path untouched)
-Api/GvSmsController.cs                           -- add [HttpPost("send")]
-Models/GVBridgeConfig.cs                         -- rate-limit config keys
-Extensions/GVBridgeServiceExtensions.cs          -- register normalizer, resolver, rate-limiter
-src/RotaryPhoneController.Server/appsettings.json -- rate-limit config keys
+Api/GvBridgeReadDtos.cs                          -- add SendSmsRequest/SendSmsResponse (Queued+Code+Message; Task 1)
+Clients/GvSmsClient.cs                          -- add SendAsync + classified GvSendOutcome (write path; read untouched)
+Api/GvSmsController.cs                            -- add [HttpPost("send")]: feature-flag→rate-limit→taxonomy→echo
+Services/IGvMessageEventSource.cs                -- add OnSmsSent (outbound channel, Task 6)
+Services/GvThreadPoller.cs                       -- surface NEW outbound msgs via OnSmsSent w/ matching csid: id (id-consistency)
+Models/GVBridgeConfig.cs                         -- EnableSmsSend flag (default FALSE) + rate-limit config keys
+Extensions/GVBridgeServiceExtensions.cs          -- register normalizer, resolver, rate-limiter, outbound sink
+src/RotaryPhoneController.Server/appsettings.json -- EnableSmsSend:false + rate-limit config keys
 src/RotaryPhoneController.Server/Services/GvMessagePushBridge.cs -- forward a new SmsSent event (Task 6)
 ```
 
@@ -115,25 +165,86 @@ src/RotaryPhoneController.GVBridge.Tests/
 
 - [ ] **Step 1: Append the send DTOs** (the read DTOs already live here from PR3)
 
-Add to `src/RotaryPhoneController.GVBridge/Api/GvBridgeReadDtos.cs`, exactly as ADR §6.1:
+Add to `src/RotaryPhoneController.GVBridge/Api/GvBridgeReadDtos.cs`. This is the **RadioConsole-reconciled**
+shape — the UI handoff consumes `Queued`, the outbound `Message` (a real `SmsMessageDto` so the UI reuses
+the same de-dupe + render path), and a machine-readable `Code` for the send-failure copy matrix:
 
 ```csharp
 /// <summary>
 /// Cross-service SMS send request (ADR §6.1, §4). ToNumber is whatever the user typed; RotaryPhone
 /// normalizes it to E.164 before building the GV thread id. ThreadId is OPTIONAL: present = reply to
 /// an existing thread (use Google's real id); null/empty = start a new conversation (ADR §4.2 #1).
+/// ClientCorrelationId is OPTIONAL: the UI may pass the id of its optimistic bubble so the echo it gets
+/// back carries the SAME correlation id (id-consistency rule, Task 1 Step 1b). If null, the server
+/// synthesizes one.
 /// </summary>
-public record SendSmsRequest(string ToNumber, string Text, string? ThreadId);
+public record SendSmsRequest(string ToNumber, string Text, string? ThreadId, string? ClientCorrelationId = null);
 
 /// <summary>
-/// Cross-service SMS send result (ADR §6.1, §4.2 #3). Queued=true means GOOGLE ACCEPTED the send —
-/// NOT confirmed delivery (sendsms returns a transaction ack, not the echoed message). On failure,
-/// Queued=false and Error is populated; the caller must NOT auto-retry (ADR §4.2 #4). Message is a
-/// locally-synthesized optimistic echo of the outbound text (Direction="Outbound"); the authoritative
-/// copy arrives later via the GvThreadPoller diff.
+/// Cross-service SMS send result (ADR §6.1, §4.2 #3) — reconciled to the RadioConsole handoff
+/// (§"Outbound write-path bubble states", §"Send-failure copy matrix").
+///
+/// • Queued=true means GOOGLE ACCEPTED the send (HTTP 200) — NOT confirmed delivery. sendsms returns a
+///   transaction ack, not the echoed message (ADR §4.2 #3). Honest status: never report delivery.
+/// • Message is the created OUTBOUND message as a full <see cref="SmsMessageDto"/> — the SAME shape the
+///   UI already consumes for reads/pushes — with a STABLE Id (see the id-consistency rule). The UI shows
+///   it as the optimistic "sent (queued)" bubble and later de-dupes it against the re-surfaced copy by Id.
+/// • Code is a machine-readable outcome the UI maps to copy WITHOUT parsing Error prose:
+///   "queued" | "invalid_number" | "rate_limited" | "auth_unavailable" | "upstream_error" |
+///   "timeout" | "send_disabled" | "error". (See the §"Error taxonomy" table.)
+/// • Error is human-readable (logged + safe to surface); on any failure Queued=false and the caller must
+///   NOT auto-retry (ADR §4.2 #4) — retry is the user's decision (handoff: "preserve the typed text").
 /// </summary>
-public record SendSmsResponse(bool Queued, string? ThreadId, string? Error, SmsMessageDto? Message);
+public record SendSmsResponse(
+    bool Queued,
+    string Code,
+    string? ThreadId,
+    string? Error,
+    SmsMessageDto? Message);
 ```
+
+- [ ] **Step 1b: The PR3↔PR4 message-Id consistency rule (id-consistency)** — a code comment + this
+plan note (no separate file). **Problem:** `sendsms` returns an ack, **not** a message id (ADR §4.2 #3),
+so the optimistic echo cannot carry the real GV `MessageId`. Yet the read/poll path keys everything on
+that GV `MessageId` (as-built: `GvThreadPoller.ToSmsDto` sets `Id = m.MessageId`, and the high-water diff
+keys on `(ThreadId, MessageId, SentEpochMs)`). If the echo used a random local id, the UI would later
+show the same outbound message **twice** (optimistic bubble + re-surfaced copy) with no way to collapse them.
+
+**Rule (concrete + testable):**
+1. **Preferred — stable GV id, if available.** If a future live capture (ADR §11) shows `sendsms`
+   *does* return a usable message id, the echo MUST use it verbatim as `SmsMessageDto.Id`; de-dupe is then
+   an exact `Id` match. (Tagged UNVERIFIED — today `sendsms` returns only an ack, so we use the fallback.)
+2. **Fallback (what ships) — synthesized client-correlation id.** The echo's `Id` is a **stable correlation
+   id** of the form `csid:{threadId}:{sha1(text)[..12]}:{sentEpochMs}`, where `sentEpochMs` is the server's
+   send timestamp. The server returns this **same** id as `SendSmsResponse.Message.Id`, and (Step 1c) the
+   **PR3 poller emits the same id for the matching outbound message it later sees** so the UI can collapse
+   on an exact match. If the UI supplied `ClientCorrelationId`, the server echoes THAT back as the `Id`
+   instead (so the UI's pre-send optimistic bubble already carries the final id — zero visual jump).
+3. **Belt-and-suspenders UI match (handoff §"Outbound write-path bubble states" → "Confirmed" row):** the
+   UI ALSO de-dupes on `(text + counterparty + recency window ≤ 2 min)` so an outbound that re-surfaces
+   with a DIFFERENT id (e.g. the poller path didn't run, or GV assigned its own id) still collapses to one
+   bubble. The server documents this window so both sides agree (`recency window = 120s`).
+
+This rule is the single source of truth for "how the optimistic bubble collapses." It is **testable**:
+`GvSmsControllerSendTests` asserts the echo `Id` equals the documented `csid:` form (or the supplied
+`ClientCorrelationId`), and the PR3-side change (Step 1c) is unit-tested to emit the same id.
+
+- [ ] **Step 1c: PR3-side note for id consistency (the poller must surface outbound + the same id)**
+**This is a PR3/`GvThreadPoller` adjustment carried in PR4** (the only cross-PR touch). Two facts make it
+necessary, both verified against the merged code:
+- `GvThreadPoller.PollSmsAsync` currently raises `OnSmsReceived` **only when `m.Direction == "Inbound"`**
+  (the `isNew && m.Direction == "Inbound"` guard). So an **outbound** message the user just sent would
+  **never re-surface via push** — the optimistic bubble would never get an authoritative confirm.
+- The poller already keys identity on the GV `MessageId`; the echo cannot (no id from `sendsms`).
+
+**The PR3-side task (add to PR4, Task 6 Step 1 region):** teach the poller to ALSO surface newly-seen
+**outbound** messages, via a distinct `OnSmsSent` raise (NOT `OnSmsReceived`, so RadioConsole appends
+without an inbound toast — handoff). When it does, it computes the **same `csid:` correlation id** for that
+outbound `SmsMessageDto` (same `sha1(text)` + `threadId` + the message's `sentEpochMs`, rounded to the
+documented precision) so the UI collapses the optimistic bubble against it. Keep the GV `MessageId` in a
+secondary field is NOT needed — the UI matches on the correlation `Id` first, recency window second.
+> If the live capture (ADR §11) later shows `sendsms` returns a real id, switch BOTH the echo and this
+> poller path to that id (one rule, two emit sites) and drop the synthesized `csid:` — a contained change.
 
 - [ ] **Step 2: Build** — `dotnet build src/RotaryPhoneController.GVBridge/RotaryPhoneController.GVBridge.csproj` → Build succeeded.
 - [ ] **Step 3: Commit**
@@ -549,8 +660,9 @@ public class GvSmsClientSendTests
     }
 
     [Fact]
-    public async Task SendAsync_NonSuccess_ReturnsNotQueuedWithError_NoThrow()
+    public async Task SendAsync_InvalidArgumentBody_ClassifiesAsInvalidArgument_NoThrow()
     {
+        // GV signals a bad recipient with INVALID_ARGUMENT → controller will map to 400 invalid_number.
         var http = new HttpClient(new CapturingHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.BadRequest)
             { Content = new StringContent("INVALID_ARGUMENT") }));
@@ -558,19 +670,34 @@ public class GvSmsClientSendTests
 
         var result = await client.SendAsync(http, "t.+19195551234", "hi");
 
-        Assert.False(result.Queued);                 // honest: a 400 is NOT queued
+        Assert.False(result.Queued);                 // honest: NOT queued
+        Assert.Equal(GvSendOutcome.InvalidArgument, result.Outcome);
         Assert.NotNull(result.Error);
-        Assert.Contains("400", result.Error);
     }
 
     [Fact]
-    public async Task SendAsync_NullClient_ReturnsNotQueued_NoThrow()
+    public async Task SendAsync_OtherNonSuccess_ClassifiesAsUpstreamError_NoThrow()
+    {
+        var http = new HttpClient(new CapturingHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            { Content = new StringContent("backend error") }));
+        var client = ReadOnlyClient(http);
+
+        var result = await client.SendAsync(http, "t.+19195551234", "hi");
+
+        Assert.False(result.Queued);
+        Assert.Equal(GvSendOutcome.UpstreamError, result.Outcome);
+    }
+
+    [Fact]
+    public async Task SendAsync_NullClient_ClassifiesAsAdapterUnavailable_NoThrow()
     {
         var client = ReadOnlyClient(new HttpClient(new CapturingHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.OK))));
         var result = await client.SendAsync(authenticatedClient: null, "t.+19195551234", "hi");
         Assert.False(result.Queued);
-        Assert.NotNull(result.Error);                // adapter down → honest failure, never a fake success
+        Assert.Equal(GvSendOutcome.AdapterUnavailable, result.Outcome);  // adapter down → honest failure
+        Assert.NotNull(result.Error);
     }
 
     private sealed class CapturingHandler(
@@ -607,14 +734,28 @@ using RotaryPhoneController.GVBridge.Protocol;
 namespace RotaryPhoneController.GVBridge.Clients;
 
 /// <summary>
-/// Result of a GV sendsms call. Queued=true means Google ACCEPTED the request (HTTP 200) — NOT
-/// confirmed delivery (ADR §4.2 #3, sendsms returns a transaction ack). Error is populated on any
-/// non-200 / exception. Callers MUST NOT auto-retry on failure (ADR §4.2 #4).
+/// Classified outcome of a GV sendsms call, so the controller can map to a distinct HTTP status + Code
+/// (§"Error taxonomy"). The CLIENT only knows what it observed at the GV boundary; the controller owns
+/// the HTTP mapping. Queued is true ONLY for <see cref="GvSendOutcome.Queued"/>.
 /// </summary>
-public record GvSmsSendResult(bool Queued, string? Error)
+public enum GvSendOutcome
 {
-    public static GvSmsSendResult Ok() => new(true, null);
-    public static GvSmsSendResult Fail(string error) => new(false, error);
+    Queued,            // HTTP 200 from GV — accepted/queued (NOT delivered)
+    InvalidArgument,   // GV returned INVALID_ARGUMENT — bad number → controller maps to 400 invalid_number
+    AdapterUnavailable,// no authenticated client (cookie decay / recovery window) → 502 auth_unavailable
+    UpstreamError,     // GV returned some other non-200 → 502 upstream_error
+    Timeout            // timeout / network exception, no response observed → 504 timeout
+}
+
+/// <summary>
+/// Result of a GV sendsms call. Queued=true ONLY when Outcome==Queued and Google returned HTTP 200 —
+/// NOT confirmed delivery (ADR §4.2 #3, sendsms returns a transaction ack). Error is populated on any
+/// failure. Callers MUST NOT auto-retry on failure (ADR §4.2 #4).
+/// </summary>
+public record GvSmsSendResult(bool Queued, GvSendOutcome Outcome, string? Error)
+{
+    public static GvSmsSendResult Ok() => new(true, GvSendOutcome.Queued, null);
+    public static GvSmsSendResult Fail(GvSendOutcome outcome, string error) => new(false, outcome, error);
 }
 ```
 
@@ -655,7 +796,8 @@ Add the provider field + a constructor overload, and the send methods, to the `G
         if (authenticatedClient is null)
         {
             _logger.LogWarning("sendsms skipped — authenticated client unavailable");
-            return GvSmsSendResult.Fail("GV adapter unavailable (no authenticated client)");
+            return GvSmsSendResult.Fail(GvSendOutcome.AdapterUnavailable,
+                "GV adapter unavailable (no authenticated client)");
         }
         try
         {
@@ -670,14 +812,33 @@ Add the provider field + a constructor overload, and the send methods, to the `G
                 _logger.LogInformation("sendsms queued for thread {ThreadId}", threadId);
                 return GvSmsSendResult.Ok();   // 200 = QUEUED, not delivered (honest)
             }
+
+            // Distinguish a bad-number rejection from a generic upstream failure so the controller can
+            // return 400 invalid_number (UI: "number doesn't look right") vs 502 upstream_error
+            // (§"Error taxonomy"). GV signals a bad recipient with INVALID_ARGUMENT in the body.
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (body.Contains("INVALID_ARGUMENT", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("sendsms INVALID_ARGUMENT for thread {ThreadId}", threadId);
+                return GvSmsSendResult.Fail(GvSendOutcome.InvalidArgument,
+                    "Google rejected the recipient (INVALID_ARGUMENT)");
+            }
             _logger.LogWarning("sendsms returned {Status} for thread {ThreadId}",
                 response.StatusCode, threadId);
-            return GvSmsSendResult.Fail($"Google returned {(int)response.StatusCode} {response.StatusCode}");
+            return GvSmsSendResult.Fail(GvSendOutcome.UpstreamError,
+                $"Google returned {(int)response.StatusCode} {response.StatusCode}");
+        }
+        catch (Exception ex) when (ex is TaskCanceledException or OperationCanceledException
+                                      or HttpRequestException)
+        {
+            // No response observed → honest "timeout/no response" (504), distinct from an upstream non-200.
+            _logger.LogWarning(ex, "sendsms timed out / network error for thread {ThreadId}", threadId);
+            return GvSmsSendResult.Fail(GvSendOutcome.Timeout, "Send request timed out (no response)");
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "sendsms failed for thread {ThreadId}", threadId);
-            return GvSmsSendResult.Fail("Send request failed (network/exception)");
+            return GvSmsSendResult.Fail(GvSendOutcome.UpstreamError, "Send request failed (exception)");
         }
     }
 ```
@@ -692,13 +853,13 @@ Add the provider field + a constructor overload, and the send methods, to the `G
 > test asserts on the path substring `api2thread/sendsms` + `alt=protojson` (not the host), so the
 > default base URL is sufficient for the hermetic test. Implementer: keep both constructors consistent.
 
-- [ ] **Step 4: Run → PASS** (3 cases)
+- [ ] **Step 4: Run → PASS** (4 cases: queued, invalid-argument, upstream-error, null-client)
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/RotaryPhoneController.GVBridge/Clients/GvSmsClient.cs \
         src/RotaryPhoneController.GVBridge.Tests/Clients/GvSmsClientSendTests.cs
-git commit -m "feat(gv): GvSmsClient.SendAsync (api2thread/sendsms, ADR §4.1) — queued != delivered"
+git commit -m "feat(gv): GvSmsClient.SendAsync (api2thread/sendsms, ADR §4.1) — queued != delivered, classified outcomes"
 ```
 
 ---
@@ -719,6 +880,7 @@ git commit -m "feat(gv): GvSmsClient.SendAsync (api2thread/sendsms, ADR §4.1) �
 - Create: `src/RotaryPhoneController.GVBridge.Tests/Api/GvSmsControllerSendTests.cs`
 - Modify: `src/RotaryPhoneController.GVBridge/Api/GvSmsController.cs`
 - Modify: `src/RotaryPhoneController.GVBridge/Services/IGvMessageEventSource.cs` (add `OnSmsSent`)
+- Modify: `src/RotaryPhoneController.GVBridge/Services/GvThreadPoller.cs` (add `OnSmsSent` + `IGvOutboundSmsSink`; **surface NEW outbound messages with the matching `csid:` id — id-consistency, Task 1 Step 1c**)
 - Modify: `src/RotaryPhoneController.Server/Services/GvMessagePushBridge.cs` (forward `SmsSent`)
 
 - [ ] **Step 1: Extend the event seam with an outbound channel**
@@ -749,7 +911,62 @@ plus a **public raise method** the controller can call, since the controller pro
 > seam with a producer method, add a **narrow producer interface** `IGvOutboundSmsSink` with
 > `void NotifySent(SmsMessageDto dto)` implemented by `GvThreadPoller` (it already owns the events),
 > and inject THAT into the controller. Keeps `IGvMessageEventSource` consumer-only. Implementer: add
-> `IGvOutboundSmsSink` next to `IGvMessageEventSource`; register `GvThreadPoller` as both.
+> `IGvOutboundSmsSink` next to `IGvMessageEventSource`; register `GvThreadPoller` as both. `NotifySent`
+> simply calls `RaiseSmsSent`.
+
+- [ ] **Step 1b (PR3-side id-consistency — the poller must ALSO surface NEW outbound messages):**
+The merged `GvThreadPoller.PollSmsAsync` raises `OnSmsReceived` **only for `m.Direction == "Inbound"`**
+(verified: the `isNew && m.Direction == "Inbound"` guard). So a message the user just sent never
+re-surfaces via push, and the optimistic bubble would never get an authoritative confirm. **Add an
+outbound branch that raises `OnSmsSent`** for newly-seen outbound messages, stamping the **same `csid:`
+id** the controller's echo uses so the UI collapses on an exact match (id-consistency rule, Task 1
+Step 1b). Modify the per-message loop in `PollSmsAsync`:
+
+```csharp
+        foreach (var m in result.Messages)
+        {
+            if (m.MessageId is null || m.ThreadId is null || m.SentEpochMs is not { } epoch) continue;
+            var isNew = _smsHwm.IsNewMessage(m.ThreadId, m.MessageId, epoch);
+            if (!isNew) continue;
+            _lastActivityUtc = DateTime.UtcNow;
+            if (m.Direction == "Outbound")
+            {
+                // id-consistency (PR4 Task 1 Step 1c): surface outbound with the SAME csid: the send echo
+                // used, so RadioConsole collapses the optimistic bubble — distinct OnSmsSent → no toast.
+                OnSmsSent?.Invoke(ToSmsDtoWithCorrelationId(m, epoch));
+                _logger.LogInformation("Poller: new outbound SMS surfaced {Thread}", m.ThreadId);
+            }
+            else
+            {
+                OnSmsReceived?.Invoke(ToSmsDto(m));
+                _logger.LogInformation("Poller: new inbound SMS {Id} on {Thread}", m.MessageId, m.ThreadId);
+            }
+        }
+```
+
+```csharp
+    // SAME correlation-id formula as GvSmsController.CorrelationId (id-consistency rule). Kept in one
+    // shared helper if the implementer prefers (e.g. a small SmsCorrelationId static used by both); the
+    // ONLY requirement is byte-identical output for the same (threadId, text, sentEpochMs).
+    private static SmsMessageDto ToSmsDtoWithCorrelationId(GvSmsNode m, long epoch)
+    {
+        var dto = ToSmsDto(m);
+        var hash = Convert.ToHexString(
+            System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(m.Text ?? "")))
+            .ToLowerInvariant()[..12];
+        return dto with { Id = $"csid:{m.ThreadId}:{hash}:{epoch}" };
+    }
+```
+
+> **Recommended refactor (implementer's call):** extract the formula into one `SmsCorrelationId.For(threadId,
+> text, sentEpochMs)` static in `Clients/` and call it from BOTH `GvSmsController` and `GvThreadPoller` so
+> there is a single source of truth (a divergence here silently breaks de-dupe). Add a unit test that the
+> controller echo id and the poller-surfaced id are equal for the same `(threadId, text, epoch)`.
+> **UNVERIFIED caveat:** the poller's `m.SentEpochMs` (GV's timestamp) and the controller's send timestamp
+> will NOT be byte-identical, so the `csid:` epochs differ — that is EXPECTED and why the UI's
+> belt-and-suspenders `(text + counterparty + recency ≤120s)` match (Task 1 Step 1b rule #3) is REQUIRED,
+> not optional. If the ADR §11 live capture shows `sendsms` returns a real GV id, switch both emit sites to
+> it and the recency fallback becomes unnecessary. Document this clearly in code.
 
 - [ ] **Step 2: Write failing controller tests**
 
@@ -770,8 +987,11 @@ public class GvSmsControllerSendTests
 {
     private const string BaseUrl = "https://clients6.google.com/voice/v1/voiceclient";
 
+    private static SendSmsResponse Body(IActionResult r) =>
+        Assert.IsType<SendSmsResponse>((r as ObjectResult)!.Value);
+
     private static (GvSmsController c, List<SmsMessageDto> sent) NewController(
-        Func<HttpRequestMessage, HttpResponseMessage> handler, int maxSends = 3)
+        Func<HttpRequestMessage, HttpResponseMessage> handler, int maxSends = 3, bool enableSend = true)
     {
         var http = new HttpClient(new MockHandler(handler));
         var parser = new PositionalGvThreadParser();
@@ -781,7 +1001,8 @@ public class GvSmsControllerSendTests
         var resolver = new SmsThreadIdResolver();
         var sentSink = new List<SmsMessageDto>();
         var sink = new TestSink(sentSink);
-        var controller = new GvSmsController(smsClient, limiter, resolver, sink,
+        var config = Options.Create(new GVBridgeConfig { EnableSmsSend = enableSend });
+        var controller = new GvSmsController(smsClient, limiter, resolver, sink, config,
             NullLogger<GvSmsController>.Instance);
         // Inject the same http as the "authenticated client" for the write path test seam:
         controller.SetSendClientForTest(http);
@@ -789,58 +1010,100 @@ public class GvSmsControllerSendTests
     }
 
     private static HttpResponseMessage Ok200() => new(HttpStatusCode.OK) { Content = new StringContent("[]") };
+    private static HttpResponseMessage InvalidArg() =>
+        new(HttpStatusCode.BadRequest) { Content = new StringContent("INVALID_ARGUMENT") };
 
     [Fact]
-    public async Task Send_NewConversation_NormalizesAndReturnsOutboundEcho()
+    public async Task Send_NewConversation_NormalizesAndReturnsOutboundEcho_WithStableId()
     {
         var (controller, sent) = NewController(_ => Ok200());
-        var result = await controller.Send(new SendSmsRequest("(919) 555-1234", "hi there", null), default);
+        var result = await controller.Send(
+            new SendSmsRequest("(919) 555-1234", "hi there", null), default);
         var ok = Assert.IsType<OkObjectResult>(result);
         var resp = Assert.IsType<SendSmsResponse>(ok.Value);
         Assert.True(resp.Queued);
+        Assert.Equal("queued", resp.Code);
         Assert.Equal("t.+19195551234", resp.ThreadId);
         Assert.NotNull(resp.Message);
         Assert.Equal("Outbound", resp.Message!.Direction);
         Assert.Equal("hi there", resp.Message.Text);
-        Assert.Single(sent);                         // broadcast over the sink
+        Assert.StartsWith("csid:t.+19195551234:", resp.Message.Id);   // stable correlation id, not a guid
+        Assert.Single(sent);                                          // broadcast over the sink
+        Assert.Equal(resp.Message.Id, sent[0].Id);                    // echo and broadcast share the Id
     }
 
     [Fact]
-    public async Task Send_InvalidNumber_Returns400_NoSend()
+    public async Task Send_HonorsClientCorrelationId()
+    {
+        var (controller, _) = NewController(_ => Ok200());
+        var result = await controller.Send(
+            new SendSmsRequest("9195551234", "hi", null, ClientCorrelationId: "ui-optimistic-42"), default);
+        Assert.Equal("ui-optimistic-42", Body(result).Message!.Id);   // UI's optimistic id echoed back
+    }
+
+    [Fact]
+    public async Task Send_FlagOff_Returns409_SendDisabled_NoSend()
+    {
+        var (controller, sent) = NewController(_ => Ok200(), enableSend: false);
+        var result = await controller.Send(new SendSmsRequest("9195551234", "hi", null), default);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(409, status.StatusCode);
+        Assert.Equal("send_disabled", Body(result).Code);
+        Assert.Empty(sent);                          // NO GV call when dark
+    }
+
+    [Fact]
+    public async Task Send_InvalidNumber_Returns400_invalid_number_NoSend()
     {
         var (controller, sent) = NewController(_ => Ok200());
         var result = await controller.Send(new SendSmsRequest("not-a-number", "hi", null), default);
-        Assert.IsType<BadRequestObjectResult>(result);
+        var status = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Equal("invalid_number", Body(result).Code);
         Assert.Empty(sent);                          // never reached Google
     }
 
     [Fact]
-    public async Task Send_EmptyText_Returns400()
+    public async Task Send_EmptyText_Returns400_invalid_text()
     {
         var (controller, _) = NewController(_ => Ok200());
         var result = await controller.Send(new SendSmsRequest("9195551234", "   ", null), default);
         Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Equal("invalid_text", Body(result).Code);
     }
 
     [Fact]
-    public async Task Send_OverRateLimit_Returns429()
+    public async Task Send_OverRateLimit_Returns429_rate_limited()
     {
         var (controller, _) = NewController(_ => Ok200(), maxSends: 1);
         await controller.Send(new SendSmsRequest("9195551234", "one", null), default);
         var second = await controller.Send(new SendSmsRequest("9195551234", "two", null), default);
         var status = Assert.IsType<ObjectResult>(second);
         Assert.Equal(429, status.StatusCode);
+        Assert.Equal("rate_limited", Body(second).Code);
     }
 
     [Fact]
-    public async Task Send_GoogleRejects_Returns502_QueuedFalse_NoBroadcast()
+    public async Task Send_GoogleInvalidArgument_Returns400_invalid_number_NoBroadcast()
+    {
+        // GV rejected the recipient AFTER we sent → still surfaces as invalid_number (taxonomy rule).
+        var (controller, sent) = NewController(_ => InvalidArg());
+        var result = await controller.Send(new SendSmsRequest("9195551234", "hi", null), default);
+        var status = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(400, status.StatusCode);
+        Assert.Equal("invalid_number", Body(result).Code);
+        Assert.Empty(sent);                          // no fake "sent" echo on failure (honest status)
+    }
+
+    [Fact]
+    public async Task Send_GoogleOtherError_Returns502_upstream_error_NoBroadcast()
     {
         var (controller, sent) = NewController(_ =>
-            new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("bad") });
+            new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("bad") });
         var result = await controller.Send(new SendSmsRequest("9195551234", "hi", null), default);
         var status = Assert.IsType<ObjectResult>(result);
         Assert.Equal(502, status.StatusCode);
-        Assert.Empty(sent);                          // no fake "sent" echo on failure (honest status)
+        Assert.Equal("upstream_error", Body(result).Code);
+        Assert.Empty(sent);
     }
 
     private sealed class TestSink(List<SmsMessageDto> captured) : IGvOutboundSmsSink
@@ -861,51 +1124,80 @@ public class GvSmsControllerSendTests
 - [ ] **Step 4: Implement the POST /send endpoint**
 
 Add to `src/RotaryPhoneController.GVBridge/Api/GvSmsController.cs`. The controller orchestrates the
-§4.2 rules in order: **rate-limit → normalize → validate text → resolve thread id → send → honest
-map → broadcast on success.** It needs the rate limiter, the resolver, the outbound sink, and a way to
-get the authenticated client for the send (via the `GvSmsClient` provider-backed `SendAsync(threadId,
-text)` in production; a test seam for hermetic tests).
+§4.2 rules in order: **feature-flag (dark) → rate-limit → validate text → normalize → resolve thread id
+→ send → honest taxonomy map → broadcast on success.** It needs the rate limiter, the resolver, the
+outbound sink, the config (for `EnableSmsSend`), and a way to get the authenticated client for the send
+(via the `GvSmsClient` provider-backed `SendAsync(threadId, text)` in production; a test seam for
+hermetic tests).
 
 ```csharp
 // add to the constructor + fields
 private readonly SmsSendRateLimiter _rateLimiter;
 private readonly ISmsThreadIdResolver _threadIdResolver;
 private readonly IGvOutboundSmsSink _outboundSink;
+private readonly GVBridgeConfig _config;       // for the EnableSmsSend feature flag (Task 7)
 private HttpClient? _testSendClient;   // test-only; null in production (uses GvSmsClient.SendAsync(threadId,text))
 
 public GvSmsController(GvSmsClient smsClient, SmsSendRateLimiter rateLimiter,
     ISmsThreadIdResolver threadIdResolver, IGvOutboundSmsSink outboundSink,
-    ILogger<GvSmsController> logger)
+    IOptions<GVBridgeConfig> config, ILogger<GvSmsController> logger)
 {
     _smsClient = smsClient;
     _rateLimiter = rateLimiter;
     _threadIdResolver = threadIdResolver;
     _outboundSink = outboundSink;
+    _config = config.Value;
     _logger = logger;
 }
 
 /// <summary>Test seam: inject the HttpClient used as the "authenticated client" for the write path.</summary>
 internal void SetSendClientForTest(HttpClient client) => _testSendClient = client;
 
+/// <summary>
+/// Stable client-correlation id for an outbound echo (id-consistency rule, Task 1 Step 1b). The SAME
+/// formula is used by the PR3 poller's outbound surface (Task 1 Step 1c) so the UI collapses the
+/// optimistic bubble against the re-surfaced copy on an exact Id match. Form:
+/// csid:{threadId}:{sha1(text)[..12]}:{sentEpochMs}.
+/// </summary>
+internal static string CorrelationId(string threadId, string text, long sentEpochMs)
+{
+    var hash = Convert.ToHexString(
+        System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(text)))
+        .ToLowerInvariant()[..12];
+    return $"csid:{threadId}:{hash}:{sentEpochMs}";
+}
+
 [HttpPost("send")]
 public async Task<IActionResult> Send([FromBody] SendSmsRequest request, CancellationToken ct = default)
 {
-    // 1. Rate-limit FIRST (ADR §4.2 #4) — cheap, and a real 429 backs the UI's "Sending too fast".
+    // 0. FEATURE FLAG (Task 7, ADR §12 #1). Default FALSE — the write code ships DARK. Return a coded
+    //    "send disabled" with NO GV call. Independent of RadioConsole's own EnableSmsSend (defense in depth).
+    if (!_config.EnableSmsSend)
+    {
+        _logger.LogInformation("SMS send rejected — EnableSmsSend is false (dark)");
+        return StatusCode(409, new SendSmsResponse(
+            Queued: false, Code: "send_disabled", ThreadId: null,
+            Error: "SMS send is disabled on this server", Message: null));
+    }
+
+    // 1. Rate-limit (ADR §4.2 #4) — cheap, and a real 429 backs the UI's "Sending too fast".
     if (!_rateLimiter.TryAcquire())
     {
         _logger.LogWarning("SMS send rejected by rate limiter");
         return StatusCode(429, new SendSmsResponse(
-            Queued: false, ThreadId: null, Error: "Sending too fast — wait a moment", Message: null));
+            Queued: false, Code: "rate_limited", ThreadId: null,
+            Error: "Sending too fast — wait a moment", Message: null));
     }
 
-    // 2. Validate text.
+    // 2. Validate text → 400 invalid_text.
     if (string.IsNullOrWhiteSpace(request.Text))
-        return BadRequest(new SendSmsResponse(false, null, "Message text is required", null));
+        return BadRequest(new SendSmsResponse(
+            false, "invalid_text", null, "Message text is required", null));
 
-    // 3. Normalize the recipient to E.164 (ADR §4.2 #2). Reject ambiguous numbers — never guess.
+    // 3. Normalize the recipient to E.164 (ADR §4.2 #2) → 400 invalid_number. Never guess.
     if (!PhoneNumberNormalizer.TryNormalize(request.ToNumber, out var e164) || e164 is null)
         return BadRequest(new SendSmsResponse(
-            false, null, $"Invalid or unsupported number: {request.ToNumber}", null));
+            false, "invalid_number", null, $"Invalid or unsupported number: {request.ToNumber}", null));
 
     // 4. Resolve the thread id (ADR §4.2 #1): reply id verbatim, else synthesized t.+<E164> (UNVERIFIED).
     var threadId = _threadIdResolver.Resolve(e164, request.ThreadId);
@@ -916,26 +1208,45 @@ public async Task<IActionResult> Send([FromBody] SendSmsRequest request, Cancell
         ? await _smsClient.SendAsync(_testSendClient, threadId, request.Text, ct)
         : await _smsClient.SendAsync(threadId, request.Text, ct);
 
-    // 6. Honest mapping (ADR §4.2 #3): NO auto-retry. 200=queued; anything else = 502, Queued=false.
+    // 6. Honest mapping (ADR §4.2 #3, §"Error taxonomy"): NO auto-retry. Map the classified outcome to
+    //    a distinct (status, code) so the UI picks the right copy without parsing prose.
     if (!sendResult.Queued)
-        return StatusCode(502, new SendSmsResponse(false, threadId, sendResult.Error, null));
+    {
+        var (status, code) = sendResult.Outcome switch
+        {
+            GvSendOutcome.InvalidArgument    => (400, "invalid_number"),
+            GvSendOutcome.AdapterUnavailable => (502, "auth_unavailable"),
+            GvSendOutcome.UpstreamError      => (502, "upstream_error"),
+            GvSendOutcome.Timeout            => (504, "timeout"),
+            _                                 => (500, "error"),
+        };
+        return StatusCode(status, new SendSmsResponse(false, code, threadId, sendResult.Error, null));
+    }
 
-    // 7. Build the optimistic OUTBOUND echo (NOT a parse of Google's ack — it returns no message).
+    // 7. Build the optimistic OUTBOUND echo (NOT a parse of Google's ack — it returns no message). The Id
+    //    is the STABLE csid: correlation id (or the UI-supplied ClientCorrelationId), so the bubble
+    //    collapses against the re-surfaced copy with no visual jump (id-consistency rule, Task 1 Step 1b).
+    var sentEpochMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    var id = string.IsNullOrWhiteSpace(request.ClientCorrelationId)
+        ? CorrelationId(threadId, request.Text, sentEpochMs)
+        : request.ClientCorrelationId;
     var echo = new SmsMessageDto(
-        Id: $"local-{Guid.NewGuid():N}",          // local placeholder; poller will surface the real id
+        Id: id,
         ThreadId: threadId,
         Direction: "Outbound",
         CounterpartyNumber: e164,
         Text: request.Text,
-        SentAt: DateTime.UtcNow,
+        SentAt: DateTimeOffset.FromUnixTimeMilliseconds(sentEpochMs).UtcDateTime,
         IsRead: true);
 
     // 8. Broadcast so other connected clients converge (decision in Task 6 header). Distinct SmsSent event.
     _outboundSink.NotifySent(echo);
 
-    return Ok(new SendSmsResponse(Queued: true, ThreadId: threadId, Error: null, Message: echo));
+    return Ok(new SendSmsResponse(Queued: true, Code: "queued", ThreadId: threadId, Error: null, Message: echo));
 }
 ```
+
+> Add `using Microsoft.Extensions.Options;` to the controller if not already present (for `IOptions<GVBridgeConfig>`).
 
 > **PR5 interaction (no rework when the gate ships):** this endpoint lives under the `/api/gvbridge/*`
 > prefix that PR5's middleware gates wholesale. It needs **no per-endpoint auth attribute** — PR5 is a
@@ -964,7 +1275,9 @@ broadcast `"SmsSent"` (mirroring the existing `SmsReceived`/`VoicemailReceived` 
     }
 ```
 
-- [ ] **Step 6: Run → PASS** (5 cases) and build the Server project.
+- [ ] **Step 6: Run → PASS** (8 controller cases: queued+stable-id, client-correlation-id, flag-off
+  409, invalid_number 400, invalid_text 400, rate_limited 429, GV-INVALID_ARGUMENT 400, upstream 502) +
+  a poller-side test (new outbound message raises `OnSmsSent`, not `OnSmsReceived`). Build the Server project.
 - [ ] **Step 7: Commit**
 
 ```bash
@@ -985,18 +1298,26 @@ git commit -m "feat(gv): POST /api/gvbridge/sms/send with E.164/rate-limit/hones
 - Modify: `src/RotaryPhoneController.Server/appsettings.json`
 - Modify: `src/RotaryPhoneController.GVBridge/Extensions/GVBridgeServiceExtensions.cs`
 
-- [ ] **Step 1: Add rate-limit config** to `GVBridgeConfig` (after the poller block):
+- [ ] **Step 1: Add the feature flag + rate-limit config** to `GVBridgeConfig` (after the poller block):
 
 ```csharp
+    // SMS SEND FEATURE FLAG (ADR §12 #1) — DEFAULT FALSE. The account-write path ships DARK: when false,
+    // POST /api/gvbridge/sms/send performs NO GV call and returns 409 send_disabled. This lets the
+    // irreversible-write code merge + auto-merge safely; the owner flips this to true to go live (after the
+    // ADR §11 live capture). This server-side flag is INDEPENDENT of RadioConsole's own EnableSmsSend UI
+    // flag — defense in depth: BOTH must be on for a send to leave the building.
+    public bool EnableSmsSend { get; set; } = false;
+
     // SMS send rate limit (ADR §4.2 #4). Reject more than N sends per window → HTTP 429. Owner-tunable;
-    // conservative defaults for a single personal account. (PR4 — owner-hold capability.)
+    // conservative defaults for a single personal account.
     public int SmsSendMaxPerWindow { get; set; } = 5;
     public int SmsSendWindowSeconds { get; set; } = 10;
 ```
 
-- [ ] **Step 2: Add the keys to `appsettings.json`** `GVBridge` section:
+- [ ] **Step 2: Add the keys to `appsettings.json`** `GVBridge` section (flag shipped **false**):
 
 ```json
+"EnableSmsSend": false,
 "SmsSendMaxPerWindow": 5,
 "SmsSendWindowSeconds": 10
 ```
@@ -1006,7 +1327,7 @@ Update the `GvSmsClient` registration to the **provider-backed constructor** so 
 can resolve the live client:
 
 ```csharp
-        // SMS send (PR4 — owner-hold). Provider-backed GvSmsClient so SendAsync resolves the live
+        // SMS send (PR4 — ships dark behind EnableSmsSend). Provider-backed GvSmsClient so SendAsync resolves the live
         // authenticated client per call (cookie rotation + recovery ladder, ADR §1.3, §7).
         services.AddSingleton<GvSmsClient>(sp => new GvSmsClient(
             sp.GetRequiredService<GvThreadClient>(),
@@ -1048,14 +1369,22 @@ git commit -m "feat(gv): wire SMS send services + rate-limit config (PR4)"
 - [ ] **Step 3: No browser UAT here.** As with PR1–3: the RadioConsole UI lives in the **RTest repo**
   (memory `project_ui_integration.md`); there is no in-repo browser flow. Backend gates = unit/fixture
   suite + the live capture below.
-- [ ] **Step 4: Live verification (owner/Tester on the `radio` box) — ADR §11 step 4.** ONLY after the
-  owner green-lights the build:
+- [ ] **Step 4: Live verification (owner/Tester on the `radio` box) — ADR §11 step 4.** This is the
+  **first real send** and is the owner's explicit go-live action (the PR itself merges DARK on green gates):
+  - **First, flip the flag on** for the test box: set `GVBridge:EnableSmsSend = true` (config/env) and
+    restart. With the flag off (the shipped default), every call returns `409 send_disabled` and makes no
+    GV call — verify that too, as the dark-merge safety check.
   - `POST /api/gvbridge/sms/send` `{ "toNumber": "+1<TEST>", "text": "test" }` to a **known test number
-    you own** → confirm HTTP 200, `queued:true`, and the message **actually arrives**.
+    you own** → confirm HTTP 200, `queued:true`, `code:"queued"`, the returned `message.id` is a `csid:`
+    correlation id, and the message **actually arrives**.
   - Capture the thread id GV assigned; send a **reply** with that id vs `t.+<E164>` → **pin the reply
     rule** and de-UNVERIFY `SmsThreadIdResolver` / `t.+<E164>` (one-file fix if wrong).
-  - Confirm a 429 fires when you exceed the configured rate (e.g. 6 rapid sends with default 5/10s).
-  - Confirm a deliberately bad number returns 400 and **never reaches Google**.
+  - Confirm the outbound message **re-surfaces via the poller as an `SmsSent` push** (id-consistency,
+    Task 1 Step 1c) so the UI's optimistic bubble would collapse (verify on the RadioConsole side, or via
+    the SignalR event on the box).
+  - Confirm a 429 (`code:"rate_limited"`) fires when you exceed the configured rate (e.g. 6 rapid sends
+    with default 5/10s).
+  - Confirm a deliberately bad number returns **400 `invalid_number`** and **never reaches Google**.
 
 ---
 
@@ -1078,8 +1407,10 @@ git commit -m "feat(gv): wire SMS send services + rate-limit config (PR4)"
    the PR5 gate**, the ADR's default. **If the owner wants a per-send "Are you sure?" confirm for v1,**
    that is a **RadioConsole-side** change (the handoff already builds a flagged compose UI) — no
    RotaryPhone change needed; flag it to the RadioConsole track when send ships.
-2. **§12 #1 — autonomy.** Plan assumes send ships gated + rate-limited (default). No change needed if
-   the owner confirms; if the owner wants it disabled-by-default, add an `EnableSmsSend` flag (trivial,
-   not built here pending that decision).
+2. **§12 #1 — autonomy / disabled-by-default.** **Decided: the server-side `EnableSmsSend` flag IS built
+   and ships FALSE** (Task 7) — send is dark until the owner flips it. This is what makes the
+   irreversible-write PR safe to auto-merge on green. The owner's go-live action is flipping the flag +
+   the ADR §11 live capture (Task 8 step 4). The flag is independent of RadioConsole's own UI flag
+   (defense in depth — both must be on).
 3. **Default rate limit (5 / 10s).** Owner-tunable via config. **If the owner wants a stricter floor**
    (e.g. 2/10s), change the appsettings values only — no code change.
