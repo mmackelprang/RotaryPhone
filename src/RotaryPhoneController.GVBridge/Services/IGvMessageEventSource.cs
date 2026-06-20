@@ -15,4 +15,23 @@ public interface IGvMessageEventSource
 
     /// <summary>Raised once per newly-detected voicemail.</summary>
     event Action<VoicemailItemDto>? OnVoicemailReceived;
+
+    /// <summary>
+    /// Raised once per successfully-queued OUTBOUND SMS (the send the user just made). Distinct from
+    /// OnSmsReceived so RadioConsole appends it WITHOUT an inbound toast (handoff). Forwarded to
+    /// RotaryHub as "SmsSent".
+    /// </summary>
+    event Action<SmsMessageDto>? OnSmsSent;
+}
+
+/// <summary>
+/// Narrow producer seam for the OUTBOUND channel (id-consistency, PR4 Task 6). GvSmsController calls
+/// NotifySent after a successful send so the outbound echo reaches RadioConsole. Kept separate from the
+/// consumer-only IGvMessageEventSource so the controller does not depend on the raise side. Implemented
+/// by GvThreadPoller (which already owns the events); registered as both.
+/// </summary>
+public interface IGvOutboundSmsSink
+{
+    /// <summary>Surface a successfully-queued outbound SMS to the OnSmsSent channel.</summary>
+    void NotifySent(SmsMessageDto dto);
 }

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Clients;
@@ -58,14 +59,26 @@ public static class GVBridgeServiceExtensions
         // GvVoicemailClient (per-call auth resolution from PR2), so registering them does NOT resolve a
         // live HttpClient at container-build time — the poller starts even with the adapter inactive and
         // simply raises nothing until cookies load (ADR §1.3 activation-order, §5.3).
+        // SMS send (PR4 — ships dark behind EnableSmsSend). Provider-backed GvSmsClient so SendAsync resolves the live
+        // authenticated client per call (cookie rotation + recovery ladder, ADR §1.3, §7).
         services.AddSingleton<GvSmsClient>(sp => new GvSmsClient(
             sp.GetRequiredService<GvThreadClient>(),
             sp.GetRequiredService<IGvThreadParser>(),
+            sp.GetRequiredService<IGvAuthenticatedClientProvider>(),
             sp.GetRequiredService<ILogger<GvSmsClient>>()));
 
         services.AddSingleton<GvThreadPoller>();
         services.AddSingleton<IGvMessageEventSource>(sp => sp.GetRequiredService<GvThreadPoller>());
         services.AddHostedService(sp => sp.GetRequiredService<GvThreadPoller>());
+
+        services.AddSingleton<ISmsThreadIdResolver, SmsThreadIdResolver>();
+        services.AddSingleton<IGvOutboundSmsSink>(sp => sp.GetRequiredService<GvThreadPoller>());
+        services.AddSingleton<SmsSendRateLimiter>(sp =>
+        {
+            var cfg = sp.GetRequiredService<IOptions<GVBridgeConfig>>().Value;
+            return new SmsSendRateLimiter(cfg.SmsSendMaxPerWindow,
+                TimeSpan.FromSeconds(cfg.SmsSendWindowSeconds));
+        });
 
         // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
         services.AddHttpClient();

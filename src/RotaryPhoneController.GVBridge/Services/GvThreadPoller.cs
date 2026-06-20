@@ -14,7 +14,7 @@ namespace RotaryPhoneController.GVBridge.Services;
 /// "SmsReceived"/"VoicemailReceived" — mirroring IncomingCall. The poll-vs-signaler choice lives
 /// entirely behind IGvMessageEventSource (ADR §5.2, §9).
 /// </summary>
-public class GvThreadPoller : BackgroundService, IGvMessageEventSource
+public class GvThreadPoller : BackgroundService, IGvMessageEventSource, IGvOutboundSmsSink
 {
     private readonly GvSmsClient _smsClient;
     private readonly GvVoicemailClient _voicemailClient;
@@ -30,6 +30,13 @@ public class GvThreadPoller : BackgroundService, IGvMessageEventSource
 
     public event Action<SmsMessageDto>? OnSmsReceived;
     public event Action<VoicemailItemDto>? OnVoicemailReceived;
+    public event Action<SmsMessageDto>? OnSmsSent;
+
+    /// <summary>Invoked by GvSmsController after a successful send so the outbound echo reaches RadioConsole.</summary>
+    public void RaiseSmsSent(SmsMessageDto dto) => OnSmsSent?.Invoke(dto);
+
+    /// <summary>IGvOutboundSmsSink — narrow producer seam the controller injects; just raises OnSmsSent.</summary>
+    public void NotifySent(SmsMessageDto dto) => RaiseSmsSent(dto);
 
     public GvThreadPoller(GvSmsClient smsClient, GvVoicemailClient voicemailClient,
         IOptions<GVBridgeConfig> config, ILogger<GvThreadPoller> logger)
@@ -96,9 +103,17 @@ public class GvThreadPoller : BackgroundService, IGvMessageEventSource
         {
             if (m.MessageId is null || m.ThreadId is null || m.SentEpochMs is not { } epoch) continue;
             var isNew = _smsHwm.IsNewMessage(m.ThreadId, m.MessageId, epoch);
-            if (isNew && m.Direction == "Inbound")
+            if (!isNew) continue;
+            _lastActivityUtc = DateTime.UtcNow;
+            if (m.Direction == "Outbound")
             {
-                _lastActivityUtc = DateTime.UtcNow;
+                // id-consistency (PR4 Task 1 Step 1c): surface outbound with the SAME csid: the send echo
+                // used, so RadioConsole collapses the optimistic bubble — distinct OnSmsSent → no toast.
+                OnSmsSent?.Invoke(ToSmsDtoWithCorrelationId(m, epoch));
+                _logger.LogInformation("Poller: new outbound SMS surfaced {Thread}", m.ThreadId);
+            }
+            else
+            {
                 OnSmsReceived?.Invoke(ToSmsDto(m));
                 _logger.LogInformation("Poller: new inbound SMS {Id} on {Thread}", m.MessageId, m.ThreadId);
             }
@@ -140,6 +155,18 @@ public class GvThreadPoller : BackgroundService, IGvMessageEventSource
         var active = (DateTime.UtcNow - _lastActivityUtc).TotalMinutes
                      < _config.ThreadPollActiveWindowMinutes;
         return TimeSpan.FromSeconds(active ? _config.ThreadPollActiveSeconds : _config.ThreadPollIdleSeconds);
+    }
+
+    // SAME correlation-id formula as GvSmsController.CorrelationId (id-consistency rule), via the shared
+    // SmsCorrelationId.For so there is a single source of truth — a divergence silently breaks de-dupe.
+    // UNVERIFIED caveat: the poller's m.SentEpochMs (GV's timestamp) and the controller's send timestamp
+    // are NOT byte-identical, so the csid: epochs differ — that is EXPECTED, which is why the UI's
+    // belt-and-suspenders (text + counterparty + recency ≤120s) match is REQUIRED, not optional. If the
+    // ADR §11 live capture shows sendsms returns a real GV id, switch both emit sites to it.
+    private static SmsMessageDto ToSmsDtoWithCorrelationId(GvSmsNode m, long epoch)
+    {
+        var dto = ToSmsDto(m);
+        return dto with { Id = SmsCorrelationId.For(m.ThreadId ?? "", m.Text ?? "", epoch) };
     }
 
     private static SmsMessageDto ToSmsDto(GvSmsNode m) => new(

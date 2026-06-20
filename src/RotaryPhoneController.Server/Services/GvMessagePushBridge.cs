@@ -30,6 +30,7 @@ public class GvMessagePushBridge : IHostedService
     {
         _eventSource.OnSmsReceived += BroadcastSms;
         _eventSource.OnVoicemailReceived += BroadcastVoicemail;
+        _eventSource.OnSmsSent += BroadcastSmsSent;
         _logger.LogInformation("GvMessagePushBridge subscribed to GV message events");
         return Task.CompletedTask;
     }
@@ -38,6 +39,7 @@ public class GvMessagePushBridge : IHostedService
     {
         _eventSource.OnSmsReceived -= BroadcastSms;
         _eventSource.OnVoicemailReceived -= BroadcastVoicemail;
+        _eventSource.OnSmsSent -= BroadcastSmsSent;
         return Task.CompletedTask;
     }
 
@@ -45,6 +47,12 @@ public class GvMessagePushBridge : IHostedService
     {
         _logger.LogInformation("Broadcasting SmsReceived {Id} from {Number}", dto.Id, dto.CounterpartyNumber);
         FireAndLog(_hubContext.Clients.All.SendAsync("SmsReceived", dto), "SmsReceived", dto.Id);
+    }
+
+    private void BroadcastSmsSent(GVBridge.Api.SmsMessageDto dto)
+    {
+        _logger.LogInformation("Broadcasting SmsSent {Id} to {Number}", dto.Id, dto.CounterpartyNumber);
+        FireAndLog(_hubContext.Clients.All.SendAsync("SmsSent", dto), "SmsSent", dto.Id);
     }
 
     private void BroadcastVoicemail(GVBridge.Api.VoicemailItemDto dto)
@@ -55,9 +63,13 @@ public class GvMessagePushBridge : IHostedService
 
     // Fire-and-forget the SignalR broadcast but observe the task so a SendAsync fault (hub startup
     // race, serialization error) is logged instead of silently swallowed as an unobserved exception.
+    // Pass an explicit TaskScheduler.Default (don't capture TaskScheduler.Current) and flatten the
+    // AggregateException so all inner faults are logged, not just the first (review MEDIUM-2).
     private void FireAndLog(Task sendTask, string eventName, string id)
         => _ = sendTask.ContinueWith(
-            t => _logger.LogWarning(t.Exception?.GetBaseException(),
+            t => _logger.LogWarning(t.Exception!.Flatten().InnerException,
                 "{Event} broadcast failed for {Id}", eventName, id),
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
 }

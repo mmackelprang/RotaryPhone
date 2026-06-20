@@ -1,8 +1,11 @@
 using System.Net;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
+using RotaryPhoneController.GVBridge.Models;
+using RotaryPhoneController.GVBridge.Services;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -19,7 +22,17 @@ public class GvSmsControllerTests
         var threadClient = new GvThreadClient(http, BaseUrl, ApiKey, parser,
             NullLogger<GvThreadClient>.Instance);
         var smsClient = new GvSmsClient(threadClient, parser, NullLogger<GvSmsClient>.Instance);
-        return new GvSmsController(smsClient, NullLogger<GvSmsController>.Instance);
+        var limiter = new SmsSendRateLimiter(5, TimeSpan.FromSeconds(10));
+        var resolver = new SmsThreadIdResolver();
+        var sink = new NoopSink();
+        var config = Options.Create(new GVBridgeConfig());
+        return new GvSmsController(smsClient, limiter, resolver, sink, config,
+            NullLogger<GvSmsController>.Instance);
+    }
+
+    private sealed class NoopSink : IGvOutboundSmsSink
+    {
+        public void NotifySent(SmsMessageDto dto) { }
     }
 
     private static HttpResponseMessage Response() =>
