@@ -3,8 +3,10 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.GVBridge.Adapters;
+using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
 
@@ -25,6 +27,32 @@ public static class GVBridgeServiceExtensions
             sp => sp.GetRequiredService<GVApiAdapter>());
         services.AddSingleton<IGvCookieManager, GvCookieManager>();
         services.AddSingleton<ICdpCookieExtractor, CdpCookieExtractor>();
+
+        // Read-side voicemail clients ride the adapter's authenticated HttpClient (PR1 seam) so they
+        // inherit cookie rotation + the recovery ladder. CRITICAL (ADR §1.3 activation-order): the
+        // adapter activates AFTER startup (when cookies load) and GetAuthenticatedClient() returns
+        // null until then. These factories must NOT resolve a live HttpClient at container-build time
+        // — they pass the IGvAuthenticatedClientProvider into provider-backed constructors that fetch
+        // the live client PER CALL (and degrade to a failure result when it is still null), so the
+        // container builds and the app starts even with the adapter inactive.
+        services.AddSingleton<IGvThreadParser, PositionalGvThreadParser>();
+
+        services.AddSingleton<IGvRecordingFetcher>(sp => new GvRecordingFetcher(
+            sp.GetRequiredService<IGvAuthenticatedClientProvider>(),
+            sp.GetRequiredService<ILogger<GvRecordingFetcher>>()));
+
+        services.AddSingleton(sp => new GvThreadClient(
+            sp.GetRequiredService<IGvAuthenticatedClientProvider>(),
+            sp.GetRequiredService<IGvThreadParser>(),
+            sp.GetRequiredService<ILogger<GvThreadClient>>()));
+
+        services.AddSingleton(sp => new GvVoicemailClient(
+            sp.GetRequiredService<GvThreadClient>(),
+            sp.GetRequiredService<IGvThreadParser>(),
+            sp.GetRequiredService<IGvRecordingFetcher>(),
+            sp.GetRequiredService<ILogger<GvVoicemailClient>>()));
+
+        services.AddSingleton<GvVoicemailCache>();
 
         // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
         services.AddHttpClient();
