@@ -36,4 +36,11 @@ public class GVBridgeConfig
     // Call adapter
     public string DefaultMode { get; set; } = "GVApi";
     public string CallLogDbPath { get; set; } = "data/gvbridge-calllog.db";
+
+    // Voicemail audio proxy cache (ADR §6.4). Retention is OWNER-ADJUSTABLE (ADR §12 q3):
+    // proposed 7 days / 200 MB, whichever first. Cache holds small MP3/AMR recordings on disk so
+    // RadioConsole never talks to Google for media.
+    public string VoicemailCacheDir { get; set; } = "data/gv-voicemail-cache";
+    public int VoicemailCacheRetentionDays { get; set; } = 7;
+    public long VoicemailCacheMaxBytes { get; set; } = 200L * 1024 * 1024; // 200 MB
 }
