@@ -184,7 +184,7 @@ public class GVBridgeControllerTests
   public void ParseCookieHeader_ParsesCorrectly()
   {
     var header = "SAPISID=abc123; SID=mysid; __Secure-1PSID=s1; HSID=h; complex=a=b=c";
-    var parsed = GVBridgeController.ParseCookieHeader(header);
+    var parsed = CdpCookieExtractor.ParseCookieHeader(header);
 
     Assert.Equal("abc123", parsed["SAPISID"]);
     Assert.Equal("mysid", parsed["SID"]);
@@ -197,7 +197,7 @@ public class GVBridgeControllerTests
   public void ParseCookieHeader_CaseInsensitiveLookup()
   {
     var header = "SAPISID=abc123; sid=mysid";
-    var parsed = GVBridgeController.ParseCookieHeader(header);
+    var parsed = CdpCookieExtractor.ParseCookieHeader(header);
 
     Assert.Equal("abc123", parsed["sapisid"]);
     Assert.Equal("mysid", parsed["SID"]);
@@ -231,12 +231,14 @@ public class GVBridgeControllerTests
     httpFactory.Setup(f => f.CreateClient(It.IsAny<string>()))
       .Returns(new HttpClient(handler.Object));
 
+    var cdpExtractor = new CdpCookieExtractor(httpFactory.Object, NullLogger<CdpCookieExtractor>.Instance);
+
     return new GVBridgeController(
       registry.Object,
       adapter,
       cm.Object,
       config,
-      httpFactory.Object,
+      cdpExtractor,
       NullLogger<GVBridgeController>.Instance);
   }
 

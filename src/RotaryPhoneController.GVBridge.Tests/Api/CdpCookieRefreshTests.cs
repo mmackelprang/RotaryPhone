@@ -73,7 +73,7 @@ public class CdpCookieRefreshTests
     // This test validates the static cookie header building logic indirectly
     // by testing ParseCookieHeader which is used after extraction.
     var rawHeader = "SID=abc123; SAPISID=def456; HSID=ghi789; SSID=jkl012; APISID=mno345; __Secure-1PSID=pqr678; NID=extra";
-    var parsed = GVBridgeController.ParseCookieHeader(rawHeader);
+    var parsed = CdpCookieExtractor.ParseCookieHeader(rawHeader);
 
     Assert.Equal("abc123", parsed["SID"]);
     Assert.Equal("def456", parsed["SAPISID"]);
@@ -101,7 +101,7 @@ public class CdpCookieRefreshTests
   }
 
   [Fact]
-  public async Task RefreshFromBrowser_NoCookiesReturned_Returns400()
+  public async Task RefreshFromBrowser_EmptyDebuggerUrl_Returns503()
   {
     // Arrange: Tab found but webSocketDebuggerUrl is empty (edge case)
     var tabs = new[]
@@ -211,12 +211,14 @@ public class CdpCookieRefreshTests
       CreateMockHandler("[]", HttpStatusCode.OK));
     var logger = NullLogger<GVBridgeController>.Instance;
 
+    var cdpExtractor = new CdpCookieExtractor(factory, NullLogger<CdpCookieExtractor>.Instance);
+
     return new GVBridgeController(
       registry.Object,
       adapter,
       cm.Object,
       config,
-      factory,
+      cdpExtractor,
       logger);
   }
 

@@ -27,7 +27,11 @@ public record GvBridgeStatusDto(
   [property: JsonPropertyName("wsConnected")] bool WsConnected,
   [property: JsonPropertyName("lastConnectedAt")] DateTime? LastConnectedAt,
   [property: JsonPropertyName("cookiesValid")] bool CookiesValid,
-  [property: JsonPropertyName("psidtsAgeSeconds")] long? PsidtsAgeSeconds);
+  [property: JsonPropertyName("psidtsAgeSeconds")] long? PsidtsAgeSeconds,
+  // Added by the registration-resilience watchdog: degraded = NOT (cookies valid AND registered);
+  // lastHealthyAt = last time both held. Appended to preserve the existing field contract.
+  [property: JsonPropertyName("degraded")] bool Degraded = false,
+  [property: JsonPropertyName("lastHealthyAt")] DateTime? LastHealthyAt = null);
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

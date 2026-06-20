@@ -23,6 +23,10 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     // Set via SetAudioBridge() to avoid circular DI
     private GVAudioBridgeService? _audioBridge;
 
+    // Set via SetCookieExtractor() — used by the auto-recovery ladder to pull fresh cookies
+    // from the box's logged-in Chrome (the same lever as the manual refresh-from-browser).
+    private ICdpCookieExtractor? _cdpExtractor;
+
     // Internal components created during ActivateAsync
     private GvCookieStore? _cookieStore;
     private GvCookieSet? _cookieSet;
@@ -37,6 +41,9 @@ public class GVApiAdapter : ICallAdapter, IDisposable
 
     // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
     private DateTime? _psidtsRefreshedAt;
+
+    // Last time the adapter was fully healthy (cookies valid AND SIP registered), set by the watchdog.
+    private DateTime? _lastHealthyAt;
 
     // Browser-less PSIDTS refresh (RotateCookies). Injected for tests; lazily built otherwise.
     private ICookieRotator? _cookieRotator;
@@ -73,6 +80,21 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     /// Whether the last cookie health check passed (cookies are still accepted by Google).
     /// </summary>
     public bool AreCookiesValid => _areCookiesValid;
+
+    /// <summary>
+    /// True when GVApi IS the active/available path but is NOT fully usable — cookies invalid OR
+    /// SIP not registered. Gated on <see cref="IsAvailable"/> so an inactive adapter (startup, or
+    /// while BluetoothHfp/SipTrunk is the active mode) doesn't raise a permanent false alarm; that
+    /// state is already conveyed by <c>available:false</c>. Surfaced honestly so the dashboard can
+    /// see real degradation early (the 2026-06-19 outage was invisible because status lied).
+    /// </summary>
+    public bool Degraded => IsAvailable && !(_areCookiesValid && (_sipTransport?.IsRegistered ?? false));
+
+    /// <summary>
+    /// UTC time the adapter was last fully healthy (cookies valid AND SIP registered), per the
+    /// periodic watchdog. Null if it has not been healthy since activation.
+    /// </summary>
+    public DateTime? LastHealthyAt => _lastHealthyAt;
 
     /// <summary>
     /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
@@ -142,6 +164,15 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     public void SetAudioBridge(GVAudioBridgeService audioBridge)
     {
         _audioBridge = audioBridge;
+    }
+
+    /// <summary>
+    /// Inject the CDP cookie extractor (avoids circular DI). Enables the auto-recovery ladder to
+    /// pull fresh cookies from the box's logged-in Chrome. Wired by the DI layer after construction.
+    /// </summary>
+    public void SetCookieExtractor(ICdpCookieExtractor extractor)
+    {
+        _cdpExtractor = extractor;
     }
 
     /// <summary>
@@ -467,51 +498,113 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     /// creds on its next attempt.
     /// </summary>
     private void HandleAuthenticationFailed(object? sender, AuthenticationFailedEventArgs e)
+        => TriggerCookieRecovery(e.Reason);
+
+    /// <summary>
+    /// Single-flight entry into the cookie-recovery ladder. Both the transport's AuthenticationFailed
+    /// event and the periodic watchdog funnel through here so only one recovery runs at a time.
+    /// </summary>
+    private void TriggerCookieRecovery(string reason)
     {
-        // Single-flight: collapse concurrent auth failures into one refresh.
         if (Interlocked.CompareExchange(ref _refreshingCookies, 1, 0) != 0)
             return;
 
-        _ = RecoverFromAuthFailureAsync(e.Reason);
+        _ = RecoverFromAuthFailureAsync(reason);
     }
 
     private async Task RecoverFromAuthFailureAsync(string reason)
     {
         try
         {
-            _logger.LogWarning("GVApi: SIP auth failure ({Reason}) — attempting cookie recovery", reason);
+            _logger.LogWarning("GVApi: auth/registration recovery ({Reason})", reason);
             _areCookiesValid = false;
 
-            // PRIMARY: browser-less RotateCookies refresh of the rotating PSIDTS from the
-            // stored long-lived __Secure-1PSID. Best-effort; falls back on any failure.
-            if (_config.EnableCookieRotation && _cookieSet != null)
+            // Rung 1: browser-less RotateCookies refresh of the rotating PSIDTS from the stored
+            // long-lived __Secure-1PSID. Best-effort; falls through on any failure.
+            if (_config.EnableCookieRotation && _cookieSet != null && await TryRotateCookiesAsync())
             {
-                var rotated = await TryRotateCookiesAsync();
-                if (rotated)
-                {
-                    _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS — reconnect backoff will retry");
-                    return;
-                }
+                _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
+                await ForceReRegisterAsync();
+                return;
             }
 
-            // FALLBACK: re-read cookies from disk (in case an out-of-band CDP refresh updated
-            // them) and re-run the health check. The CDP refresh-from-browser endpoint remains
-            // the operator's manual path for a genuinely dead login.
-            var reloaded = await ReloadCookiesAsync();
-            if (!reloaded)
+            // Rung 2: re-read cookies from disk (an out-of-band refresh may have updated them).
+            if (await ReloadCookiesAsync())
             {
-                _logger.LogWarning(
-                    "GVApi: cookie recovery failed. Long-lived session may be dead — run " +
-                    "POST /api/gvbridge/cookies/refresh-from-browser against a logged-in Chrome.");
+                _logger.LogInformation("GVApi: reloaded cookies from disk");
+                await ForceReRegisterAsync();
+                return;
             }
+
+            // Rung 3: pull fresh cookies from the box's logged-in Chrome via CDP and adopt them
+            // in-process — the automatic equivalent of the manual refresh-from-browser that
+            // resolved the 2026-06-19 incident. No service restart required.
+            if (await TryCdpRefreshAsync())
+            {
+                _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
+                await ForceReRegisterAsync();
+                return;
+            }
+
+            _logger.LogWarning(
+                "GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead — " +
+                "re-login at voice.google.com so the next CDP refresh can pick up a fresh session.");
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "GVApi: error during auth-failure cookie recovery");
+            _logger.LogWarning(ex, "GVApi: error during auth/registration recovery");
         }
         finally
         {
             Interlocked.Exchange(ref _refreshingCookies, 0);
+        }
+    }
+
+    /// <summary>
+    /// Recovery rung 3: extract fresh cookies from the box's logged-in Chrome via CDP, persist them,
+    /// and adopt them in-process (<see cref="ReloadCookiesAsync"/> swaps the HttpClient — no restart).
+    /// The extractor is optional; returns false if it was never wired or extraction/validation fails.
+    /// </summary>
+    private async Task<bool> TryCdpRefreshAsync()
+    {
+        if (_cdpExtractor == null || _cookieStore == null)
+            return false;
+
+        try
+        {
+            var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, "voice.google.com");
+            if (!result.Success || result.Cookies == null)
+            {
+                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}", result.Status, result.Error);
+                return false;
+            }
+
+            await _cookieStore.SaveAsync(result.Cookies);
+            return await ReloadCookiesAsync(); // adopt in-memory + re-validate against Google
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: CDP cookie refresh threw");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Force the SIP transport to re-register immediately with the current (freshly refreshed)
+    /// credentials instead of waiting out the reconnect backoff. In-process — no service restart.
+    /// </summary>
+    private async Task ForceReRegisterAsync()
+    {
+        if (_sipTransport == null)
+            return;
+
+        try
+        {
+            await _sipTransport.EnsureRegisteredAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: forced re-register after cookie refresh failed (backoff will retry)");
         }
     }
 
@@ -583,15 +676,36 @@ public class GVApiAdapter : ICallAdapter, IDisposable
             var healthy = await _accountClient.IsHealthyAsync();
             _areCookiesValid = healthy;
             LastValidatedAt = DateTime.UtcNow;
+
+            var registered = _sipTransport?.IsRegistered ?? false;
+
+            if (healthy && registered)
+            {
+                // Fully healthy — record it and (re)mark available if we were down.
+                _lastHealthyAt = DateTime.UtcNow;
+                if (!IsAvailable)
+                {
+                    _logger.LogInformation("GVApi: watchdog — healthy again, marking available");
+                    SetAvailable(true);
+                }
+                return;
+            }
+
             if (!healthy)
             {
-                _logger.LogWarning("GVApi: periodic health check failed — marking unavailable");
+                // Cookies rejected by Google → run the full recovery ladder (rotate/reload/CDP).
+                _logger.LogWarning("GVApi: watchdog — cookies invalid, triggering recovery");
                 SetAvailable(false);
+                TriggerCookieRecovery("watchdog: cookies invalid");
             }
-            else if (!IsAvailable)
+            else if (Volatile.Read(ref _refreshingCookies) == 0)
             {
-                _logger.LogInformation("GVApi: health check recovered — marking available");
-                SetAvailable(true);
+                // Cookies fine but SIP is not registered (e.g., a stuck/declined registration like the
+                // 2026-06-19 incident). Skip if a recovery is already in flight (it will re-register);
+                // otherwise just force a clean re-register without churning cookies. If that re-register
+                // turns out to fail auth, it escalates to the full ladder via AuthenticationFailed.
+                _logger.LogWarning("GVApi: watchdog — cookies valid but SIP not registered, forcing re-register");
+                _ = ForceReRegisterAsync();
             }
         }
         catch (Exception ex)

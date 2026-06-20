@@ -66,6 +66,23 @@ public class GVApiAdapterTests
         Assert.Null(adapter.PsidtsAgeSeconds);
     }
 
+    [Fact]
+    public void Degraded_BeforeActivate_IsFalse()
+    {
+        // Not activated/available → not "degraded" (that's conveyed by available:false instead);
+        // Degraded is gated on IsAvailable so an inactive adapter doesn't raise a false alarm.
+        var adapter = CreateAdapter();
+        Assert.False(adapter.IsAvailable);
+        Assert.False(adapter.Degraded);
+    }
+
+    [Fact]
+    public void LastHealthyAt_BeforeActivate_ReturnsNull()
+    {
+        var adapter = CreateAdapter();
+        Assert.Null(adapter.LastHealthyAt);
+    }
+
     private static GVApiAdapter CreateAdapter()
     {
         var config = Options.Create(new GVBridgeConfig

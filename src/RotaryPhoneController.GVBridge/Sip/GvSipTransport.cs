@@ -66,6 +66,12 @@ public sealed class GvSipTransport : IAsyncDisposable
     private string? _regContactUser;
     private string? _regWsHost;
     private bool _registered;
+
+    // Hard rate-floor on REGISTER attempts (storm guard — see ReconnectOptions.MinRegisterIntervalSeconds).
+    // The gate guards only the slot-reservation critical section (NOT the wait), so concurrent reconnect
+    // paths reserve successive floor-spaced slots without the semaphore being held across an await.
+    private readonly SemaphoreSlim _registerGate = new(1, 1);
+    private long _nextRegisterTimestamp; // earliest GetTimestamp() value the next attempt may start at
     private bool _disposed;
 
     // Negotiated keep-alive frequency (RFC 6223 keep= from the REGISTER 200-OK Via).
@@ -845,8 +851,52 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning restore CA1031
     }
 
+    /// <summary>
+    /// Enforce <see cref="ReconnectOptions.MinRegisterIntervalSeconds"/> between the START of
+    /// consecutive REGISTER attempts. Serialized via a gate so concurrent callers are spaced by
+    /// the floor rather than all racing through at once (the storm guard). A floor of 0 (tests)
+    /// short-circuits to a no-op.
+    /// </summary>
+    private async Task ThrottleRegisterAttemptAsync(CancellationToken ct)
+    {
+        if (_options.MinRegisterIntervalSeconds <= 0)
+            return;
+
+        var floorTicks = (long)(_options.MinRegisterIntervalSeconds * _timeProvider.TimestampFrequency);
+
+        // Reserve the next floor-spaced slot under the gate (no awaiting inside), then wait for it
+        // OUTSIDE the gate so the semaphore is never held across Task.Delay. The first attempt
+        // reserves "now" (no wait); each subsequent attempt reserves prior-slot + floor.
+        long target;
+        await _registerGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var now = _timeProvider.GetTimestamp();
+            target = Math.Max(now, _nextRegisterTimestamp);
+            _nextRegisterTimestamp = target + floorTicks;
+        }
+        finally
+        {
+            _registerGate.Release();
+        }
+
+        var waitTicks = target - _timeProvider.GetTimestamp();
+        if (waitTicks > 0)
+        {
+            var wait = TimeSpan.FromSeconds((double)waitTicks / _timeProvider.TimestampFrequency);
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug("REGISTER rate-floor: waiting {Ms}ms before next attempt", (int)wait.TotalMilliseconds);
+#pragma warning restore CA1848, CA1873
+            await Task.Delay(wait, _timeProvider, ct).ConfigureAwait(false);
+        }
+    }
+
     private async Task RegisterAsync(CancellationToken ct)
     {
+        // Storm guard: never start REGISTER attempts faster than the configured floor, no
+        // matter how many paths (reconnect loop, pull-path Ensure, a future bug) call in.
+        await ThrottleRegisterAttemptAsync(ct).ConfigureAwait(false);
+
         LogRegistering(_logger, null);
 
         SipCredentials creds;
@@ -956,6 +1006,7 @@ public sealed class GvSipTransport : IAsyncDisposable
                                     "Post-Digest REGISTER rejected ({Status}) — real auth failure, escalating",
                                     (int)resp.Status);
 #pragma warning restore CA1848, CA1873
+                                _registered = false; // honest status: we are NOT registered
                                 RaiseAuthenticationFailed($"REGISTER {(int)resp.Status} after Digest");
                                 regTcs.TrySetResult(false);
                             }
@@ -1007,12 +1058,27 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning disable CA1848, CA1873
                             _logger.LogWarning("REGISTER rejected 403 Forbidden — real auth failure, escalating");
 #pragma warning restore CA1848, CA1873
+                            _registered = false; // honest status: we are NOT registered
                             RaiseAuthenticationFailed("REGISTER 403");
+                            regTcs.TrySetResult(false);
+                        }
+                        else if ((int)resp.Status == 603)
+                        {
+                            // 603 Declined on REGISTER is a policy/account-level rejection from Google
+                            // (observed 2026-06-19 when the account was throttled after a credential-
+                            // failure REGISTER storm). Treat it as a real auth failure so the recovery
+                            // ladder runs, and mark unregistered so /api/gvbridge/status stays honest.
+#pragma warning disable CA1848, CA1873
+                            _logger.LogWarning("REGISTER rejected 603 Declined — registration declined, escalating");
+#pragma warning restore CA1848, CA1873
+                            _registered = false; // honest status: we are NOT registered
+                            RaiseAuthenticationFailed("REGISTER 603");
                             regTcs.TrySetResult(false);
                         }
                         else
                         {
                             LogError(_logger, $"REGISTER failed: {(int)resp.Status} {resp.ReasonPhrase}", null);
+                            _registered = false; // honest status: any non-2xx REGISTER means not registered
                             regTcs.TrySetResult(false);
                         }
                     }
