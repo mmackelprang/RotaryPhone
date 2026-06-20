@@ -43,4 +43,12 @@ public class GVBridgeConfig
     public string VoicemailCacheDir { get; set; } = "data/gv-voicemail-cache";
     public int VoicemailCacheRetentionDays { get; set; } = 7;
     public long VoicemailCacheMaxBytes { get; set; } = 200L * 1024 * 1024; // 200 MB
+
+    // SMS/voicemail thread poller (ADR §5.3). Adaptive interval: active vs idle, with backoff on
+    // repeated failure. Owner-tunable; defaults match the ADR.
+    public bool EnableThreadPoller { get; set; } = true;
+    public int ThreadPollActiveSeconds { get; set; } = 15;
+    public int ThreadPollIdleSeconds { get; set; } = 60;
+    public int ThreadPollBackoffSeconds { get; set; } = 120;
+    public int ThreadPollActiveWindowMinutes { get; set; } = 5; // "active" if a poll found new msgs within this window
 }

@@ -307,6 +307,12 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SipDiagnosticServi
 builder.Services.AddGVTrunk(builder.Configuration);
 builder.Services.AddGVBridge(builder.Configuration);
 
+// Bridge the GVBridge message-event seam (IGvMessageEventSource, registered by AddGVBridge) to
+// RotaryHub so new inbound SMS/voicemail push to RadioConsole over the existing SignalR connection,
+// mirroring the IncomingCall broadcast (ADR §6.3). Lives in the Server project because it needs
+// IHubContext<RotaryHub>.
+builder.Services.AddHostedService<RotaryPhoneController.Server.Services.GvMessagePushBridge>();
+
 var app = builder.Build();
 
 // Wire SIP diagnostic event: forward SIP messages from adapter to diagnostics service

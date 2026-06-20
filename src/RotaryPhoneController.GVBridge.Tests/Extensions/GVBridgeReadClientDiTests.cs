@@ -49,6 +49,15 @@ public class GVBridgeReadClientDiTests
             sp.GetRequiredService<ILogger<GvVoicemailClient>>()));
         services.AddSingleton<GvVoicemailCache>();
 
+        // PR3 read-side registrations — these compose the provider-backed clients above, so they must
+        // also build/resolve without touching a live HttpClient (same activation-order seam).
+        services.AddSingleton<GvSmsClient>(sp => new GvSmsClient(
+            sp.GetRequiredService<GvThreadClient>(),
+            sp.GetRequiredService<IGvThreadParser>(),
+            sp.GetRequiredService<ILogger<GvSmsClient>>()));
+        services.AddSingleton<GvThreadPoller>();
+        services.AddSingleton<IGvMessageEventSource>(sp => sp.GetRequiredService<GvThreadPoller>());
+
         return services.BuildServiceProvider();
     }
 
@@ -62,11 +71,33 @@ public class GVBridgeReadClientDiTests
         var threadClient = sp.GetRequiredService<GvThreadClient>();
         var vmClient = sp.GetRequiredService<GvVoicemailClient>();
         var cache = sp.GetRequiredService<GvVoicemailCache>();
+        var smsClient = sp.GetRequiredService<GvSmsClient>();
+        var poller = sp.GetRequiredService<GvThreadPoller>();
+        var eventSource = sp.GetRequiredService<IGvMessageEventSource>();
 
         Assert.NotNull(fetcher);
         Assert.NotNull(threadClient);
         Assert.NotNull(vmClient);
         Assert.NotNull(cache);
+        Assert.NotNull(smsClient);
+        Assert.NotNull(poller);
+        Assert.Same(poller, eventSource); // the seam alias resolves to the singleton poller
+    }
+
+    [Fact]
+    public async Task PollerCycle_WhenClientUnavailable_DegradesWithoutThrowing()
+    {
+        using var sp = BuildProvider();
+        var poller = sp.GetRequiredService<GvThreadPoller>();
+
+        var raised = false;
+        poller.OnSmsReceived += _ => raised = true;
+        poller.OnVoicemailReceived += _ => raised = true;
+
+        // A poll cycle with no authenticated client must not throw and must raise nothing.
+        await poller.PollOnceAsync(default);
+
+        Assert.False(raised);
     }
 
     [Fact]
