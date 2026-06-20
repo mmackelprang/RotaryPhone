@@ -44,12 +44,20 @@ public class GvMessagePushBridge : IHostedService
     private void BroadcastSms(GVBridge.Api.SmsMessageDto dto)
     {
         _logger.LogInformation("Broadcasting SmsReceived {Id} from {Number}", dto.Id, dto.CounterpartyNumber);
-        _ = _hubContext.Clients.All.SendAsync("SmsReceived", dto);
+        FireAndLog(_hubContext.Clients.All.SendAsync("SmsReceived", dto), "SmsReceived", dto.Id);
     }
 
     private void BroadcastVoicemail(GVBridge.Api.VoicemailItemDto dto)
     {
         _logger.LogInformation("Broadcasting VoicemailReceived {Id} from {Number}", dto.Id, dto.FromNumber);
-        _ = _hubContext.Clients.All.SendAsync("VoicemailReceived", dto);
+        FireAndLog(_hubContext.Clients.All.SendAsync("VoicemailReceived", dto), "VoicemailReceived", dto.Id);
     }
+
+    // Fire-and-forget the SignalR broadcast but observe the task so a SendAsync fault (hub startup
+    // race, serialization error) is logged instead of silently swallowed as an unobserved exception.
+    private void FireAndLog(Task sendTask, string eventName, string id)
+        => _ = sendTask.ContinueWith(
+            t => _logger.LogWarning(t.Exception?.GetBaseException(),
+                "{Event} broadcast failed for {Id}", eventName, id),
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
 }

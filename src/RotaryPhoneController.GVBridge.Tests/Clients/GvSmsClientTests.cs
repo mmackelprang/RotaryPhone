@@ -44,18 +44,29 @@ public class GvSmsClientTests
     public async Task ListMessagesAsync_ReturnsMessagesForThread()
     {
         var client = NewClient(_ => SmsListResponse());
-        var msgs = await client.ListMessagesAsync("t.+19195551234", count: 50);
-        Assert.Equal(2, msgs.Count);
-        Assert.Equal("Inbound", msgs[0].Direction);
-        Assert.Equal("Outbound", msgs[1].Direction);
+        var result = await client.ListMessagesAsync("t.+19195551234", count: 50);
+        Assert.True(result.Succeeded);
+        Assert.Equal(2, result.Messages.Count);
+        Assert.Equal("Inbound", result.Messages[0].Direction);
+        Assert.Equal("Outbound", result.Messages[1].Direction);
     }
 
     [Fact]
     public async Task ListMessagesAsync_FiltersByThreadId()
     {
         var client = NewClient(_ => SmsListResponse());
-        var msgs = await client.ListMessagesAsync("t.+nonexistent", count: 50);
-        Assert.Empty(msgs);
+        var result = await client.ListMessagesAsync("t.+nonexistent", count: 50);
+        Assert.True(result.Succeeded);
+        Assert.Empty(result.Messages);
+    }
+
+    [Fact]
+    public async Task ListRecentMessagesAsync_OnFailure_ReturnsNotSucceeded()
+    {
+        var client = NewClient(_ => new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized));
+        var result = await client.ListRecentMessagesAsync(count: 50);
+        Assert.False(result.Succeeded);
+        Assert.Empty(result.Messages);
     }
 
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler

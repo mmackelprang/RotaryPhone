@@ -75,6 +75,35 @@ public class GvThreadPollerTests
     }
 
     [Fact]
+    public async Task FailedFirstSmsPoll_DoesNotSeed_AndDoesNotFloodOnRecovery()
+    {
+        // Regression (review HIGH): the first SMS poll FAILS (401). The poller must NOT seed an empty
+        // high-water mark — otherwise the first SUCCESSFUL poll would treat all history as "new" and
+        // flood RadioConsole. After the failed poll, a successful poll carrying history must seed
+        // silently (raise nothing); only a genuinely newer message on a later poll fires.
+        var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
+        {
+            // cycle 1: SMS folder 401 (fail) + voicemail folder empty 200
+            new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized),
+            SmsResponse("""{"threads":[],"nextPageToken":null}"""),
+            // cycle 2: SMS folder now succeeds WITH history → must seed, not flood
+            SmsResponse(OneInbound),
+            SmsResponse("""{"threads":[],"nextPageToken":null}"""),
+            // cycle 3: a genuinely newer inbound (m.2) → fires exactly once
+            SmsResponse(TwoInbound),
+            SmsResponse("""{"threads":[],"nextPageToken":null}""")
+        }));
+
+        await poller.PollOnceAsync(default); // failed SMS poll — no seed
+        await poller.PollOnceAsync(default); // first success — seeds history silently
+        Assert.Empty(received);              // NOT flooded with history
+
+        await poller.PollOnceAsync(default); // m.2 is genuinely new
+        Assert.Single(received);
+        Assert.Equal("m.2", received[0].Id);
+    }
+
+    [Fact]
     public async Task OutboundMessage_DoesNotRaise()
     {
         const string outbound = """

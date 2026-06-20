@@ -75,20 +75,24 @@ public class GvThreadPoller : BackgroundService, IGvMessageEventSource
 
     private async Task PollSmsAsync(CancellationToken ct)
     {
-        var messages = await _smsClient.ListRecentMessagesAsync(count: 50, ct);
+        var result = await _smsClient.ListRecentMessagesAsync(count: 50, ct);
 
-        // First poll seeds the high-water marks without raising events, so we never flood
-        // RadioConsole with SMS history on startup (ADR §5.3). Subsequent polls diff.
+        // First SUCCESSFUL poll seeds the high-water marks without raising events, so we never flood
+        // RadioConsole with SMS history on startup (ADR §5.3). Critically, the seed is gated on
+        // Succeeded (exactly like the voicemail path): a failed first poll (e.g. cookieless startup)
+        // must NOT seed an empty mark — that would make every historical message look "new" and flood
+        // RadioConsole on the first successful poll. Subsequent polls diff.
         if (!_smsSeeded)
         {
-            _smsHwm.Seed(messages
+            if (!result.Succeeded) return;
+            _smsHwm.Seed(result.Messages
                 .Where(m => m.MessageId is not null && m.ThreadId is not null && m.SentEpochMs is not null)
                 .Select(m => (m.ThreadId!, m.MessageId!, m.SentEpochMs!.Value)));
             _smsSeeded = true;
             return;
         }
 
-        foreach (var m in messages)
+        foreach (var m in result.Messages)
         {
             if (m.MessageId is null || m.ThreadId is null || m.SentEpochMs is not { } epoch) continue;
             var isNew = _smsHwm.IsNewMessage(m.ThreadId, m.MessageId, epoch);

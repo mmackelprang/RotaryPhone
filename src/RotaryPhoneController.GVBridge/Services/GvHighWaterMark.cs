@@ -11,7 +11,9 @@ namespace RotaryPhoneController.GVBridge.Services;
 public class GvHighWaterMark
 {
     private readonly ConcurrentDictionary<string, long> _maxEpochByThread = new();
-    private bool _seeded;
+    // volatile for visibility parity with the ConcurrentDictionary above. In production the poller is
+    // single-threaded per cycle, but the explicit barrier removes any latent cross-thread hazard.
+    private volatile bool _seeded;
 
     /// <summary>Seed marks from the first poll's messages without treating any as new.</summary>
     public void Seed(IEnumerable<(string ThreadId, string MessageId, long EpochMs)> messages)
@@ -24,6 +26,9 @@ public class GvHighWaterMark
     /// <summary>
     /// True if this message is newer than the thread's mark (and advances the mark). Before the first
     /// Seed, returns false and seeds the mark — so the very first poll never raises events.
+    /// NOTE: the production poller always calls <see cref="Seed"/> explicitly on the first successful
+    /// poll before ever calling this, so the pre-seed fallback branch below is a safety net, not the
+    /// primary path; it is exercised directly only by unit tests.
     /// </summary>
     public bool IsNewMessage(string threadId, string messageId, long epochMs)
     {

@@ -57,6 +57,24 @@ public class GvSmsControllerTests
         Assert.Equal("Inbound", dto.Messages[0].Direction);
     }
 
+    [Fact]
+    public async Task GetThreads_OnUpstreamFailure_Returns502NotEmpty200()
+    {
+        var controller = NewController(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        var result = await controller.GetThreads(count: 20, default);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(502, obj.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetThreadMessages_OnUpstreamFailure_Returns502NotEmpty200()
+    {
+        var controller = NewController(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        var result = await controller.GetThreadMessages("t.+19195551234", count: 50, default);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(502, obj.StatusCode);
+    }
+
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
