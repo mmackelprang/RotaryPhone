@@ -33,13 +33,24 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
 ## Phase log
 | Phase | Status | Artifact |
 |---|---|---|
-| 1. Architect research spike (ADR) | ✅ done | `docs/architecture/decisions/2026-06-20-gv-voicemail-sms-radioconsole.md` |
-| 2. Designer UX spec | ⬜ unblocked (contract in ADR §6.1 is stable) | — |
-| 2. Architect API contract | ✅ folded into the spike ADR (§6) | ADR §6 |
-| 3. Planner (per PR) | ⬜ | docs/BUILDER_QUEUE.md |
-| 4. Builder (per PR) | ⬜ | PRs |
-| 5. Tester (UAT) | ⬜ | — |
-| 6. Polisher | ⬜ | — |
+| 1. Architect research spike (ADR) | ✅ merged | ADR — PR #51 → `docs/architecture/decisions/2026-06-20-gv-voicemail-sms-radioconsole.md` |
+| 2. Designer UX spec + handoff | ✅ merged | PR #52 — `docs/design-handoffs/gv-voicemail-sms-radioconsole/` + spec |
+| 2. Architect API contract | ✅ folded into the spike ADR (§6) | ADR §6 / §6.1 DTOs |
+| 3. Planner (read-side PR1–3) | ✅ merged | PR #53 — `docs/superpowers/plans/2026-06-20-gv-pr{1,2,3}-*.md` |
+| 4a. Builder — PR1 read clients | 🟡 in progress | — |
+| 4b. Builder — PR2 voicemail REST + audio proxy | ⬜ depends on PR1 | — |
+| 4c. Builder — PR3 SMS read + poll push | ⬜ depends on PR1 | — |
+| 4d. Builder — PR4 SMS send | 🔒 owner-hold (ADR §12 #1) | — |
+| 4e. Builder — PR5 inter-service auth gate | 🔒 owner-hold (ADR §12 #2) | — |
+| 5. Tester (UAT) | ⬜ deferred — RadioConsole UI lives in RTest repo; no browser UAT for backend PRs | — |
+| 6. Polisher | ⬜ deferred — applies to UI work (separate repo) | — |
+
+> **Note — no `BUILDER_QUEUE.md` in this project.** Builder work is driven directly from the
+> plan docs above. The earlier tracker reference to a queue file was wrong; corrected here.
+
+> **Infra note (2026-06-20):** Designer + Planner subagents were interrupted by an auth
+> (401) lapse at their commit step; their content was verified complete and landed via the
+> recovery PRs #52/#53 above. No work lost.
 
 ## Spike findings (2026-06-20)
 - **Feasibility:** voicemail list/listen/transcript = Medium; SMS-read = Med-High **via polling**;
