@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pin the Server reference to net10.0 to avoid the multi-TFM ambiguity (Server multi-targets
+         net10.0;net10.0-windows... on Windows). -->
+    <ProjectReference Include="..\RotaryPhoneController.Server\RotaryPhoneController.Server.csproj" SetTargetFramework="TargetFramework=net10.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lets the test project use HttpContext, DefaultHttpContext, IHubFilter, HubLifetimeContext,
+         StatusCodes, QueryString, etc. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+  </ItemGroup>
+</Project>

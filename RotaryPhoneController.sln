@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.GVBri
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.GVBridge.Tests", "src\RotaryPhoneController.GVBridge.Tests\RotaryPhoneController.GVBridge.Tests.csproj", "{DEFF8E12-2EC4-4B82-842F-BA3560E7C2EC}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RotaryPhoneController.Server.Tests", "src\RotaryPhoneController.Server.Tests\RotaryPhoneController.Server.Tests.csproj", "{917198B2-37CA-41BA-A1F4-A412C0B3FE89}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -113,6 +115,18 @@ Global
 		{DEFF8E12-2EC4-4B82-842F-BA3560E7C2EC}.Release|x64.Build.0 = Release|Any CPU
 		{DEFF8E12-2EC4-4B82-842F-BA3560E7C2EC}.Release|x86.ActiveCfg = Release|Any CPU
 		{DEFF8E12-2EC4-4B82-842F-BA3560E7C2EC}.Release|x86.Build.0 = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|x64.Build.0 = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Debug|x86.Build.0 = Debug|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|Any CPU.Build.0 = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|x64.ActiveCfg = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|x64.Build.0 = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|x86.ActiveCfg = Release|Any CPU
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -125,5 +139,6 @@ Global
 		{DB0A053B-4505-4FD2-B0E7-C356D699ADA1} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{8AA7A865-18BD-42E6-A6E1-30230C1BE2BA} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{DEFF8E12-2EC4-4B82-842F-BA3560E7C2EC} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{917198B2-37CA-41BA-A1F4-A412C0B3FE89} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal
