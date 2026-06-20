@@ -80,6 +80,7 @@ ssh $SshTarget "sudo mkdir -p ${TargetPath}/{data,logs} && sudo chown -R ${Targe
 # --- Step 3: Sync files ---
 Write-Host "[3/4] Syncing files..." -ForegroundColor Yellow
 
+$synced = $false
 $rsyncAvailable = Get-Command rsync -ErrorAction SilentlyContinue
 if ($rsyncAvailable) {
   # Convert Windows path to rsync-compatible path
@@ -92,13 +93,49 @@ if ($rsyncAvailable) {
     $rsyncSource `
     "${SshTarget}:${TargetPath}/"
 
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "  rsync failed, falling back to scp..." -ForegroundColor Yellow
-    scp -r "${PublishDir}\*" "${SshTarget}:${TargetPath}/"
+  if ($LASTEXITCODE -eq 0) {
+    $synced = $true
+  } else {
+    Write-Host "  rsync failed (exit $LASTEXITCODE), falling back to tar-over-scp..." -ForegroundColor Yellow
   }
-} else {
-  Write-Host "  rsync not found, using scp..." -ForegroundColor Yellow
-  scp -r "${PublishDir}\*" "${SshTarget}:${TargetPath}/"
+}
+
+if (-not $synced) {
+  # Robust fallback when rsync is unavailable: run the proven tar-pipe-over-ssh inside BASH.
+  # Why bash and not a PowerShell scp/tar:
+  #   * PowerShell's pipeline corrupts binary streams, so 'tar -czf - | ssh' must not run in PS.
+  #   * msys GNU tar treats a Windows 'C:\...' archive path as a remote host ('C:'), so we use
+  #     msys-style '/d/...' paths instead.
+  #   * --unlink-first avoids ETXTBSY when overwriting the running binary (old inode survives for
+  #     the live process; the Step-4 restart picks up the new file).
+  #   * The box's data/ (cookies) is untouched (publish has no data/); appsettings.Production.json
+  #     is backed up + restored around the extract so the customized prod config is never clobbered.
+  #   * $LASTEXITCODE is checked so a failed sync ABORTS the deploy instead of restarting the
+  #     service on the OLD binary (the silent-stale-deploy bug this replaces).
+  if (-not $rsyncAvailable) {
+    Write-Host "  rsync not found, using tar-pipe over ssh (bash)..." -ForegroundColor Yellow
+  }
+
+  # Windows publish path -> msys path (D:\prj\..\linux-x64 -> /d/prj/.../linux-x64) for GNU tar -C.
+  $publishMsys = ($PublishDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower()
+
+  # Write the tar-pipe to a temp .sh and run THAT (avoids PowerShell 5.1's unreliable native-arg
+  # quoting of a 'bash -c "<string with quotes>"'). Must be LF-only with no BOM for bash.
+  $syncScript =
+    "set -e -o pipefail`n" +
+    "tar -C '$publishMsys' --exclude=./.playwright -czf - . | ssh '$SshTarget' '" +
+      "cp -f $TargetPath/appsettings.Production.json /tmp/rp-prod.bak 2>/dev/null || true; " +
+      "tar -xzf - --unlink-first -C $TargetPath; " +
+      "[ -f /tmp/rp-prod.bak ] && mv -f /tmp/rp-prod.bak $TargetPath/appsettings.Production.json || true; " +
+      "chmod +x $TargetPath/RotaryPhoneController.Server'`n"
+  $syncScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-deploy-sync.sh"
+  [System.IO.File]::WriteAllText($syncScriptPath, $syncScript, (New-Object System.Text.UTF8Encoding($false)))
+
+  bash $syncScriptPath
+  $syncExit = $LASTEXITCODE
+  Remove-Item $syncScriptPath -ErrorAction SilentlyContinue
+  if ($syncExit -ne 0) { throw "tar-pipe deploy failed (exit $syncExit) -- aborting (service NOT restarted; still on prior binary)" }
+  $synced = $true
 }
 
 # Copy appsettings.Production.json only if it doesn't exist on target
