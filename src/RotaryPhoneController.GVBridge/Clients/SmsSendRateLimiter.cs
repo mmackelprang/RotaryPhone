@@ -29,7 +29,10 @@ public class SmsSendRateLimiter
         var now = _clock();
         lock (_gate)
         {
-            while (_stamps.TryPeek(out var oldest) && now - oldest >= _window)
+            // Strictly-closed window: a stamp at exactly the window boundary is still IN-window, so the
+            // limiter matches its documented "reject > N sends per window" contract (a 6th send at exactly
+            // t=window is rejected, not admitted). Use > rather than >= for eviction (review MEDIUM-1).
+            while (_stamps.TryPeek(out var oldest) && now - oldest > _window)
                 _stamps.TryDequeue(out _);
 
             if (_stamps.Count >= _maxSends) return false;

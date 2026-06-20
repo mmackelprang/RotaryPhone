@@ -63,9 +63,13 @@ public class GvMessagePushBridge : IHostedService
 
     // Fire-and-forget the SignalR broadcast but observe the task so a SendAsync fault (hub startup
     // race, serialization error) is logged instead of silently swallowed as an unobserved exception.
+    // Pass an explicit TaskScheduler.Default (don't capture TaskScheduler.Current) and flatten the
+    // AggregateException so all inner faults are logged, not just the first (review MEDIUM-2).
     private void FireAndLog(Task sendTask, string eventName, string id)
         => _ = sendTask.ContinueWith(
-            t => _logger.LogWarning(t.Exception?.GetBaseException(),
+            t => _logger.LogWarning(t.Exception!.Flatten().InnerException,
                 "{Event} broadcast failed for {Id}", eventName, id),
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
 }
