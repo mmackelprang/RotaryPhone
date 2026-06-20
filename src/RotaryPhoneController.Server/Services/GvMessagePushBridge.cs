@@ -30,6 +30,7 @@ public class GvMessagePushBridge : IHostedService
     {
         _eventSource.OnSmsReceived += BroadcastSms;
         _eventSource.OnVoicemailReceived += BroadcastVoicemail;
+        _eventSource.OnSmsSent += BroadcastSmsSent;
         _logger.LogInformation("GvMessagePushBridge subscribed to GV message events");
         return Task.CompletedTask;
     }
@@ -38,6 +39,7 @@ public class GvMessagePushBridge : IHostedService
     {
         _eventSource.OnSmsReceived -= BroadcastSms;
         _eventSource.OnVoicemailReceived -= BroadcastVoicemail;
+        _eventSource.OnSmsSent -= BroadcastSmsSent;
         return Task.CompletedTask;
     }
 
@@ -45,6 +47,12 @@ public class GvMessagePushBridge : IHostedService
     {
         _logger.LogInformation("Broadcasting SmsReceived {Id} from {Number}", dto.Id, dto.CounterpartyNumber);
         FireAndLog(_hubContext.Clients.All.SendAsync("SmsReceived", dto), "SmsReceived", dto.Id);
+    }
+
+    private void BroadcastSmsSent(GVBridge.Api.SmsMessageDto dto)
+    {
+        _logger.LogInformation("Broadcasting SmsSent {Id} to {Number}", dto.Id, dto.CounterpartyNumber);
+        FireAndLog(_hubContext.Clients.All.SendAsync("SmsSent", dto), "SmsSent", dto.Id);
     }
 
     private void BroadcastVoicemail(GVBridge.Api.VoicemailItemDto dto)

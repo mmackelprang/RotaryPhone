@@ -51,4 +51,16 @@ public class GVBridgeConfig
     public int ThreadPollIdleSeconds { get; set; } = 60;
     public int ThreadPollBackoffSeconds { get; set; } = 120;
     public int ThreadPollActiveWindowMinutes { get; set; } = 5; // "active" if a poll found new msgs within this window
+
+    // SMS SEND FEATURE FLAG (ADR §12 #1) — DEFAULT FALSE. The account-write path ships DARK: when false,
+    // POST /api/gvbridge/sms/send performs NO GV call and returns 409 send_disabled. This lets the
+    // irreversible-write code merge + auto-merge safely; the owner flips this to true to go live (after the
+    // ADR §11 live capture). This server-side flag is INDEPENDENT of RadioConsole's own EnableSmsSend UI
+    // flag — defense in depth: BOTH must be on for a send to leave the building.
+    public bool EnableSmsSend { get; set; } = false;
+
+    // SMS send rate limit (ADR §4.2 #4). Reject more than N sends per window → HTTP 429. Owner-tunable;
+    // conservative defaults for a single personal account.
+    public int SmsSendMaxPerWindow { get; set; } = 5;
+    public int SmsSendWindowSeconds { get; set; } = 10;
 }

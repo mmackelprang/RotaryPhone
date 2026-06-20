@@ -123,6 +123,37 @@ public class GvThreadPollerTests
         Assert.Empty(received); // outbound (direction=1) is not an inbound "received" event
     }
 
+    [Fact]
+    public async Task NewOutboundMessage_RaisesOnSmsSent_WithCorrelationId_NotOnSmsReceived()
+    {
+        // id-consistency (PR4 Task 1 Step 1c): a NEW outbound message must re-surface via OnSmsSent
+        // (NOT OnSmsReceived) carrying the SAME csid: id the controller echo uses, so the UI collapses
+        // the optimistic bubble. Inbound behavior is unchanged.
+        const string outbound = """
+            {"threads":[["t.1",["+19195551234","Alice"],3000,false,
+              [["m.1","t.1",0,"+19195551234","first",1000,false],
+               ["m.3","t.1",1,"+19195551234","me replying",3000,true]]]],"nextPageToken":null}
+            """;
+        var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
+        {
+            SmsResponse(OneInbound), SmsResponse("""{"threads":[],"nextPageToken":null}"""),
+            SmsResponse(outbound), SmsResponse("""{"threads":[],"nextPageToken":null}""")
+        }));
+        var sent = new List<SmsMessageDto>();
+        poller.OnSmsSent += dto => sent.Add(dto);
+
+        await poller.PollOnceAsync(default); // seed
+        await poller.PollOnceAsync(default); // diff → m.3 outbound is new
+
+        Assert.Empty(received);                                  // inbound channel untouched
+        Assert.Single(sent);
+        Assert.Equal("Outbound", sent[0].Direction);
+        Assert.Equal("me replying", sent[0].Text);
+        // id matches the shared formula for (threadId, text, epoch) → exact UI collapse.
+        Assert.Equal(SmsCorrelationId.For("t.1", "me replying", 3000), sent[0].Id);
+        Assert.StartsWith("csid:t.1:", sent[0].Id);
+    }
+
     private sealed class StubFetcher : IGvRecordingFetcher
     {
         public Task<GvRecordingFetchResult> FetchAsync(string mediaRef, CancellationToken ct = default)
