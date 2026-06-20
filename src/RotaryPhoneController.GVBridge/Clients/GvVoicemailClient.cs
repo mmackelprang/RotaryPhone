@@ -17,13 +17,15 @@ public class GvVoicemailClient
 {
     private readonly GvThreadClient _threadClient;
     private readonly IGvThreadParser _parser;
+    private readonly IGvRecordingFetcher _recordingFetcher;
     private readonly ILogger<GvVoicemailClient> _logger;
 
     public GvVoicemailClient(GvThreadClient threadClient, IGvThreadParser parser,
-        ILogger<GvVoicemailClient> logger)
+        IGvRecordingFetcher recordingFetcher, ILogger<GvVoicemailClient> logger)
     {
         _threadClient = threadClient;
         _parser = parser;
+        _recordingFetcher = recordingFetcher;
         _logger = logger;
     }
 
@@ -38,4 +40,11 @@ public class GvVoicemailClient
         _logger.LogDebug("Listed {Count} voicemails", items.Count);
         return new GvVoicemailListResult(items, token, Succeeded: true);
     }
+
+    /// <summary>
+    /// Fetch the recording bytes for a voicemail media reference (the MediaId/MediaRef from a parsed
+    /// voicemail node). Delegates to the fetcher seam so the UNVERIFIED media shape stays in one place.
+    /// </summary>
+    public Task<GvRecordingFetchResult> GetRecordingAsync(string mediaRef, CancellationToken ct = default)
+        => _recordingFetcher.FetchAsync(mediaRef, ct);
 }
