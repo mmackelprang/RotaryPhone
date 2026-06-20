@@ -66,8 +66,27 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
   identical in shape to `IncomingCall` — so poll-vs-signaler is invisible to RadioConsole.
 - **Audio = RotaryPhone proxy+cache**, never a Google redirect (RadioConsole has no cookies).
 
+## Cross-repo: RadioConsole UI (parallel track)
+- Handoff prompt for the RadioConsole team/agent: `docs/handoffs/radioconsole-gv-voicemail-sms-ui-handoff.md`.
+  Self-contained as-built contract (routes + DTOs + SignalR events + audio/auth posture) + UX
+  to build. Read experience buildable now; SMS-send UI to be feature-flagged until PR4 ships.
+- This unblocks the UI from being designed/built in parallel while RotaryPhone finishes the
+  API side (live capture, PR4 send, PR5 auth gate).
+
+## Builder follow-ups (read-side complete — PRs #54/#56/#57 merged, 151 tests green)
+- **Live-capture gate (ADR §11):** parser field positions are PROVISIONAL — fixture-verified,
+  not live-verified. Must run the §11 capture on the `radio` box with live cookies before the
+  feature is trusted end-to-end. Quarantined behind seams (one-file corrections).
+- **Deferred to Planner — PR1 review HIGH-2:** `IGvAuthenticatedClientProvider.GetAuthenticatedClient()`
+  gates on `IsAvailable`; a successful rung-1 cookie rotation leaves `IsAvailable=false` until the
+  next health-check tick, so the seam can return `null` despite a valid client during a recovery
+  window. No PR1-3 consumer harmed today (clients degrade to `Succeeded=false`); reconcile before
+  live use under auth blips. Touches the auth-recovery ladder → out of read-side scope.
+
 ## Open decisions for owner (on return) — see ADR §12
 1. SMS-send autonomy: ship behind auth-gate + rate-limit? per-send confirm in UI for v1?
 2. Inter-service `X-RotaryPhone-Auth` gate now (default-off, LAN-safe)?
 3. Voicemail cache retention (7 days / 200 MB proposed)?
 4. Fund the timeboxed signaler retest (PR6), or ship poll-only?
+5. Run the ADR §11 live capture on the `radio` box to de-provisionalize the parsers?
+6. Reconcile the PR1 HIGH-2 auth-recovery window (Planner follow-up) — schedule it?
