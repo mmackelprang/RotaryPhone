@@ -54,6 +54,19 @@ public static class GVBridgeServiceExtensions
 
         services.AddSingleton<GvVoicemailCache>();
 
+        // SMS read client + thread poller (PR3). Both ride the same provider-backed GvThreadClient /
+        // GvVoicemailClient (per-call auth resolution from PR2), so registering them does NOT resolve a
+        // live HttpClient at container-build time — the poller starts even with the adapter inactive and
+        // simply raises nothing until cookies load (ADR §1.3 activation-order, §5.3).
+        services.AddSingleton<GvSmsClient>(sp => new GvSmsClient(
+            sp.GetRequiredService<GvThreadClient>(),
+            sp.GetRequiredService<IGvThreadParser>(),
+            sp.GetRequiredService<ILogger<GvSmsClient>>()));
+
+        services.AddSingleton<GvThreadPoller>();
+        services.AddSingleton<IGvMessageEventSource>(sp => sp.GetRequiredService<GvThreadPoller>());
+        services.AddHostedService(sp => sp.GetRequiredService<GvThreadPoller>());
+
         // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
         services.AddHttpClient();
 
