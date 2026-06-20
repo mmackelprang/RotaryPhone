@@ -68,9 +68,10 @@ public sealed class GvSipTransport : IAsyncDisposable
     private bool _registered;
 
     // Hard rate-floor on REGISTER attempts (storm guard — see ReconnectOptions.MinRegisterIntervalSeconds).
-    // The gate serializes the throttle so concurrent reconnect paths can't collectively exceed the floor.
+    // The gate guards only the slot-reservation critical section (NOT the wait), so concurrent reconnect
+    // paths reserve successive floor-spaced slots without the semaphore being held across an await.
     private readonly SemaphoreSlim _registerGate = new(1, 1);
-    private long _lastRegisterTimestamp;
+    private long _nextRegisterTimestamp; // earliest GetTimestamp() value the next attempt may start at
     private bool _disposed;
 
     // Negotiated keep-alive frequency (RFC 6223 keep= from the REGISTER 200-OK Via).
@@ -861,26 +862,32 @@ public sealed class GvSipTransport : IAsyncDisposable
         if (_options.MinRegisterIntervalSeconds <= 0)
             return;
 
+        var floorTicks = (long)(_options.MinRegisterIntervalSeconds * _timeProvider.TimestampFrequency);
+
+        // Reserve the next floor-spaced slot under the gate (no awaiting inside), then wait for it
+        // OUTSIDE the gate so the semaphore is never held across Task.Delay. The first attempt
+        // reserves "now" (no wait); each subsequent attempt reserves prior-slot + floor.
+        long target;
         await _registerGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_lastRegisterTimestamp != 0)
-            {
-                var minInterval = TimeSpan.FromSeconds(_options.MinRegisterIntervalSeconds);
-                var remaining = minInterval - _timeProvider.GetElapsedTime(_lastRegisterTimestamp);
-                if (remaining > TimeSpan.Zero)
-                {
-#pragma warning disable CA1848, CA1873
-                    _logger.LogDebug("REGISTER rate-floor: waiting {Ms}ms before next attempt", (int)remaining.TotalMilliseconds);
-#pragma warning restore CA1848, CA1873
-                    await Task.Delay(remaining, _timeProvider, ct).ConfigureAwait(false);
-                }
-            }
-            _lastRegisterTimestamp = _timeProvider.GetTimestamp();
+            var now = _timeProvider.GetTimestamp();
+            target = Math.Max(now, _nextRegisterTimestamp);
+            _nextRegisterTimestamp = target + floorTicks;
         }
         finally
         {
             _registerGate.Release();
+        }
+
+        var waitTicks = target - _timeProvider.GetTimestamp();
+        if (waitTicks > 0)
+        {
+            var wait = TimeSpan.FromSeconds((double)waitTicks / _timeProvider.TimestampFrequency);
+#pragma warning disable CA1848, CA1873
+            _logger.LogDebug("REGISTER rate-floor: waiting {Ms}ms before next attempt", (int)wait.TotalMilliseconds);
+#pragma warning restore CA1848, CA1873
+            await Task.Delay(wait, _timeProvider, ct).ConfigureAwait(false);
         }
     }
 

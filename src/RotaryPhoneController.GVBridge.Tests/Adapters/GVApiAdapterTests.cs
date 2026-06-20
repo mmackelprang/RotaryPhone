@@ -67,11 +67,13 @@ public class GVApiAdapterTests
     }
 
     [Fact]
-    public void Degraded_BeforeActivate_IsTrue()
+    public void Degraded_BeforeActivate_IsFalse()
     {
-        // Not yet activated: cookies invalid and not registered → degraded (honest).
+        // Not activated/available → not "degraded" (that's conveyed by available:false instead);
+        // Degraded is gated on IsAvailable so an inactive adapter doesn't raise a false alarm.
         var adapter = CreateAdapter();
-        Assert.True(adapter.Degraded);
+        Assert.False(adapter.IsAvailable);
+        Assert.False(adapter.Degraded);
     }
 
     [Fact]

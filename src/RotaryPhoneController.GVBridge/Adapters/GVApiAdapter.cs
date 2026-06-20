@@ -82,11 +82,13 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     public bool AreCookiesValid => _areCookiesValid;
 
     /// <summary>
-    /// True when the GV path is NOT fully usable — either cookies are invalid OR SIP is not
-    /// registered. Surfaced honestly so the dashboard/watchdog can see degradation early
-    /// (the 2026-06-19 outage was invisible because status lied). See [[gv-registration-resilience]].
+    /// True when GVApi IS the active/available path but is NOT fully usable — cookies invalid OR
+    /// SIP not registered. Gated on <see cref="IsAvailable"/> so an inactive adapter (startup, or
+    /// while BluetoothHfp/SipTrunk is the active mode) doesn't raise a permanent false alarm; that
+    /// state is already conveyed by <c>available:false</c>. Surfaced honestly so the dashboard can
+    /// see real degradation early (the 2026-06-19 outage was invisible because status lied).
     /// </summary>
-    public bool Degraded => !(_areCookiesValid && (_sipTransport?.IsRegistered ?? false));
+    public bool Degraded => IsAvailable && !(_areCookiesValid && (_sipTransport?.IsRegistered ?? false));
 
     /// <summary>
     /// UTC time the adapter was last fully healthy (cookies valid AND SIP registered), per the
@@ -696,10 +698,12 @@ public class GVApiAdapter : ICallAdapter, IDisposable
                 SetAvailable(false);
                 TriggerCookieRecovery("watchdog: cookies invalid");
             }
-            else
+            else if (Volatile.Read(ref _refreshingCookies) == 0)
             {
                 // Cookies fine but SIP is not registered (e.g., a stuck/declined registration like the
-                // 2026-06-19 incident). Don't churn cookies — just force a clean re-register.
+                // 2026-06-19 incident). Skip if a recovery is already in flight (it will re-register);
+                // otherwise just force a clean re-register without churning cookies. If that re-register
+                // turns out to fail auth, it escalates to the full ladder via AuthenticationFailed.
                 _logger.LogWarning("GVApi: watchdog — cookies valid but SIP not registered, forcing re-register");
                 _ = ForceReRegisterAsync();
             }

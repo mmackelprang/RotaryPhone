@@ -101,7 +101,7 @@ public class CdpCookieRefreshTests
   }
 
   [Fact]
-  public async Task RefreshFromBrowser_NoCookiesReturned_Returns400()
+  public async Task RefreshFromBrowser_EmptyDebuggerUrl_Returns503()
   {
     // Arrange: Tab found but webSocketDebuggerUrl is empty (edge case)
     var tabs = new[]
