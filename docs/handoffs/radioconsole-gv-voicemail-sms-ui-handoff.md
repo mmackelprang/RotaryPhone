@@ -33,10 +33,30 @@ GV field *values* are still being verified (see "Provisional data" below), thoug
 - SignalR hub: `http://radio:5004/hub` (the existing `RotaryHub` you already use for
   `IncomingCall` / call-state events — just add the new event handlers below)
 
-**Auth / networking posture today:** LAN-only, **no auth header required** right now. A
-future `X-RotaryPhone-Auth: <key>` header will become optional/required when the inter-service
-auth gate ships (RotaryPhone PR5, owner-hold). Design your API client so a single auth header
-can be switched on later via config — but **do not send it today**.
+**Auth / networking posture (PR5 shipped, default-off):** LAN-only with **no auth required by
+default** — RotaryPhone's inter-service auth gate is **off unless a key is configured**, so today
+nothing changes. The gate is now built (RotaryPhone PR5): when `GVBridge:InterServiceAuthKey` is
+set on RotaryPhone, an `X-RotaryPhone-Auth: <key>` header becomes **required** on every
+`/api/gvbridge/*` REST request **and** on the `/hub` SignalR connection (constant-time compare;
+**401** on REST / **aborted connection** on the hub if missing or wrong). `/api/gvbridge/event`
+(the extension content-script callback) is never gated.
+
+**As-built contract — how to send the key (do this so the key can be flipped on later):**
+- **REST:** read the key from RadioConsole's own config/secret mechanism (not hard-coded). When
+  it is non-empty, attach `X-RotaryPhone-Auth: <key>` to **every** `/api/gvbridge/*` request.
+  Against a gated RotaryPhone, a missing/wrong header returns **401**.
+- **SignalR:** supply the key on the `HubConnection`. For a .NET `HubConnectionBuilder` the
+  canonical approaches are `options.Headers["X-RotaryPhone-Auth"] = key` (works for the .NET
+  client on all transports — simplest) and/or
+  `options.AccessTokenProvider = () => Task.FromResult(key)` (surfaces as the `access_token` query
+  param, which RotaryPhone's hub filter also accepts). **Either** satisfies the gate.
+- **Rollout (coordinated, two-sided):** the gate is **default-off** — both services keep working
+  with no key (LAN). To enable: set the **same** key on both services' config **out-of-source**
+  (env `GVBridge__InterServiceAuthKey` on the `radio` box / `dotnet user-secrets` locally), then
+  RadioConsole starts sending it. A mismatch = **401** (REST) / **aborted connection** (hub) →
+  surface your existing reconnecting/unavailable banner (§7), not a hard crash. Do **not** turn it
+  on one-sided: a one-sided enable is an instant 401/abort storm. Coordinate the flip with the
+  RotaryPhone owner.
 
 ### Voicemail — HTTP
 
@@ -142,7 +162,11 @@ hub.On<VoicemailItemDto>("VoicemailReceived", OnVoicemailReceived); // new voice
    `{ "threadId": "...", "text": "..." }` → returns the created outbound message — wire it then.
 2. **Voicemail mark-read / delete.** No GV-side endpoints in v1. Treat "heard/read" as
    **UI-local state** only (don't expect it to persist to Google).
-3. **Inter-service auth header.** Don't send `X-RotaryPhone-Auth` yet (see posture above).
+3. **Inter-service auth header.** The gate is now built and **default-off** (RotaryPhone PR5). You
+   do **not** need a key to work on the LAN today, but **wire your client per the as-built contract
+   above** so the header (REST) + the `HubConnection` credential (SignalR) can be switched on from
+   config without a code change. Only flip it on in coordination with RotaryPhone (same key, both
+   sides, out-of-source) — see the Auth / networking posture section.
 
 ---
 
@@ -221,5 +245,9 @@ show "Sending too fast — wait a moment," keep the typed text; no auto-retry.
   live responses, and your on-screen-keyboard decision.
 
 **Open a thread back to the RotaryPhone side for:** the send endpoint's exact request/response
-when PR4 ships, the `X-RotaryPhone-Auth` rollout, and any field-value corrections from the
-live capture.
+when PR4 ships, and any field-value corrections from the live capture. For the
+`X-RotaryPhone-Auth` rollout specifically, agree **out-of-band** (never in a repo): the actual key
+value, and the exact env var name on each box that holds it (RotaryPhone reads
+`GVBridge__InterServiceAuthKey`; RadioConsole should hold its copy under its own config/secret with
+the matching value). Confirm both boxes are set to the same key **before** RadioConsole starts
+sending it.

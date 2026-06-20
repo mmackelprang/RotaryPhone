@@ -63,4 +63,10 @@ public class GVBridgeConfig
     // conservative defaults for a single personal account.
     public int SmsSendMaxPerWindow { get; set; } = 5;
     public int SmsSendWindowSeconds { get; set; } = 10;
+
+    // Inter-service auth gate (ADR §6.5). EMPTY = DISABLED (LAN-only, no auth — exactly as today).
+    // When set, X-RotaryPhone-Auth: <key> is REQUIRED on all /api/gvbridge/* endpoints AND the SignalR
+    // hub. REQUIRED before any non-LAN exposure (port-forward/VPN/Tailscale). Store the actual secret
+    // OUTSIDE source — see appsettings note (env var / user-secrets), never commit a real key. (PR5.)
+    public string InterServiceAuthKey { get; set; } = "";
 }

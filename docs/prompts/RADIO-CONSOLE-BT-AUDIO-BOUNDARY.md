@@ -135,6 +135,10 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | GET | `/api/gvbridge/cookies` | Cookie status metadata (no secrets) | B (PR2) |
 | POST | `/api/gvbridge/cookies` | Replace cookie set from paste | B (PR2) |
 | POST | `/api/gvbridge/cookies/refresh-from-browser` | Extract cookies from Chrome CDP and activate | B (PR3) |
+| GET | `/api/gvbridge/voicemail` | Voicemail list + cached-audio proxy (no Google media calls from RTest) | 4 (PR2) |
+| GET | `/api/gvbridge/sms/threads` | SMS thread list | 4 (PR3) |
+| GET | `/api/gvbridge/sms/...` | SMS thread/message read endpoints | 4 (PR3) |
+| POST | `/api/gvbridge/sms/send` | Send an SMS (account write — ships dark behind `EnableSmsSend`) | 4 (PR4) |
 | GET | `/api/gvtrunk/status` | VoIP.ms SIP trunk registration state | A (existing) |
 | GET | `/api/gvtrunk/calls` | Call history (last 50) | A (existing) |
 | GET | `/api/gvtrunk/sms` | SMS history (last 20, in-memory) | A (existing) |
@@ -149,6 +153,8 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | GET | `/api/callhistory` | Call history | A (existing) |
 
 **JSON conventions:** All response payloads are camelCase or PascalCase depending on whether the controller returns an anonymous object (camelCase) or a typed DTO/record (PascalCase). RTest's `Radio.Web` configures `JsonSerializerOptions.PropertyNameCaseInsensitive = true` so both work transparently. **New endpoints should prefer typed records** for OpenAPI/Swagger schema clarity.
+
+**Inter-service auth (PR5, default-off):** ALL `/api/gvbridge/*` REST endpoints above **and** the `/hub` SignalR connection accept an **optional** `X-RotaryPhone-Auth: <key>` header. The header is **required only when** RotaryPhone's `GVBridge:InterServiceAuthKey` is set (default empty = LAN-only, no auth, no behavior change). When the key is set, requests/connections without a matching header get **401** (REST) or an **aborted connection** (hub); the compare is constant-time. **EXCEPTION:** `/api/gvbridge/event` (the browser-extension content-script callback) stays open — never gated. The secret is supplied at runtime out-of-source (env `GVBridge__InterServiceAuthKey` / user-secrets), never committed. See the Cookie Management Security note and the handoff (`docs/handoffs/radioconsole-gv-voicemail-sms-ui-handoff.md`) for how RTest sends it.
 
 **Polling cadence guidance for RTest:**
 
@@ -212,7 +218,9 @@ suspect. Monitor WiFi stability after enabling voice calls.
 
 ### Cookie Management Security
 
-RotaryPhone's `/api/gvbridge/cookies` endpoints accept and return Google Voice authentication state. **They have no authentication today** because RotaryPhone listens only on the LAN (radio:5004). If RotaryPhone is ever exposed beyond the LAN (port forward, VPN ingress, Tailscale, etc.), `POST /api/gvbridge/cookies` becomes a credential-theft / account-hijack vector. **MUST add auth before any external exposure.** Suggested approach: API key in `appsettings.json`, required header `X-RotaryPhone-Auth: <key>` on cookie endpoints, validated by middleware.
+RotaryPhone's `/api/gvbridge/cookies` endpoints accept and return Google Voice authentication state. **They have no authentication by default** because RotaryPhone listens only on the LAN (radio:5004). If RotaryPhone is ever exposed beyond the LAN (port forward, VPN ingress, Tailscale, etc.), `POST /api/gvbridge/cookies` becomes a credential-theft / account-hijack vector. **MUST enable auth before any external exposure.**
+
+**This gap is now closeable (PR5).** Setting `GVBridge:InterServiceAuthKey` enforces a required `X-RotaryPhone-Auth: <key>` header on **all** `/api/gvbridge/*` endpoints (the cookie endpoints included) AND the `/hub` SignalR connection, via constant-time middleware/hub-filter — "one gate, applied consistently" (ADR §6.5). The gate is **default-off** (empty key = today's LAN-only behavior, byte-identical) and is the **prerequisite for any non-LAN exposure**. Supply the secret at runtime out-of-source (env `GVBridge__InterServiceAuthKey` on the `radio` box / `dotnet user-secrets` for local dev), matching the `CookieEncryptionKey` precedent — **never commit a real key**; the in-repo value stays `""`. Enabling it is a **coordinated, two-sided** change: set the same key on RotaryPhone and on RadioConsole (RTest) together, or RadioConsole gets an instant 401/abort storm (see handoff).
 
 ### `bluetoothctl` Default Adapter
 
@@ -295,3 +303,4 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-05-24 | RotaryPhone session | Phase B PR1 merged: `/api/gvbridge/status` now returns `sipRegistered` + `cookiesValid` fields; new `/api/diagnostics/audio-bridge` and `/api/diagnostics/ht801` endpoints. REST endpoints table added to Integration Points section. RTest Phase C can now consume these for two-badge GV status + audio-bridge dashboard + HT801 dashboard card. |
 | 2026-05-25 | RotaryPhone session | Phase B PR2: cookie management endpoints `GET /api/gvbridge/cookies` (status metadata, no secrets) and `POST /api/gvbridge/cookies` (paste-in from browser DevTools). Accepts RawCookieHeader or individual fields. LAN-only, no auth -- see Cookie Management Security note. `GvCookieManager` service extracts cookie lifecycle. `GVApiAdapter` gains `LoadedAt`, `LastValidatedAt`, `ReloadCookiesAsync`. |
 | 2026-05-25 | RotaryPhone session | Phase B PR3: `POST /api/gvbridge/cookies/refresh-from-browser` -- server-side CDP cookie extraction. Connects to Chrome's remote debugging port (default 9224), finds voice.google.com tab, extracts cookies via WebSocket Network.getCookies, feeds into existing SetCookiesAsync pipeline. No Playwright dependency, uses BCL HttpClient + ClientWebSocket only. `GVBridgeConfig.ChromeCdpPort` added. |
+| 2026-06-20 | RotaryPhone session | PR5: inter-service auth gate. New optional `GVBridge:InterServiceAuthKey` (default empty = LAN-only, no behavior change). When set, `X-RotaryPhone-Auth: <key>` is REQUIRED on all `/api/gvbridge/*` REST endpoints AND the `/hub` SignalR connection (header, or access_token query for browser WS); 401/abort otherwise; constant-time compare. `/api/gvbridge/event` (extension content-script) stays open. Secret supplied at runtime via env (`GVBridge__InterServiceAuthKey`) / user-secrets — never committed. REQUIRED before any non-LAN exposure of RotaryPhone. RadioConsole must send the header on REST + an access-token provider on its HubConnection once the key is set (cross-repo; handoff updated). |
