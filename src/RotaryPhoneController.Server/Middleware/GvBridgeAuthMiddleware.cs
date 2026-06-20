@@ -32,7 +32,12 @@ public class GvBridgeAuthMiddleware
 
         var path = context.Request.Path.Value ?? "";
         var isGvBridge = path.StartsWith("/api/gvbridge", StringComparison.OrdinalIgnoreCase);
-        var isExtensionEvent = path.Contains("/gvbridge/event", StringComparison.OrdinalIgnoreCase);
+        // Exempt ONLY the exact /api/gvbridge/event segment (and any sub-path of it), not a substring —
+        // a Contains("/gvbridge/event") match would wrongly exempt a hypothetical future sibling like
+        // /api/gvbridge/eventlog from the auth gate (review MEDIUM-1). Anchor to a segment boundary.
+        var isExtensionEvent =
+            path.Equals("/api/gvbridge/event", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith("/api/gvbridge/event/", StringComparison.OrdinalIgnoreCase);
 
         if (isGvBridge && !isExtensionEvent)
         {

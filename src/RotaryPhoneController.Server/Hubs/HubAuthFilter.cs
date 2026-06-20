@@ -20,11 +20,17 @@ public class HubAuthFilter : IHubFilter
 
     public async Task OnConnectedAsync(HubLifetimeContext context, Func<HubLifetimeContext, Task> next)
     {
-        var http = context.Context.GetHttpContext();
-        if (http is null || !IsConnectionAuthorized(_validator, http))
+        // Guard IsEnabled FIRST so that when the gate is OFF this is an unconditional pass-through for
+        // EVERY transport — including any that exposes no HttpContext (review MEDIUM-2). Aborting a
+        // null-HttpContext connection while disabled would violate the zero-behavior-change guarantee.
+        if (_validator.IsEnabled)
         {
-            context.Context.Abort();
-            return;
+            var http = context.Context.GetHttpContext();
+            if (http is null || !IsConnectionAuthorized(_validator, http))
+            {
+                context.Context.Abort();
+                return;
+            }
         }
         await next(context);
     }
