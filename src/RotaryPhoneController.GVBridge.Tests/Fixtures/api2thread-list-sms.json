@@ -1,0 +1,24 @@
+{
+  "_comment": "SYNTHETIC fixture — NOT a live GV capture. Shape approximates ADR §3. Field positions are placeholders pinned in PositionalGvThreadParser and corrected via ADR §11 step 1.",
+  "threads": [
+    [
+      "t.+19195551234",
+      ["+19195551234", "Alice Example"],
+      1718841600000,
+      true,
+      [
+        ["m.111", "t.+19195551234", 0, "+19195551234", "hey are you around?", 1718841600000, false]
+      ]
+    ],
+    [
+      "t.+14045559876",
+      ["+14045559876", null],
+      1718838000000,
+      false,
+      [
+        ["m.222", "t.+14045559876", 1, "+14045559876", "thanks!", 1718838000000, true]
+      ]
+    ]
+  ],
+  "nextPageToken": "PAGE2"
+}
