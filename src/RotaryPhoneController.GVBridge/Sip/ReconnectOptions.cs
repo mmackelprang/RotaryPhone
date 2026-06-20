@@ -34,5 +34,14 @@ internal sealed class ReconnectOptions
     /// </summary>
     public TimeSpan RegisterTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Hard floor (seconds) between the START of consecutive REGISTER attempts — a
+    /// belt-and-suspenders cap so no code path (concurrent reconnect loops, a future bug)
+    /// can hammer Google's SIP proxy the way the 2026-06-19 incident did (~7 REGISTERs/sec,
+    /// ~600k/day). The legitimate backoff in ReconnectLoopAsync is the primary control; this
+    /// is the absolute ceiling enforced at the attempt site. Tests set 0 to keep timing fast.
+    /// </summary>
+    public double MinRegisterIntervalSeconds { get; init; } = 2.0;
+
     public static ReconnectOptions Default { get; } = new();
 }

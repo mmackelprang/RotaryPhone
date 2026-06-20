@@ -22,6 +22,7 @@ public static class GVBridgeServiceExtensions
         services.AddSingleton<GVApiAdapter>();
         services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVApiAdapter>());
         services.AddSingleton<IGvCookieManager, GvCookieManager>();
+        services.AddSingleton<ICdpCookieExtractor, CdpCookieExtractor>();
 
         // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
         services.AddHttpClient();
@@ -32,6 +33,7 @@ public static class GVBridgeServiceExtensions
             var adapter = sp.GetRequiredService<GVApiAdapter>();
             var audioBridge = sp.GetRequiredService<GVAudioBridgeService>();
             adapter.SetAudioBridge(audioBridge);
+            adapter.SetCookieExtractor(sp.GetRequiredService<ICdpCookieExtractor>());
             return new GvApiAdapterSetup();
         });
 

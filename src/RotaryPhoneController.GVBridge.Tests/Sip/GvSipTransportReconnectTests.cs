@@ -55,6 +55,7 @@ public class GvSipTransportReconnectTests
         BackoffScheduleSeconds = [0, 0, 0],
         BackoffJitterFraction = 0.0,
         RegisterTimeout = TimeSpan.FromSeconds(5),
+        MinRegisterIntervalSeconds = 0, // no rate-floor in timing tests
     };
 
     private static async Task<bool> WaitForAsync(Func<bool> condition, int timeoutMs = 3000)
@@ -246,6 +247,7 @@ public class GvSipTransportReconnectTests
             BackoffScheduleSeconds = [60],
             BackoffJitterFraction = 0.0,
             RegisterTimeout = TimeSpan.FromMilliseconds(300),
+            MinRegisterIntervalSeconds = 0,
         });
 
         await transport.EnsureRegisteredAsync();
@@ -284,6 +286,7 @@ public class GvSipTransportReconnectTests
             BackoffScheduleSeconds = [60], // don't loop fast during the assert
             BackoffJitterFraction = 0.0,
             RegisterTimeout = TimeSpan.FromSeconds(2),
+            MinRegisterIntervalSeconds = 0,
         });
         transport.AuthenticationFailed += (_, _) => Interlocked.Increment(ref authFiredCount);
 
@@ -316,6 +319,7 @@ public class GvSipTransportReconnectTests
             BackoffScheduleSeconds = [60], // don't loop fast during the assert
             BackoffJitterFraction = 0.0,
             RegisterTimeout = TimeSpan.FromSeconds(2),
+            MinRegisterIntervalSeconds = 0,
         });
         transport.AuthenticationFailed += (_, _) => Interlocked.Increment(ref authFiredCount);
 
@@ -323,6 +327,46 @@ public class GvSipTransportReconnectTests
 
         Assert.True(authFiredCount >= 1, "AuthenticationFailed should fire on a 603 Declined so recovery runs");
         Assert.False(transport.IsRegistered, "IsRegistered must be false after a 603 Declined");
+    }
+
+    [Fact]
+    public async Task RegisterRateFloor_SpacesConsecutiveAttempts()
+    {
+        // Storm guard: even with zero backoff, consecutive REGISTER attempts must be spaced by
+        // MinRegisterIntervalSeconds. The first attempt is never delayed; the reconnect attempt is.
+        var registerTimes = new List<long>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var fake = new FakeSipWebSocketChannel();
+        fake.OnSend = (payload, ch) =>
+        {
+            if (payload.StartsWith("REGISTER ", StringComparison.Ordinal) &&
+                payload.Contains("CSeq: 1 REGISTER", StringComparison.Ordinal))
+            {
+                registerTimes.Add(sw.ElapsedMilliseconds);
+                ch.FeedMessage(Register200Ok());
+            }
+        };
+
+        await using var transport = CreateTransport(fake, options: new ReconnectOptions
+        {
+            DefaultKeepAliveSeconds = 2,
+            KeepAliveFloorSeconds = 0,
+            BackoffScheduleSeconds = [0], // isolate the floor from backoff
+            BackoffJitterFraction = 0.0,
+            RegisterTimeout = TimeSpan.FromSeconds(5),
+            MinRegisterIntervalSeconds = 0.5, // 500ms hard floor
+        });
+
+        await transport.EnsureRegisteredAsync();   // 1st attempt — not delayed
+        Assert.Single(registerTimes);
+
+        fake.RaiseClosed(wasIntentional: false);   // -> reconnect -> 2nd attempt (floored)
+
+        await WaitForAsync(() => registerTimes.Count >= 2);
+        Assert.True(registerTimes.Count >= 2, "expected a reconnect REGISTER");
+
+        var gap = registerTimes[1] - registerTimes[0];
+        Assert.True(gap >= 400, $"expected ~500ms rate-floor between attempts, got {gap}ms");
     }
 
     [Fact]

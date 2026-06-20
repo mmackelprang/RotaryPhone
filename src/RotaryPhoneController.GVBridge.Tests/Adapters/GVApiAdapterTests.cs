@@ -66,6 +66,21 @@ public class GVApiAdapterTests
         Assert.Null(adapter.PsidtsAgeSeconds);
     }
 
+    [Fact]
+    public void Degraded_BeforeActivate_IsTrue()
+    {
+        // Not yet activated: cookies invalid and not registered → degraded (honest).
+        var adapter = CreateAdapter();
+        Assert.True(adapter.Degraded);
+    }
+
+    [Fact]
+    public void LastHealthyAt_BeforeActivate_ReturnsNull()
+    {
+        var adapter = CreateAdapter();
+        Assert.Null(adapter.LastHealthyAt);
+    }
+
     private static GVApiAdapter CreateAdapter()
     {
         var config = Options.Create(new GVBridgeConfig

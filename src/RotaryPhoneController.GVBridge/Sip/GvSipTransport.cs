@@ -66,6 +66,11 @@ public sealed class GvSipTransport : IAsyncDisposable
     private string? _regContactUser;
     private string? _regWsHost;
     private bool _registered;
+
+    // Hard rate-floor on REGISTER attempts (storm guard — see ReconnectOptions.MinRegisterIntervalSeconds).
+    // The gate serializes the throttle so concurrent reconnect paths can't collectively exceed the floor.
+    private readonly SemaphoreSlim _registerGate = new(1, 1);
+    private long _lastRegisterTimestamp;
     private bool _disposed;
 
     // Negotiated keep-alive frequency (RFC 6223 keep= from the REGISTER 200-OK Via).
@@ -845,8 +850,46 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning restore CA1031
     }
 
+    /// <summary>
+    /// Enforce <see cref="ReconnectOptions.MinRegisterIntervalSeconds"/> between the START of
+    /// consecutive REGISTER attempts. Serialized via a gate so concurrent callers are spaced by
+    /// the floor rather than all racing through at once (the storm guard). A floor of 0 (tests)
+    /// short-circuits to a no-op.
+    /// </summary>
+    private async Task ThrottleRegisterAttemptAsync(CancellationToken ct)
+    {
+        if (_options.MinRegisterIntervalSeconds <= 0)
+            return;
+
+        await _registerGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_lastRegisterTimestamp != 0)
+            {
+                var minInterval = TimeSpan.FromSeconds(_options.MinRegisterIntervalSeconds);
+                var remaining = minInterval - _timeProvider.GetElapsedTime(_lastRegisterTimestamp);
+                if (remaining > TimeSpan.Zero)
+                {
+#pragma warning disable CA1848, CA1873
+                    _logger.LogDebug("REGISTER rate-floor: waiting {Ms}ms before next attempt", (int)remaining.TotalMilliseconds);
+#pragma warning restore CA1848, CA1873
+                    await Task.Delay(remaining, _timeProvider, ct).ConfigureAwait(false);
+                }
+            }
+            _lastRegisterTimestamp = _timeProvider.GetTimestamp();
+        }
+        finally
+        {
+            _registerGate.Release();
+        }
+    }
+
     private async Task RegisterAsync(CancellationToken ct)
     {
+        // Storm guard: never start REGISTER attempts faster than the configured floor, no
+        // matter how many paths (reconnect loop, pull-path Ensure, a future bug) call in.
+        await ThrottleRegisterAttemptAsync(ct).ConfigureAwait(false);
+
         LogRegistering(_logger, null);
 
         SipCredentials creds;
