@@ -10,7 +10,9 @@ public class PositionalGvThreadParserTests
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", name);
         var json = File.ReadAllText(path);
-        return JsonDocument.Parse(json).RootElement;
+        // Clone so the element stays valid after the JsonDocument is disposed.
+        using var doc = JsonDocument.Parse(json);
+        return doc.RootElement.Clone();
     }
 
     private readonly PositionalGvThreadParser _parser = new();

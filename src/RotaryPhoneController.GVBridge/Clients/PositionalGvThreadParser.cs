@@ -97,7 +97,15 @@ public sealed class PositionalGvThreadParser : IGvThreadParser
             result.Add(new GvSmsNode(
                 MessageId: GvProtobuf.GetString(msg, SmsIdIdx),
                 ThreadId: GvProtobuf.GetString(msg, SmsThreadIdIdx),
-                Direction: GvProtobuf.GetInt(msg, SmsDirectionIdx) == 1 ? "Outbound" : "Inbound",
+                // GetInt is null when the field is absent/short array — keep Direction null in that
+                // case (ADR §7 "treat every field as possibly-null") so a missing/mis-indexed field
+                // is not silently classified as Inbound. Known wire values: 0=Inbound, 1=Outbound.
+                Direction: GvProtobuf.GetInt(msg, SmsDirectionIdx) switch
+                {
+                    1 => "Outbound",
+                    0 => "Inbound",
+                    _ => null
+                },
                 CounterpartyNumber: GvProtobuf.GetString(msg, SmsCounterpartyIdx),
                 Text: GvProtobuf.GetString(msg, SmsTextIdx),
                 SentEpochMs: GvProtobuf.GetLong(msg, SmsSentEpochIdx),

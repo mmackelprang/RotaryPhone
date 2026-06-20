@@ -83,6 +83,31 @@ public class GVApiAdapterTests
         Assert.Null(adapter.LastHealthyAt);
     }
 
+    // --- IGvAuthenticatedClientProvider seam (PR1) ---
+
+    [Fact]
+    public void GetAuthenticatedClient_BeforeActivate_ReturnsNull()
+    {
+        // Seam gates on IsAvailable (false before activation) so PR2/PR3 read clients get null
+        // rather than a half-initialized client; they handle null by reporting unavailable.
+        IGvAuthenticatedClientProvider adapter = CreateAdapter();
+        Assert.Null(adapter.GetAuthenticatedClient());
+    }
+
+    [Fact]
+    public void ApiBaseUrl_ReturnsConfiguredValue()
+    {
+        IGvAuthenticatedClientProvider adapter = CreateAdapter();
+        Assert.Equal("https://clients6.google.com/voice/v1/voiceclient", adapter.ApiBaseUrl);
+    }
+
+    [Fact]
+    public void ApiKey_ReturnsConfiguredValue()
+    {
+        IGvAuthenticatedClientProvider adapter = CreateAdapter();
+        Assert.Equal("test", adapter.ApiKey);
+    }
+
     private static GVApiAdapter CreateAdapter()
     {
         var config = Options.Create(new GVBridgeConfig

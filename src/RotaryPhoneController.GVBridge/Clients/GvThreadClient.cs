@@ -39,7 +39,7 @@ public class GvThreadClient
     public async Task<GvThreadListResult> ListThreadsAsync(
         GvThreadFolder folder, int count = 20, string? pageToken = null, CancellationToken ct = default)
     {
-        var root = await ListRawAsync(folder, count, pageToken, ct);
+        using var root = await ListRawAsync(folder, count, pageToken, ct);
         if (root is null) return GvThreadListResult.Empty(succeeded: false);
 
         var threads = _parser.ParseThreadList(root.RootElement);
@@ -51,6 +51,7 @@ public class GvThreadClient
     /// Raw list call shared by thread/voicemail/SMS read paths — returns the parsed JsonDocument or
     /// null on failure. Request body positions (folder, pageToken, count) are UNVERIFIED — ADR §11
     /// step 1. Built via GvProtobuf.BuildArray so the positional shape is in one obvious place.
+    /// Caller is responsible for disposing the returned JsonDocument.
     /// </summary>
     public async Task<JsonDocument?> ListRawAsync(
         GvThreadFolder folder, int count, string? pageToken, CancellationToken ct = default)
