@@ -14,7 +14,7 @@ namespace RotaryPhoneController.GVBridge.Adapters;
 /// (RFC 7118) to Google Voice for call signaling and DTLS-SRTP for audio.
 /// Cookie-authenticated HTTP API is used only for health checks and SIP credential retrieval.
 /// </summary>
-public class GVApiAdapter : ICallAdapter, IDisposable
+public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDisposable
 {
     private readonly GVBridgeConfig _config;
     private readonly ILogger<GVApiAdapter> _logger;
@@ -127,6 +127,21 @@ public class GVApiAdapter : ICallAdapter, IDisposable
     /// The cookie store used by the adapter (may be null before ActivateAsync).
     /// </summary>
     internal GvCookieStore? CookieStore => _cookieStore;
+
+    // --- IGvAuthenticatedClientProvider (seam for PR2/PR3 read clients) ---
+
+    /// <summary>
+    /// The current authenticated HttpClient or null if unavailable. Fetched live (not cached by
+    /// callers) so cookie rotation/reload that swaps _httpClient propagates — same contract as the
+    /// internal SingleHttpClientFactory used by the SIP credential provider.
+    /// </summary>
+    public HttpClient? GetAuthenticatedClient() => IsAvailable ? _httpClient : null;
+
+    /// <inheritdoc />
+    public string ApiBaseUrl => _config.GvApiBaseUrl;
+
+    /// <inheritdoc />
+    public string ApiKey => _config.GvApiKey;
 
     public event Action<bool>? OnAvailabilityChanged;
     public event Action<string>? OnIncomingCall;

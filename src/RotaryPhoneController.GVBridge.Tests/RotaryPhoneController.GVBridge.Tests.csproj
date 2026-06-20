@@ -17,4 +17,10 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
     <PackageReference Include="Moq" Version="4.*" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 </Project>

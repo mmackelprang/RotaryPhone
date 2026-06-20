@@ -21,6 +21,8 @@ public static class GVBridgeServiceExtensions
         services.AddSingleton<GVAudioBridgeService>();
         services.AddSingleton<GVApiAdapter>();
         services.AddSingleton<ICallAdapter>(sp => sp.GetRequiredService<GVApiAdapter>());
+        services.AddSingleton<IGvAuthenticatedClientProvider>(
+            sp => sp.GetRequiredService<GVApiAdapter>());
         services.AddSingleton<IGvCookieManager, GvCookieManager>();
         services.AddSingleton<ICdpCookieExtractor, CdpCookieExtractor>();
 
