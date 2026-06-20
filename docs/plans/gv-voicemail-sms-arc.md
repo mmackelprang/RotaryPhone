@@ -39,7 +39,7 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
 | 3. Planner (read-side PR1–3) | ✅ merged | PR #53 — `docs/superpowers/plans/2026-06-20-gv-pr{1,2,3}-*.md` |
 | 4a. Builder — PR1 read clients | ✅ merged | PR #54 — parser seam + GvThreadClient/GvVoicemailClient (list); parser provisional pending ADR §11 live capture |
 | 4b. Builder — PR2 voicemail REST + audio proxy | ✅ merged | PR #56 — voicemail list/{id}/{id}/audio + GvVoicemailCache (proxy+disk cache, range stream); media-fetch shape provisional pending ADR §11 step 3 |
-| 4c. Builder — PR3 SMS read + poll push | ⬜ depends on PR1 | — |
+| 4c. Builder — PR3 SMS read + poll push | ✅ merged | PR #57 — GvSmsClient read + GvThreadPoller (adaptive poll + high-water diff) + SmsReceived/VoicemailReceived push over RotaryHub; field positions provisional pending ADR §11 steps 1 & 5 |
 | 4d. Builder — PR4 SMS send | 🔒 owner-hold (ADR §12 #1) | — |
 | 4e. Builder — PR5 inter-service auth gate | 🔒 owner-hold (ADR §12 #2) | — |
 | 5. Tester (UAT) | ⬜ deferred — RadioConsole UI lives in RTest repo; no browser UAT for backend PRs | — |
