@@ -41,7 +41,7 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
 | 4b. Builder — PR2 voicemail REST + audio proxy | ✅ merged | PR #56 — voicemail list/{id}/{id}/audio + GvVoicemailCache (proxy+disk cache, range stream); media-fetch shape provisional pending ADR §11 step 3 |
 | 4c. Builder — PR3 SMS read + poll push | ✅ merged | PR #57 — GvSmsClient read + GvThreadPoller (adaptive poll + high-water diff) + SmsReceived/VoicemailReceived push over RotaryHub; field positions provisional pending ADR §11 steps 1 & 5 |
 | 4d. Builder — PR4 SMS send | ✅ merged | PR #60 — `POST /api/gvbridge/sms/send` (GvSmsClient.SendAsync `api2thread/sendsms`, E.164 normalize, 429 limiter, honest taxonomy 409/400/429/502/504, no auto-retry) + PR3-side `OnSmsSent` outbound surface w/ shared `csid:` id. **Ships DARK behind `EnableSmsSend` (default FALSE)** — merge changes no behavior; 185 GVBridge tests green; review found no HIGH (2 MEDIUM fixed). **Fixture-verified only; no live send** — `ISmsThreadIdResolver` `t.+<E164>` stays UNVERIFIED; first real send + payload field positions pending ADR §11 step 4 (owner flips the flag + on-box live capture). |
-| 4e. Builder — PR5 inter-service auth gate | ✅ **owner-approved to build + auto-merge on green** | `docs/superpowers/plans/2026-06-20-gv-pr5-inter-service-auth-gate.md` — plan written; middleware is endpoint-agnostic (gates `/api/gvbridge/*`). Owner-approved to build; touches auth/secret handling so the boundary-doc updates land with it. |
+| 4e. Builder — PR5 inter-service auth gate | ✅ merged | PR #61 — `X-RotaryPhone-Auth` gate: constant-time `InterServiceAuthValidator`, `GvBridgeAuthMiddleware` over all `/api/gvbridge/*` (401; exempts only the exact `/event` segment), `HubAuthFilter` over `/hub` (header or `access_token`; abort). **`InterServiceAuthKey` defaults `""` = DISABLED** — merge is byte-identical to today (no 401 storm). New `RotaryPhoneController.Server.Tests` project (21 tests); review found no HIGH (2 MEDIUM fixed: segment-anchored `/event` exemption + hub default-off pass-through). Boundary-doc + handoff updated. **ENABLING requires coordinated config on BOTH RotaryPhone and RadioConsole** (owner action); on-box auth-gate smoke = ADR §11 step 7, not done here. |
 | 5. Tester (UAT) | ⬜ deferred — RadioConsole UI lives in RTest repo; no browser UAT for backend PRs | — |
 | 6. Polisher | ⬜ deferred — applies to UI work (separate repo) | — |
 
@@ -84,9 +84,13 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
   live use under auth blips. Touches the auth-recovery ladder → out of read-side scope.
 
 ## Open decisions for owner (on return) — see ADR §12
-> **PR4 + PR5 are now OWNER-APPROVED to build + auto-merge on green** (rows 4d/4e). PR4 ships DARK behind
-> a server-side `EnableSmsSend` flag (default FALSE), so the irreversible GV write merges safely; the
-> owner's remaining go-live action is flipping the flag + the ADR §11 first-real-send live capture.
+> **PR4 + PR5 SHIPPED + MERGED** (rows 4d/4e — PR #60, PR #61) on green gates, both safe-by-default
+> (PR4 `EnableSmsSend`=false, PR5 `InterServiceAuthKey`=""), so neither merge changed live behavior.
+> **Owner go-live actions remain (NOT done by Builder — no live cookies / dev box can't send):**
+> (a) flip `EnableSmsSend=true` on `radio` + run the ADR §11 first-real-send capture (de-UNVERIFY
+> `SmsThreadIdResolver` `t.+<E164>` / send-payload field positions); (b) if non-LAN exposure is wanted,
+> set the SAME `InterServiceAuthKey` on BOTH RotaryPhone and RadioConsole (coordinated config) + run the
+> ADR §11 step 7 auth-gate smoke. Everything is fixture-verified only to here.
 1. SMS-send autonomy: ship behind auth-gate + rate-limit? per-send confirm in UI for v1?
    → **Resolved:** ships dark behind `EnableSmsSend` (default off) + rate-limited 5/10s; per-send confirm
    is a RadioConsole-side flag, not a RotaryPhone change. See `docs/superpowers/plans/2026-06-20-gv-pr4-sms-send.md` §"ADR §12".
