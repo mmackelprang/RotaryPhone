@@ -91,6 +91,41 @@ public class GvVoicemailCacheTests : IDisposable
         Assert.False(File.Exists(p1!)); // oldest gone
     }
 
+    [Fact]
+    public async Task GetOrFetch_WithRelativeCacheDir_ReturnsAbsolutePath()
+    {
+        // Regression: the config default is a RELATIVE dir, but PhysicalFileResult requires a rooted
+        // path and throws NotSupportedException at request time on a relative one. The cache must
+        // resolve the dir to absolute so the served path is always rooted.
+        var relDir = Path.Combine("data", $"vm-cache-rel-{Guid.NewGuid():N}");
+        var config = new GVBridgeConfig { VoicemailCacheDir = relDir };
+        var cache = new GvVoicemailCache(new StubFetcher(new byte[] { 1, 2 }),
+            Options.Create(config), NullLogger<GvVoicemailCache>.Instance);
+        try
+        {
+            var path = await cache.GetOrFetchAsync("vm.rel", "media-rel");
+            Assert.NotNull(path);
+            Assert.True(Path.IsPathRooted(path!), $"expected rooted path, got '{path}'");
+            Assert.True(File.Exists(path!));
+        }
+        finally
+        {
+            var abs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, relDir));
+            if (Directory.Exists(abs)) Directory.Delete(abs, true);
+        }
+    }
+
+    [Fact]
+    public async Task GetOrFetch_EmptyId_DoesNotProduceBareDotBin()
+    {
+        var cache = NewCache(new StubFetcher(new byte[] { 9 }));
+        var path = await cache.GetOrFetchAsync("", "media-x");
+        Assert.NotNull(path);
+        Assert.True(Path.IsPathRooted(path!));
+        Assert.NotEqual(".bin", Path.GetFileName(path!));
+        Assert.True(File.Exists(path!));
+    }
+
     private sealed class FailingFetcher : IGvRecordingFetcher
     {
         public Task<GvRecordingFetchResult> FetchAsync(string mediaRef, CancellationToken ct = default)

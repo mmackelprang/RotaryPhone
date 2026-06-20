@@ -26,7 +26,12 @@ public class GvVoicemailController : ControllerBase
         [FromQuery] int count = 20, [FromQuery] string? pageToken = null, CancellationToken ct = default)
     {
         var result = await _voicemailClient.ListVoicemailsAsync(count, pageToken, ct);
-        var items = result.Items.Select(ToDto).ToList();
+        // Do not mask an auth/transport failure as "no voicemails" — RadioConsole cannot tell the
+        // difference from an empty 200, and silent-failure is a known hazard for this integration.
+        if (!result.Succeeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
+        // Skip nodes with no message id — they cannot produce a valid audio URL (ADR §7 possibly-null).
+        var items = result.Items.Where(n => n.MessageId is not null).Select(ToDto).ToList();
         return Ok(new VoicemailListDto(items, result.NextPageToken, DateTime.UtcNow));
     }
 
@@ -73,5 +78,7 @@ public class GvVoicemailController : ControllerBase
         DurationSeconds: n.DurationSeconds ?? 0,
         IsRead: n.IsRead ?? false,
         Transcript: n.Transcript,
-        AudioUrl: $"/api/gvbridge/voicemail/{n.MessageId}/audio");
+        AudioUrl: n.MessageId is not null
+            ? $"/api/gvbridge/voicemail/{n.MessageId}/audio"
+            : "");
 }

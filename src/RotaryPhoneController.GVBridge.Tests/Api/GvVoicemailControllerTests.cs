@@ -65,6 +65,18 @@ public class GvVoicemailControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task GetList_OnUpstreamFailure_Returns502NotEmpty200()
+    {
+        // A non-200 from Google → ListVoicemailsAsync(Succeeded=false). The controller must surface
+        // a 502, not a 200 with an empty list (which RadioConsole would read as "no voicemails").
+        var controller = NewController(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            new byte[] { 1 });
+        var result = await controller.GetList(count: 20, pageToken: null, default);
+        var obj = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(502, obj.StatusCode);
+    }
+
+    [Fact]
     public async Task GetItem_NotFound_Returns404()
     {
         var controller = NewController(_ => VmListResponse(), new byte[] { 1 });
