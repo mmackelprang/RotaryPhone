@@ -956,6 +956,7 @@ public sealed class GvSipTransport : IAsyncDisposable
                                     "Post-Digest REGISTER rejected ({Status}) — real auth failure, escalating",
                                     (int)resp.Status);
 #pragma warning restore CA1848, CA1873
+                                _registered = false; // honest status: we are NOT registered
                                 RaiseAuthenticationFailed($"REGISTER {(int)resp.Status} after Digest");
                                 regTcs.TrySetResult(false);
                             }
@@ -1007,12 +1008,27 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning disable CA1848, CA1873
                             _logger.LogWarning("REGISTER rejected 403 Forbidden — real auth failure, escalating");
 #pragma warning restore CA1848, CA1873
+                            _registered = false; // honest status: we are NOT registered
                             RaiseAuthenticationFailed("REGISTER 403");
+                            regTcs.TrySetResult(false);
+                        }
+                        else if ((int)resp.Status == 603)
+                        {
+                            // 603 Declined on REGISTER is a policy/account-level rejection from Google
+                            // (observed 2026-06-19 when the account was throttled after a credential-
+                            // failure REGISTER storm). Treat it as a real auth failure so the recovery
+                            // ladder runs, and mark unregistered so /api/gvbridge/status stays honest.
+#pragma warning disable CA1848, CA1873
+                            _logger.LogWarning("REGISTER rejected 603 Declined — registration declined, escalating");
+#pragma warning restore CA1848, CA1873
+                            _registered = false; // honest status: we are NOT registered
+                            RaiseAuthenticationFailed("REGISTER 603");
                             regTcs.TrySetResult(false);
                         }
                         else
                         {
                             LogError(_logger, $"REGISTER failed: {(int)resp.Status} {resp.ReasonPhrase}", null);
+                            _registered = false; // honest status: any non-2xx REGISTER means not registered
                             regTcs.TrySetResult(false);
                         }
                     }

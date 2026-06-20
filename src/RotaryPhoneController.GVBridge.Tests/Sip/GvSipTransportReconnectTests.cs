@@ -293,6 +293,39 @@ public class GvSipTransportReconnectTests
     }
 
     [Fact]
+    public async Task Register603Declined_FiresAuthFailure_AndStaysUnregistered()
+    {
+        // Google returns 603 Declined to the Digest REGISTER (the live 2026-06-19 incident).
+        // This is a real registration decline: it MUST escalate via AuthenticationFailed so the
+        // recovery ladder runs, and the transport must NOT report itself registered.
+        var fake = new FakeSipWebSocketChannel();
+        var authFiredCount = 0;
+        fake.OnSend = (payload, ch) =>
+        {
+            if (!payload.StartsWith("REGISTER ", StringComparison.Ordinal))
+                return;
+
+            // First REGISTER (cseq 1, no auth) -> 401 challenge.
+            // Second REGISTER (cseq 2, with Digest) -> 603 Declined (policy rejection).
+            var cseq = payload.Contains("CSeq: 1 REGISTER", StringComparison.Ordinal) ? 1 : 2;
+            ch.FeedMessage(cseq == 1 ? Register401Challenge(1) : Register603Declined(2));
+        };
+
+        await using var transport = CreateTransport(fake, options: new ReconnectOptions
+        {
+            BackoffScheduleSeconds = [60], // don't loop fast during the assert
+            BackoffJitterFraction = 0.0,
+            RegisterTimeout = TimeSpan.FromSeconds(2),
+        });
+        transport.AuthenticationFailed += (_, _) => Interlocked.Increment(ref authFiredCount);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.EnsureRegisteredAsync());
+
+        Assert.True(authFiredCount >= 1, "AuthenticationFailed should fire on a 603 Declined so recovery runs");
+        Assert.False(transport.IsRegistered, "IsRegistered must be false after a 603 Declined");
+    }
+
+    [Fact]
     public async Task PlainDrop_DoesNotFireAuthFailure()
     {
         var fake = new FakeSipWebSocketChannel { OnSend = RegisterAutoResponder() };
@@ -332,6 +365,17 @@ public class GvSipTransportReconnectTests
         await Task.Delay(200);
         Assert.Equal(pingsAfterDispose, fake.PingCount);
     }
+
+    /// <summary>A 603 Declined response with the given CSeq number that SIPSorcery parses.</summary>
+    private static string Register603Declined(int cseq) =>
+        "SIP/2.0 603 Declined\r\n" +
+        "Via: SIP/2.0/WSS abc123.invalid;branch=z9hG4bK-test\r\n" +
+        "To: <sip:sip-token@web.c.pbx.voice.sip.google.com>;tag=server-tag\r\n" +
+        "From: <sip:sip-token@web.c.pbx.voice.sip.google.com>;tag=client-tag\r\n" +
+        "Call-ID: test-call-id\r\n" +
+        $"CSeq: {cseq} REGISTER\r\n" +
+        "Content-Length: 0\r\n" +
+        "\r\n";
 
     /// <summary>A 401 challenge with the given CSeq number that SIPSorcery parses.</summary>
     private static string Register401Challenge(int cseq) =>
