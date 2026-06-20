@@ -14,6 +14,7 @@ using RotaryPhoneController.GVBridge.Extensions;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.Core.Diagnostics;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using Serilog;
 
@@ -70,7 +71,8 @@ if (appConfig.Phones.Count == 0)
 
 // Add services to the container.
 builder.Services.AddControllers();
-builder.Services.AddSignalR();
+builder.Services.AddSignalR(options =>
+    options.AddFilter<RotaryPhoneController.Server.Hubs.HubAuthFilter>());
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -307,6 +309,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SipDiagnosticServi
 builder.Services.AddGVTrunk(builder.Configuration);
 builder.Services.AddGVBridge(builder.Configuration);
 
+// Inter-service auth gate (ADR §6.5). Register the validator from the bound GVBridgeConfig (after
+// AddGVBridge so IOptions<GVBridgeConfig> is available). Default-off when InterServiceAuthKey is empty.
+builder.Services.AddSingleton(sp =>
+{
+    var cfg = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<
+        RotaryPhoneController.GVBridge.Models.GVBridgeConfig>>().Value;
+    return new RotaryPhoneController.Server.Auth.InterServiceAuthValidator(cfg.InterServiceAuthKey);
+});
+builder.Services.AddSingleton<RotaryPhoneController.Server.Hubs.HubAuthFilter>();
+
 // Bridge the GVBridge message-event seam (IGvMessageEventSource, registered by AddGVBridge) to
 // RotaryHub so new inbound SMS/voicemail push to RadioConsole over the existing SignalR connection,
 // mirroring the IncomingCall broadcast (ADR §6.3). Lives in the Server project because it needs
@@ -361,6 +373,11 @@ app.Use(async (context, next) =>
 
 // Enable CORS
 app.UseCors("AllowClients");
+
+// Inter-service auth gate (ADR §6.5): gate /api/gvbridge/* behind X-RotaryPhone-Auth when a key is
+// configured. Runs AFTER UseCors (so preflight still works) and BEFORE the endpoints. Default-off:
+// with no key it is a pass-through, exempting /api/gvbridge/event (the extension content-script path).
+app.UseMiddleware<RotaryPhoneController.Server.Middleware.GvBridgeAuthMiddleware>();
 
 // Static Files - Defaults to wwwroot
 app.UseStaticFiles();
