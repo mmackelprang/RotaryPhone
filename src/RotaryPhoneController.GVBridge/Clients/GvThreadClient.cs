@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Protocol;
 
 namespace RotaryPhoneController.GVBridge.Clients;
@@ -20,18 +21,36 @@ public record GvThreadListResult(IReadOnlyList<GvThreadNode> Threads, string? Ne
 /// </summary>
 public class GvThreadClient
 {
-    private readonly HttpClient _http;
+    private readonly HttpClient? _http;
+    private readonly IGvAuthenticatedClientProvider? _provider;
     private readonly string _baseUrl;
     private readonly string _apiKey;
     private readonly IGvThreadParser _parser;
     private readonly ILogger<GvThreadClient> _logger;
 
+    /// <summary>Test-facing constructor: a fixed HttpClient + base URL + key.</summary>
     public GvThreadClient(HttpClient http, string baseUrl, string apiKey,
         IGvThreadParser parser, ILogger<GvThreadClient> logger)
     {
         _http = http;
         _baseUrl = baseUrl.TrimEnd('/');
         _apiKey = apiKey;
+        _parser = parser;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// DI-facing constructor: resolves the live authenticated HttpClient from the provider on each
+    /// call so nothing is captured at construction (avoids startup crash when the adapter is inactive,
+    /// ADR §1.3 activation-order note). When the provider has no client yet, list calls return a
+    /// failure result instead of throwing.
+    /// </summary>
+    public GvThreadClient(IGvAuthenticatedClientProvider provider, IGvThreadParser parser,
+        ILogger<GvThreadClient> logger)
+    {
+        _provider = provider;
+        _baseUrl = provider.ApiBaseUrl.TrimEnd('/');
+        _apiKey = provider.ApiKey;
         _parser = parser;
         _logger = logger;
     }
@@ -56,13 +75,22 @@ public class GvThreadClient
     public async Task<JsonDocument?> ListRawAsync(
         GvThreadFolder folder, int count, string? pageToken, CancellationToken ct = default)
     {
+        // Resolve the live client per call when provider-backed; the test path uses the captured one.
+        var http = _http ?? _provider?.GetAuthenticatedClient();
+        if (http is null)
+        {
+            _logger.LogWarning("api2thread/list skipped — authenticated client unavailable for folder {Folder}",
+                folder);
+            return null;
+        }
+
         try
         {
             var url = $"{_baseUrl}/api2thread/list?alt=protojson&key={_apiKey}";
             // UNVERIFIED positional body — ADR §11 step 1 (candidate: [folder, pageToken?, count?]).
             var payload = GvProtobuf.BuildArray(folder.ToWireValue(), pageToken, count);
             var content = new StringContent(payload, Encoding.UTF8, "application/json+protobuf");
-            var response = await _http.PostAsync(url, content, ct);
+            var response = await http.PostAsync(url, content, ct);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("api2thread/list returned {Status} for folder {Folder}",

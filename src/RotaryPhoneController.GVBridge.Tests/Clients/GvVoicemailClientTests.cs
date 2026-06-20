@@ -16,7 +16,16 @@ public class GvVoicemailClientTests
         var parser = new PositionalGvThreadParser();
         var threadClient = new GvThreadClient(http, BaseUrl, ApiKey, parser,
             NullLogger<GvThreadClient>.Instance);
-        return new GvVoicemailClient(threadClient, parser, NullLogger<GvVoicemailClient>.Instance);
+        return new GvVoicemailClient(threadClient, parser, new StubFetcher(),
+            NullLogger<GvVoicemailClient>.Instance);
+    }
+
+    private sealed class StubFetcher : RotaryPhoneController.GVBridge.Clients.IGvRecordingFetcher
+    {
+        public Task<RotaryPhoneController.GVBridge.Clients.GvRecordingFetchResult> FetchAsync(
+            string mediaRef, CancellationToken ct = default)
+            => Task.FromResult(new RotaryPhoneController.GVBridge.Clients.GvRecordingFetchResult(
+                true, new byte[] { 1 }, "audio/mpeg"));
     }
 
     [Fact]
