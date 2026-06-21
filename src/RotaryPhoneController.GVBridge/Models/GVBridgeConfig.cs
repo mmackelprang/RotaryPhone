@@ -59,6 +59,18 @@ public class GVBridgeConfig
     // flag — defense in depth: BOTH must be on for a send to leave the building.
     public bool EnableSmsSend { get; set; } = false;
 
+    // MARK-READ FEATURE FLAG (ADR §8) — DEFAULT FALSE. The GV account-write path (api2thread/updateread)
+    // ships DARK: when false, POST /api/gvbridge/voicemail/{id}/read and POST /api/gvbridge/sms/threads/
+    // {threadId}/read perform NO GV call and return 409 markread_disabled. This lets the irreversible-write
+    // code merge safely; the owner flips this to true to go live (after the ADR §11 step 8 live capture).
+    public bool EnableMarkRead { get; set; } = false;
+
+    // MARK-UNREAD support (ADR §6.1) — DEFAULT FALSE. v1 honors isRead:true only. isRead:false (mark
+    // unread) is best-effort and UNVERIFIED until the §11 step 8 capture confirms GV updateread accepts an
+    // unread transition. While false, a mark route with isRead:false returns 400 unread_unsupported (no GV
+    // call) — we never promise a toggle the backend cannot honor. Owner flips to true once unread is confirmed.
+    public bool AllowMarkUnread { get; set; } = false;
+
     // SMS send rate limit (ADR §4.2 #4). Reject more than N sends per window → HTTP 429. Owner-tunable;
     // conservative defaults for a single personal account.
     public int SmsSendMaxPerWindow { get; set; } = 5;
