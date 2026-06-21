@@ -139,6 +139,63 @@ public class GvSipTransportThrottleCooldownTests
     }
 
     [Fact]
+    public async Task ReconnectLoop_WhileThrottled_SendsNoRegister()
+    {
+        // The PRIMARY storm path from the live 2026-06-19 incident: a dropped socket fires
+        // OnChannelClosed -> ReconnectLoopAsync -> EnsureSingleRegisterAsync -> RegisterAsync.
+        // Once the transport is throttled, the reconnect loop MUST hit the suppressed-throw at
+        // the throttle gate and send ZERO REGISTERs to Google for the whole cooldown window —
+        // otherwise the loop re-REGISTERs straight back into Google's account-level throttle and
+        // the storm never breaks. THIS is the invariant the other tests don't cover (they drive
+        // the gate through EnsureRegisteredAsync directly, never through ReconnectLoopAsync).
+        var fake = new FakeSipWebSocketChannel();
+        fake.OnSend = (payload, ch) =>
+        {
+            if (!payload.StartsWith("REGISTER ", StringComparison.Ordinal))
+                return;
+            var cseq = payload.Contains("CSeq: 1 REGISTER", StringComparison.Ordinal) ? 1 : 2;
+            ch.FeedMessage(cseq == 1 ? Register401Challenge(1) : Register603Declined(2));
+        };
+
+        var time = new FakeTimeProvider();
+
+        // A LONG cooldown so the window stays open the whole test. BackoffScheduleSeconds = [1]
+        // (not the [0] of Options(...)) so the reconnect loop, after its first suppressed attempt,
+        // PARKS on Task.Delay(1s, fakeTimeProvider) — which never elapses because we never Advance
+        // the FakeTimeProvider — instead of tight-spinning. The invariant under test is about
+        // REGISTERs sent, not timing; parking just makes the assert deterministic and cheap.
+        var options = new ReconnectOptions
+        {
+            DefaultKeepAliveSeconds = 240,
+            KeepAliveFloorSeconds = 0,
+            BackoffScheduleSeconds = [1],
+            BackoffJitterFraction = 0.0,
+            RegisterTimeout = TimeSpan.FromSeconds(2),
+            MinRegisterIntervalSeconds = 0,
+            ThrottleCooldownScheduleSeconds = [3600],
+        };
+        await using var transport = CreateTransport(fake, options, time);
+
+        // Drive the initial register through the pull path: 401 -> Digest -> 603 -> throttle.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.EnsureRegisteredAsync());
+        Assert.True(transport.IsThrottled, "a post-Digest 603 must enter the throttle cooldown");
+
+        // Exactly one post-Digest REGISTER so far (the single decline). Capture the baseline.
+        var registersBeforeReconnect = PostDigestRegisterCount(fake);
+        Assert.Equal(1, registersBeforeReconnect);
+
+        // Simulate Google dropping the socket -> OnChannelClosed -> ReconnectLoopAsync (the storm
+        // path). Fire-and-forget; give it time to run several iterations of the reconnect loop.
+        fake.RaiseClosed(wasIntentional: false);
+        await Task.Delay(300);
+
+        // CORE INVARIANT: the reconnect loop sent ZERO REGISTERs to Google while throttled — the
+        // count is unchanged from before the drop. The throttle gate threw before any send.
+        Assert.Equal(registersBeforeReconnect, PostDigestRegisterCount(fake));
+        Assert.True(transport.IsThrottled, "still throttled — the cooldown window has not expired");
+    }
+
+    [Fact]
     public async Task Register603_Escalates_CooldownGrows()
     {
         // schedule [1, 5] seconds: first throttle -> 1s window, second -> 5s window (cap).
