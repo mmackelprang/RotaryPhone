@@ -28,9 +28,11 @@ public class GvSmsControllerSendTests
         var resolver = new SmsThreadIdResolver();
         var sentSink = new List<SmsMessageDto>();
         var sink = new TestSink(sentSink);
+        var readStateClient = new GvReadStateClient(new UpdateReadPayloadBuilder(),
+            NullLogger<GvReadStateClient>.Instance);
         var config = Options.Create(new GVBridgeConfig { EnableSmsSend = enableSend });
-        var controller = new GvSmsController(smsClient, limiter, resolver, sink, config,
-            NullLogger<GvSmsController>.Instance);
+        var controller = new GvSmsController(smsClient, limiter, resolver, sink, readStateClient,
+            new NoopReadSink(), config, NullLogger<GvSmsController>.Instance);
         // Inject the same http as the "authenticated client" for the write path test seam:
         controller.SetSendClientForTest(http);
         return (controller, sentSink);
@@ -149,6 +151,11 @@ public class GvSmsControllerSendTests
     private sealed class TestSink(List<SmsMessageDto> captured) : IGvOutboundSmsSink
     {
         public void NotifySent(SmsMessageDto dto) => captured.Add(dto);
+    }
+
+    private sealed class NoopReadSink : IGvReadStateSink
+    {
+        public void NotifyReadStateChanged(ReadStateChangedDto dto) { }
     }
 
     private sealed class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
