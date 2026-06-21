@@ -31,6 +31,7 @@ public class GvMessagePushBridge : IHostedService
         _eventSource.OnSmsReceived += BroadcastSms;
         _eventSource.OnVoicemailReceived += BroadcastVoicemail;
         _eventSource.OnSmsSent += BroadcastSmsSent;
+        _eventSource.OnReadStateChanged += BroadcastReadStateChanged;
         _logger.LogInformation("GvMessagePushBridge subscribed to GV message events");
         return Task.CompletedTask;
     }
@@ -40,6 +41,7 @@ public class GvMessagePushBridge : IHostedService
         _eventSource.OnSmsReceived -= BroadcastSms;
         _eventSource.OnVoicemailReceived -= BroadcastVoicemail;
         _eventSource.OnSmsSent -= BroadcastSmsSent;
+        _eventSource.OnReadStateChanged -= BroadcastReadStateChanged;
         return Task.CompletedTask;
     }
 
@@ -59,6 +61,14 @@ public class GvMessagePushBridge : IHostedService
     {
         _logger.LogInformation("Broadcasting VoicemailReceived {Id} from {Number}", dto.Id, dto.FromNumber);
         FireAndLog(_hubContext.Clients.All.SendAsync("VoicemailReceived", dto), "VoicemailReceived", dto.Id);
+    }
+
+    private void BroadcastReadStateChanged(GVBridge.Api.ReadStateChangedDto dto)
+    {
+        _logger.LogInformation("Broadcasting ReadStateChanged {Kind} {Id}/{Thread} isRead={IsRead}",
+            dto.Kind, dto.Id, dto.ThreadId, dto.IsRead);
+        FireAndLog(_hubContext.Clients.All.SendAsync("ReadStateChanged", dto),
+            "ReadStateChanged", dto.Id ?? dto.ThreadId ?? "");
     }
 
     // Fire-and-forget the SignalR broadcast but observe the task so a SendAsync fault (hub startup

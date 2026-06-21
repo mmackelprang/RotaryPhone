@@ -80,6 +80,17 @@ public static class GVBridgeServiceExtensions
                 TimeSpan.FromSeconds(cfg.SmsSendWindowSeconds));
         });
 
+        // Mark-read / durable read-state (mark-read FF — ships dark behind EnableMarkRead). Provider-backed
+        // GvReadStateClient so MarkReadAsync resolves the live authenticated client per call (cookie
+        // rotation + recovery ladder, ADR §1.3, §7). UNVERIFIED updateread wire format isolated in the
+        // IUpdateReadPayloadBuilder seam (ADR §7, §11 step 8).
+        services.AddSingleton<IUpdateReadPayloadBuilder, UpdateReadPayloadBuilder>();
+        services.AddSingleton<GvReadStateClient>(sp => new GvReadStateClient(
+            sp.GetRequiredService<IUpdateReadPayloadBuilder>(),
+            sp.GetRequiredService<IGvAuthenticatedClientProvider>(),
+            sp.GetRequiredService<ILogger<GvReadStateClient>>()));
+        services.AddSingleton<IGvReadStateSink>(sp => sp.GetRequiredService<GvThreadPoller>());
+
         // HttpClientFactory for CDP cookie extraction (localhost-only, no special config)
         services.AddHttpClient();
 

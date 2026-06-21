@@ -25,14 +25,21 @@ public class GvSmsControllerTests
         var limiter = new SmsSendRateLimiter(5, TimeSpan.FromSeconds(10));
         var resolver = new SmsThreadIdResolver();
         var sink = new NoopSink();
+        var readStateClient = new GvReadStateClient(new UpdateReadPayloadBuilder(),
+            NullLogger<GvReadStateClient>.Instance);
         var config = Options.Create(new GVBridgeConfig());
-        return new GvSmsController(smsClient, limiter, resolver, sink, config,
-            NullLogger<GvSmsController>.Instance);
+        return new GvSmsController(smsClient, limiter, resolver, sink, readStateClient, new NoopReadSink(),
+            config, NullLogger<GvSmsController>.Instance);
     }
 
     private sealed class NoopSink : IGvOutboundSmsSink
     {
         public void NotifySent(SmsMessageDto dto) { }
+    }
+
+    private sealed class NoopReadSink : IGvReadStateSink
+    {
+        public void NotifyReadStateChanged(ReadStateChangedDto dto) { }
     }
 
     private static HttpResponseMessage Response() =>

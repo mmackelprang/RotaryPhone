@@ -16,23 +16,32 @@ public class GvSmsController : ControllerBase
     private readonly ISmsThreadIdResolver _threadIdResolver;
     private readonly IGvOutboundSmsSink _outboundSink;
     private readonly GVBridgeConfig _config;       // for the EnableSmsSend feature flag (Task 7)
+    private readonly GvReadStateClient _readStateClient;
+    private readonly IGvReadStateSink _readStateSink;
     private readonly ILogger<GvSmsController> _logger;
     private HttpClient? _testSendClient;   // test-only; null in production (uses GvSmsClient.SendAsync(threadId,text))
+    private HttpClient? _testReadStateClient;   // test-only
 
     public GvSmsController(GvSmsClient smsClient, SmsSendRateLimiter rateLimiter,
         ISmsThreadIdResolver threadIdResolver, IGvOutboundSmsSink outboundSink,
+        GvReadStateClient readStateClient, IGvReadStateSink readStateSink,
         IOptions<GVBridgeConfig> config, ILogger<GvSmsController> logger)
     {
         _smsClient = smsClient;
         _rateLimiter = rateLimiter;
         _threadIdResolver = threadIdResolver;
         _outboundSink = outboundSink;
+        _readStateClient = readStateClient;
+        _readStateSink = readStateSink;
         _config = config.Value;
         _logger = logger;
     }
 
     /// <summary>Test seam: inject the HttpClient used as the "authenticated client" for the write path.</summary>
     internal void SetSendClientForTest(HttpClient client) => _testSendClient = client;
+
+    /// <summary>Test seam: inject the HttpClient used as the authenticated client for the updateread write.</summary>
+    internal void SetReadStateClientForTest(HttpClient client) => _testReadStateClient = client;
 
     /// <summary>
     /// Stable client-correlation id for an outbound echo (id-consistency rule, Task 1 Step 1b). The SAME
@@ -51,14 +60,7 @@ public class GvSmsController : ControllerBase
         // RadioConsole could not distinguish from "no threads" (a silent-status hazard).
         if (!result.Succeeded)
             return StatusCode(502, new { error = "Failed to fetch SMS threads from Google" });
-        var threads = result.Threads.Select(t => new SmsThreadDto(
-            ThreadId: t.ThreadId ?? "",
-            CounterpartyNumber: t.CounterpartyNumber ?? "",
-            CounterpartyName: t.CounterpartyName,
-            LastMessageAt: t.LastMessageEpochMs is { } ms
-                ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime : DateTime.UnixEpoch,
-            HasUnread: t.HasUnread ?? false,
-            LastMessagePreview: t.LastMessagePreview)).ToList();
+        var threads = result.Threads.Select(ToThreadDto).ToList();
         return Ok(new SmsThreadListDto(threads, DateTime.UtcNow));
     }
 
@@ -158,4 +160,69 @@ public class GvSmsController : ControllerBase
 
         return Ok(new SendSmsResponse(Queued: true, Code: "queued", ThreadId: threadId, Error: null, Message: echo));
     }
+
+    [HttpPost("threads/{threadId}/read")]
+    public async Task<IActionResult> MarkThreadRead(
+        string threadId, [FromBody] MarkReadRequest request, CancellationToken ct = default)
+    {
+        // 0. FEATURE FLAG (ADR §8) — checked FIRST → 409 markread_disabled, NO GV call.
+        if (!_config.EnableMarkRead)
+        {
+            _logger.LogInformation("Mark-thread-read rejected — EnableMarkRead is false (dark)");
+            return StatusCode(409, new { error = "markread_disabled" });
+        }
+
+        // 1. Mark-unread gate (ADR §6.1).
+        if (!request.IsRead && !_config.AllowMarkUnread)
+            return BadRequest(new { error = "unread_unsupported" });
+
+        // 2. Resolve the thread summary (404 if unknown) — same list+filter GetThreads does.
+        var threadsResult = await _smsClient.ListThreadsAsync(count: 100, pageToken: null, ct);
+        if (!threadsResult.Succeeded)
+            return StatusCode(502, new { error = "Failed to fetch SMS threads from Google" });
+        var thread = threadsResult.Threads.FirstOrDefault(t => t.ThreadId == threadId);
+        if (thread is null) return NotFound(new { error = $"SMS thread {threadId} not found" });
+
+        // 3. Idempotent no-op (ADR §4.3): thread already in the target state → 200, no GV call. isRead:true
+        //    means target hasUnread=false; so "already in target state" is HasUnread == !isRead.
+        var alreadyInTargetState = (thread.HasUnread ?? false) == !request.IsRead;
+        if (alreadyInTargetState)
+            return Ok(ToThreadDto(thread));
+
+        // 4. Per-thread grain (ADR §4.2 Q4): mark every message in the thread. Resolve the message ids.
+        //    If we cannot enumerate the thread's messages (auth blip / GV 5xx), do NOT attempt a wrong/partial
+        //    mark — return 502 so RadioConsole reconciles on the next list (honest-status discipline, ADR §3.2).
+        var messagesResult = await _smsClient.ListMessagesAsync(threadId, count: 200, ct);
+        if (!messagesResult.Succeeded)
+            return StatusCode(502, new { error = "Failed to fetch SMS messages for mark-read" });
+        var messageIds = messagesResult.Messages
+            .Where(m => m.MessageId is not null).Select(m => m.MessageId!).ToList();
+
+        // 5. Write through to GV (honest — 200 means accepted; partial = failure). No auto-retry (§8).
+        var write = _testReadStateClient is not null
+            ? await _readStateClient.MarkSmsThreadReadAsync(_testReadStateClient, threadId, messageIds, request.IsRead, ct)
+            : await _readStateClient.MarkSmsThreadReadAsync(threadId, messageIds, request.IsRead, ct);
+        if (write.Outcome != GvUpdateReadOutcome.Applied)
+            return StatusCode(502, new { error = write.Error ?? "Failed to update read-state in Google" });
+
+        // 6. Build the authoritative thread DTO: hasUnread = !isRead (a mark-read clears unread).
+        var dto = ToThreadDto(thread) with { HasUnread = !request.IsRead };
+
+        // 7. Broadcast path-a ReadStateChanged (ADR §5). For SMS, IsRead = "thread fully read" (!hasUnread).
+        _readStateSink.NotifyReadStateChanged(new ReadStateChangedDto(
+            Kind: "Sms", Id: null, ThreadId: threadId,
+            IsRead: request.IsRead, ChangedAtUtc: DateTime.UtcNow));
+
+        return Ok(dto);
+    }
+
+    // Map a parsed thread node to the public SmsThreadDto (same projection GetThreads uses inline).
+    private static SmsThreadDto ToThreadDto(GvThreadNode t) => new(
+        ThreadId: t.ThreadId ?? "",
+        CounterpartyNumber: t.CounterpartyNumber ?? "",
+        CounterpartyName: t.CounterpartyName,
+        LastMessageAt: t.LastMessageEpochMs is { } ms
+            ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime : DateTime.UnixEpoch,
+        HasUnread: t.HasUnread ?? false,
+        LastMessagePreview: t.LastMessagePreview);
 }

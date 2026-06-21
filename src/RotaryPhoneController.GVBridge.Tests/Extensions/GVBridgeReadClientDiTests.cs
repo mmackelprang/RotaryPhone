@@ -58,7 +58,25 @@ public class GVBridgeReadClientDiTests
         services.AddSingleton<GvThreadPoller>();
         services.AddSingleton<IGvMessageEventSource>(sp => sp.GetRequiredService<GvThreadPoller>());
 
+        // Mark-read registrations (provider-backed, per-call resolution) — mirror of AddGVBridge's
+        // mark-read block. The read-state sink resolves to the singleton poller (same as IGvOutboundSmsSink).
+        services.AddSingleton<IUpdateReadPayloadBuilder, UpdateReadPayloadBuilder>();
+        services.AddSingleton<GvReadStateClient>(sp => new GvReadStateClient(
+            sp.GetRequiredService<IUpdateReadPayloadBuilder>(),
+            sp.GetRequiredService<IGvAuthenticatedClientProvider>(),
+            sp.GetRequiredService<ILogger<GvReadStateClient>>()));
+        services.AddSingleton<IGvReadStateSink>(sp => sp.GetRequiredService<GvThreadPoller>());
+
         return services.BuildServiceProvider();
+    }
+
+    [Fact]
+    public void Container_ResolvesGvReadStateClient_AndMarkReadControllers_WithoutLiveAdapter()
+    {
+        var sp = BuildProvider();                        // existing helper in this test file
+        Assert.NotNull(sp.GetRequiredService<GvReadStateClient>());
+        Assert.NotNull(sp.GetRequiredService<IUpdateReadPayloadBuilder>());
+        Assert.NotNull(sp.GetRequiredService<IGvReadStateSink>());
     }
 
     [Fact]

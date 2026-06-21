@@ -78,3 +78,33 @@ public record SendSmsResponse(
     string? ThreadId,
     string? Error,
     SmsMessageDto? Message);
+
+/// <summary>
+/// Cross-service mark-read request (ADR §4, contract §2). Body for BOTH mark routes
+/// (POST /api/gvbridge/voicemail/{id}/read and POST /api/gvbridge/sms/threads/{threadId}/read).
+/// IsRead: true = mark read (the v1 contract). false = best-effort mark-UNREAD — honored only when the
+/// server's AllowMarkUnread flag is on (default off); otherwise the route returns 400 unread_unsupported
+/// (ADR §6.1). RadioConsole sends only IsRead:true until we confirm unread support.
+/// </summary>
+public record MarkReadRequest(bool IsRead);
+
+/// <summary>
+/// Unified read-state change event (ADR §5, reply §4) — broadcast over RotaryHub as "ReadStateChanged",
+/// camelCase on the wire. Fired when read-state changes from ANY source:
+///   • path (a) — a mark route was called (THIS PR), and
+///   • path (b) — the poller detected an externally-originated read flip (FAST-FOLLOW, Task 9).
+/// RadioConsole de-dupes by (Id/ThreadId + IsRead); a client's own mark and the echoed event are
+/// idempotent on its side, so we broadcast UNCONDITIONALLY (do not suppress the originator).
+///
+/// • Kind: "Voicemail" | "Sms" (treat unknown defensively on the consumer).
+/// • Id: voicemail id when Kind=Voicemail; null/empty for an Sms thread-level change.
+/// • ThreadId: thread id when Kind=Sms (required); the voicemail's threadId when Kind=Voicemail.
+/// • IsRead: the new read-state; for an Sms thread-level change this is "thread fully read" (!hasUnread).
+/// • ChangedAtUtc: ISO-8601 UTC, when the change was observed/applied.
+/// </summary>
+public record ReadStateChangedDto(
+    string Kind,
+    string? Id,
+    string? ThreadId,
+    bool IsRead,
+    DateTime ChangedAtUtc);
