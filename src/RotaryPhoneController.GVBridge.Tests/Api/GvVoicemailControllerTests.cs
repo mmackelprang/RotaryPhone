@@ -31,7 +31,10 @@ public class GvVoicemailControllerTests : IDisposable
             NullLogger<GvVoicemailClient>.Instance);
         var config = Options.Create(new GVBridgeConfig { VoicemailCacheDir = _dir });
         var cache = new GvVoicemailCache(fetcher, config, NullLogger<GvVoicemailCache>.Instance);
-        var controller = new GvVoicemailController(vmClient, cache, NullLogger<GvVoicemailController>.Instance)
+        var readStateClient = new GvReadStateClient(new UpdateReadPayloadBuilder(),
+            NullLogger<GvReadStateClient>.Instance);
+        var controller = new GvVoicemailController(vmClient, cache, readStateClient, new NoopReadSink(),
+            config, NullLogger<GvVoicemailController>.Instance)
         {
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
         };
@@ -106,6 +109,11 @@ public class GvVoicemailControllerTests : IDisposable
     {
         public Task<GvRecordingFetchResult> FetchAsync(string mediaRef, CancellationToken ct = default)
             => Task.FromResult(new GvRecordingFetchResult(true, bytes, "audio/mpeg"));
+    }
+
+    private sealed class NoopReadSink : IGvReadStateSink
+    {
+        public void NotifyReadStateChanged(ReadStateChangedDto dto) { }
     }
 
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
