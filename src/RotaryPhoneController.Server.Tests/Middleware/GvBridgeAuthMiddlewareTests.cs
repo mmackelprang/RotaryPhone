@@ -46,4 +46,18 @@ public class GvBridgeAuthMiddlewareTests
     // would have wrongly exempted it; the segment-anchored check gates it.
     [Fact] public async Task GateOn_GvBridgeEventSiblingPath_IsGated_401()
         => Assert.Equal(401, await Invoke("/api/gvbridge/eventlog", header: null, configuredKey: "k"));
+
+    // Mark-read routes (ADR §6.2 Q8): no special auth posture — the PR5 prefix gate auto-covers them.
+    // These prove a future middleware change can't silently un-gate the GV account-write routes.
+    [Theory]
+    [InlineData("/api/gvbridge/voicemail/vm.1/read")]
+    [InlineData("/api/gvbridge/sms/threads/t.abc/read")]
+    public async Task MarkReadRoutes_AreGated_WhenKeySet_NoHeader_Returns401(string path)
+        => Assert.Equal(401, await Invoke(path, header: null, configuredKey: "k"));
+
+    [Theory]
+    [InlineData("/api/gvbridge/voicemail/vm.1/read")]
+    [InlineData("/api/gvbridge/sms/threads/t.abc/read")]
+    public async Task MarkReadRoutes_PassGate_WithValidHeader(string path)
+        => Assert.Equal(200, await Invoke(path, header: "k", configuredKey: "k"));   // gate let it through to next()
 }
