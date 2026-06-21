@@ -97,6 +97,16 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public DateTime? LastHealthyAt => _lastHealthyAt;
 
     /// <summary>
+    /// UTC time a 603/403 REGISTER-throttle cooldown ends, or null when not throttled. During a
+    /// cooldown the transport sends NO REGISTER so Google's account-level throttle can cool; the
+    /// status endpoint surfaces this honestly alongside <see cref="Degraded"/>=true.
+    /// </summary>
+    public DateTime? ThrottledUntil => _sipTransport?.ThrottledUntil;
+
+    /// <summary>Human-readable reason for the active throttle cooldown, or null when not throttled.</summary>
+    public string? ThrottleReason => _sipTransport?.ThrottleReason;
+
+    /// <summary>
     /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
     /// based on when they were last loaded or refreshed. Null if no cookie set is loaded.
     /// Google rotates PSIDTS on its own cadence (minutes–hours); a large age is a hint that
@@ -539,7 +549,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (_config.EnableCookieRotation && _cookieSet != null && await TryRotateCookiesAsync())
             {
                 _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
-                await ForceReRegisterAsync();
+                await ReRegisterUnlessThrottledAsync();
                 return;
             }
 
@@ -547,7 +557,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (await ReloadCookiesAsync())
             {
                 _logger.LogInformation("GVApi: reloaded cookies from disk");
-                await ForceReRegisterAsync();
+                await ReRegisterUnlessThrottledAsync();
                 return;
             }
 
@@ -557,7 +567,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (await TryCdpRefreshAsync())
             {
                 _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
-                await ForceReRegisterAsync();
+                await ReRegisterUnlessThrottledAsync();
                 return;
             }
 
@@ -621,6 +631,29 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         {
             _logger.LogWarning(ex, "GVApi: forced re-register after cookie refresh failed (backoff will retry)");
         }
+    }
+
+    /// <summary>
+    /// Re-register after a successful cookie-recovery rung — UNLESS the transport is in a 603/403
+    /// throttle cooldown. When throttled, an immediate ForceReRegister is exactly the storm that
+    /// caused the 2026-06-19 incident: the cookie refresh is a no-op (cookies were already valid),
+    /// so re-registering just hammers straight back into Google's account-level throttle. The
+    /// transport's RegisterAsync gate would suppress the actual REGISTER anyway, but skipping here
+    /// keeps the recovery quiet and lets the transport's own reconnect loop re-register once the
+    /// cooldown elapses.
+    /// </summary>
+    private async Task ReRegisterUnlessThrottledAsync()
+    {
+        if (_sipTransport?.IsThrottled == true)
+        {
+            _logger.LogWarning(
+                "GVApi: deferring re-register — throttle cooldown active until {Until:o} ({Reason}); " +
+                "the transport's reconnect loop will re-register once it cools",
+                _sipTransport.ThrottledUntil, _sipTransport.ThrottleReason);
+            return;
+        }
+
+        await ForceReRegisterAsync();
     }
 
     /// <summary>
@@ -712,6 +745,16 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 _logger.LogWarning("GVApi: watchdog — cookies invalid, triggering recovery");
                 SetAvailable(false);
                 TriggerCookieRecovery("watchdog: cookies invalid");
+            }
+            else if (_sipTransport?.IsThrottled == true)
+            {
+                // Cookies fine and SIP not registered, but we're in a 603/403 throttle cooldown.
+                // Forcing a re-register here is the storm that caused the 2026-06-19 incident — it
+                // re-arms the loop every health-check interval. Defer: the transport's reconnect
+                // loop will re-register once the cooldown elapses.
+                _logger.LogWarning(
+                    "GVApi: watchdog — deferring re-register: throttle cooldown active until {Until:o} ({Reason})",
+                    _sipTransport.ThrottledUntil, _sipTransport.ThrottleReason);
             }
             else if (Volatile.Read(ref _refreshingCookies) == 0)
             {
