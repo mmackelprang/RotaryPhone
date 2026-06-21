@@ -22,6 +22,14 @@ public interface IGvMessageEventSource
     /// RotaryHub as "SmsSent".
     /// </summary>
     event Action<SmsMessageDto>? OnSmsSent;
+
+    /// <summary>
+    /// Raised when read-state changes from ANY source. Path (a): a mark route was called (THIS PR). Path
+    /// (b): the poller detected an externally-originated read flip (FAST-FOLLOW, Task 9). Forwarded to
+    /// RotaryHub as "ReadStateChanged". Broadcast unconditionally — RadioConsole de-dupes by (Id/ThreadId
+    /// + IsRead).
+    /// </summary>
+    event Action<ReadStateChangedDto>? OnReadStateChanged;
 }
 
 /// <summary>
@@ -34,4 +42,16 @@ public interface IGvOutboundSmsSink
 {
     /// <summary>Surface a successfully-queued outbound SMS to the OnSmsSent channel.</summary>
     void NotifySent(SmsMessageDto dto);
+}
+
+/// <summary>
+/// Narrow producer seam for the read-state-change channel (ADR §5 path a). The mark-read controllers call
+/// NotifyReadStateChanged after a successful mark so the event reaches RadioConsole. Kept separate from the
+/// consumer-only IGvMessageEventSource so the controllers do not depend on the raise side. Implemented by
+/// GvThreadPoller (which owns the events); registered as both.
+/// </summary>
+public interface IGvReadStateSink
+{
+    /// <summary>Surface a read-state change to the OnReadStateChanged channel.</summary>
+    void NotifyReadStateChanged(ReadStateChangedDto dto);
 }

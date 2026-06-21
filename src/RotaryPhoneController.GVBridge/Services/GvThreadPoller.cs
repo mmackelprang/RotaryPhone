@@ -14,7 +14,7 @@ namespace RotaryPhoneController.GVBridge.Services;
 /// "SmsReceived"/"VoicemailReceived" — mirroring IncomingCall. The poll-vs-signaler choice lives
 /// entirely behind IGvMessageEventSource (ADR §5.2, §9).
 /// </summary>
-public class GvThreadPoller : BackgroundService, IGvMessageEventSource, IGvOutboundSmsSink
+public class GvThreadPoller : BackgroundService, IGvMessageEventSource, IGvOutboundSmsSink, IGvReadStateSink
 {
     private readonly GvSmsClient _smsClient;
     private readonly GvVoicemailClient _voicemailClient;
@@ -31,12 +31,16 @@ public class GvThreadPoller : BackgroundService, IGvMessageEventSource, IGvOutbo
     public event Action<SmsMessageDto>? OnSmsReceived;
     public event Action<VoicemailItemDto>? OnVoicemailReceived;
     public event Action<SmsMessageDto>? OnSmsSent;
+    public event Action<ReadStateChangedDto>? OnReadStateChanged;
 
     /// <summary>Invoked by GvSmsController after a successful send so the outbound echo reaches RadioConsole.</summary>
     public void RaiseSmsSent(SmsMessageDto dto) => OnSmsSent?.Invoke(dto);
 
     /// <summary>IGvOutboundSmsSink — narrow producer seam the controller injects; just raises OnSmsSent.</summary>
     public void NotifySent(SmsMessageDto dto) => RaiseSmsSent(dto);
+
+    /// <summary>IGvReadStateSink — narrow producer seam the mark-read controllers inject (path a).</summary>
+    public void NotifyReadStateChanged(ReadStateChangedDto dto) => OnReadStateChanged?.Invoke(dto);
 
     public GvThreadPoller(GvSmsClient smsClient, GvVoicemailClient voicemailClient,
         IOptions<GVBridgeConfig> config, ILogger<GvThreadPoller> logger)

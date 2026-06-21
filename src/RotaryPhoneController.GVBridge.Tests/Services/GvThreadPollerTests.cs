@@ -154,6 +154,21 @@ public class GvThreadPollerTests
         Assert.StartsWith("csid:t.1:", sent[0].Id);
     }
 
+    [Fact]
+    public void NotifyReadStateChanged_RaisesOnReadStateChanged()
+    {
+        var (poller, _) = NewPoller(new Queue<HttpResponseMessage>());
+        ReadStateChangedDto? captured = null;
+        poller.OnReadStateChanged += d => captured = d;
+
+        ((IGvReadStateSink)poller).NotifyReadStateChanged(
+            new ReadStateChangedDto("Voicemail", "vm.1", "t.1", true, DateTime.UtcNow));
+
+        Assert.NotNull(captured);
+        Assert.Equal("vm.1", captured!.Id);
+        Assert.True(captured.IsRead);
+    }
+
     private sealed class StubFetcher : IGvRecordingFetcher
     {
         public Task<GvRecordingFetchResult> FetchAsync(string mediaRef, CancellationToken ct = default)
