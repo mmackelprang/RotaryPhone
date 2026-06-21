@@ -44,7 +44,7 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
 | 4e. Builder — PR5 inter-service auth gate | ✅ merged | PR #61 — `X-RotaryPhone-Auth` gate: constant-time `InterServiceAuthValidator`, `GvBridgeAuthMiddleware` over all `/api/gvbridge/*` (401; exempts only the exact `/event` segment), `HubAuthFilter` over `/hub` (header or `access_token`; abort). **`InterServiceAuthKey` defaults `""` = DISABLED** — merge is byte-identical to today (no 401 storm). New `RotaryPhoneController.Server.Tests` project (21 tests); review found no HIGH (2 MEDIUM fixed: segment-anchored `/event` exemption + hub default-off pass-through). Boundary-doc + handoff updated. **ENABLING requires coordinated config on BOTH RotaryPhone and RadioConsole** (owner action); on-box auth-gate smoke = ADR §11 step 7, not done here. |
 | 5. Tester (UAT) | ⬜ deferred — RadioConsole UI lives in RTest repo; no browser UAT for backend PRs | — |
 | 6. Polisher | ⬜ deferred — applies to UI work (separate repo) | — |
-| FF. GV mark-read (durable read-state) — fast-follow | 🟡 **contract ratified, build HELD (owner)** | Decision record: `docs/architecture/decisions/2026-06-20-gv-markread-readstate-contract.md`; reply to RadioConsole: `docs/handoffs/radioconsole-gv-markread-reply.md`; request: `docs/prompts/radioconsole-gv-markread-readstate-request.md` |
+| FF. GV mark-read (durable read-state) — fast-follow | 🟡 **plan queued & build-ready (build HELD — owner)** | **Plan (path a): `docs/superpowers/plans/2026-06-20-gv-markread-readstate.md`.** Decision record: `docs/architecture/decisions/2026-06-20-gv-markread-readstate-contract.md`; reply to RadioConsole: `docs/handoffs/radioconsole-gv-markread-reply.md`; request: `docs/prompts/radioconsole-gv-markread-readstate-request.md` |
 
 > **Note — no `BUILDER_QUEUE.md` in this project.** Builder work is driven directly from the
 > plan docs above. The earlier tracker reference to a queue file was wrong; corrected here.
@@ -91,6 +91,15 @@ voicemail/SMS API exposed by **RotaryPhone** (which owns the GV integration).
   default-off), poller-diff event as a fast-follow. First real `updateread` pending the ADR §11 live
   capture (new step 8 added: capture the `updateread` wire format, per-thread vs per-message grain, unread
   support, response-echo).
+- **Plan QUEUED & build-ready (Planner, 2026-06-20):**
+  `docs/superpowers/plans/2026-06-20-gv-markread-readstate.md` — bite-sized TDD tasks against the real
+  as-built types (`GvReadStateClient.MarkReadAsync` → `api2thread/updateread` behind the UNVERIFIED
+  `IUpdateReadPayloadBuilder` seam; two routes returning the frozen `VoicemailItemDto`/`SmsThreadDto`;
+  `EnableMarkRead` default-FALSE; path-a `ReadStateChanged` via the existing `IGvMessageEventSource` →
+  `GvMessagePushBridge` → `RotaryHub` pattern; auth-gate coverage test). Carries a prominent
+  **🔒 OWNER-HOLD** banner — the plan is queued, the **build is still HELD** (GV account write). **Path b**
+  (poller-detected external read-flip → live "hear-on-phone clears the kiosk badge") is scoped in the plan
+  as a clearly-separated fast-follow (Task 9), NOT built in path a.
 
 ## Builder follow-ups (read-side complete — PRs #54/#56/#57 merged, 151 tests green)
 - **Live-capture gate (ADR §11):** parser field positions are PROVISIONAL — fixture-verified,
