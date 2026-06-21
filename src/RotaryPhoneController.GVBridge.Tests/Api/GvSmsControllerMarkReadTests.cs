@@ -26,6 +26,17 @@ public class GvSmsControllerMarkReadTests
         """)
     };
 
+    // Same shape as SmsList() but the thread already hasUnread=false (the 4th thread element,
+    // ThreadHasUnreadIdx=3, flipped to false) — used to exercise the idempotent already-read no-op path.
+    private static HttpResponseMessage SmsListRead() => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent("""
+        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,false,
+          [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false]]]],
+         "nextPageToken":null}
+        """)
+    };
+
     private (GvSmsController c, List<ReadStateChangedDto> events) NewController(
         Func<HttpRequestMessage, HttpResponseMessage> listHandler,
         bool enableMarkRead = true, bool allowUnread = false)
@@ -101,6 +112,23 @@ public class GvSmsControllerMarkReadTests
         var (c, _) = NewController(_ => SmsList(), allowUnread: false);
         var result = await c.MarkThreadRead("t.+19195551234", new MarkReadRequest(false), default);
         Assert.Equal(400, Assert.IsAssignableFrom<ObjectResult>(result).StatusCode);  // BadRequestObjectResult : ObjectResult
+    }
+
+    [Fact]
+    public async Task MarkThreadRead_AlreadyRead_Returns200_NoGvCall_NoBroadcast()
+    {
+        var posts = 0;
+        var (c, events) = NewController(req =>
+        {
+            if (req.RequestUri!.ToString().Contains("updateread")) posts++;
+            return SmsListRead();   // thread already hasUnread=false
+        });
+        var result = await c.MarkThreadRead("t.+19195551234", new MarkReadRequest(true), default);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var dto = Assert.IsType<SmsThreadDto>(ok.Value);
+        Assert.False(dto.HasUnread);
+        Assert.Equal(0, posts);
+        Assert.Empty(events);
     }
 
     [Fact]

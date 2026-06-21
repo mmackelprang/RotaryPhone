@@ -183,17 +183,20 @@ public class GvSmsController : ControllerBase
         var thread = threadsResult.Threads.FirstOrDefault(t => t.ThreadId == threadId);
         if (thread is null) return NotFound(new { error = $"SMS thread {threadId} not found" });
 
-        // 3. Idempotent no-op (ADR §4.3): thread already fully read → 200, no GV call. isRead:true means
-        //    hasUnread=false; if already !hasUnread, we are already in the target state.
-        var alreadyInTargetState = (thread.HasUnread ?? false) != request.IsRead;
+        // 3. Idempotent no-op (ADR §4.3): thread already in the target state → 200, no GV call. isRead:true
+        //    means target hasUnread=false; so "already in target state" is HasUnread == !isRead.
+        var alreadyInTargetState = (thread.HasUnread ?? false) == !request.IsRead;
         if (alreadyInTargetState)
             return Ok(ToThreadDto(thread));
 
         // 4. Per-thread grain (ADR §4.2 Q4): mark every message in the thread. Resolve the message ids.
+        //    If we cannot enumerate the thread's messages (auth blip / GV 5xx), do NOT attempt a wrong/partial
+        //    mark — return 502 so RadioConsole reconciles on the next list (honest-status discipline, ADR §3.2).
         var messagesResult = await _smsClient.ListMessagesAsync(threadId, count: 200, ct);
-        var messageIds = messagesResult.Succeeded
-            ? messagesResult.Messages.Where(m => m.MessageId is not null).Select(m => m.MessageId!).ToList()
-            : new List<string>();
+        if (!messagesResult.Succeeded)
+            return StatusCode(502, new { error = "Failed to fetch SMS messages for mark-read" });
+        var messageIds = messagesResult.Messages
+            .Where(m => m.MessageId is not null).Select(m => m.MessageId!).ToList();
 
         // 5. Write through to GV (honest — 200 means accepted; partial = failure). No auto-retry (§8).
         var write = _testReadStateClient is not null

@@ -27,6 +27,17 @@ public class GvVoicemailControllerMarkReadTests : IDisposable
         """)
     };
 
+    // Same shape as VmList() but vm.1 already isRead=true (the 7th node element, VmIsReadIdx=6, flipped to
+    // true) — used to exercise the idempotent already-read no-op path.
+    private static HttpResponseMessage VmListRead() => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent("""
+        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
+          [["vm.1","t.+19195551234","+19195551234","Alice",1718841600000,23,true,"call me","media-1"]]]],
+         "nextPageToken":null}
+        """)
+    };
+
     private (GvVoicemailController c, List<ReadStateChangedDto> events) NewController(
         Func<HttpRequestMessage, HttpResponseMessage> listHandler,
         bool enableMarkRead = true, bool allowUnread = false)
@@ -114,6 +125,23 @@ public class GvVoicemailControllerMarkReadTests : IDisposable
         var obj = Assert.IsAssignableFrom<ObjectResult>(result);   // BadRequestObjectResult : ObjectResult
         Assert.Equal(400, obj.StatusCode);
         Assert.Equal(0, posts);
+    }
+
+    [Fact]
+    public async Task MarkRead_AlreadyRead_Returns200_NoGvCall_NoBroadcast()
+    {
+        var posts = 0;
+        var (c, events) = NewController(req =>
+        {
+            if (req.RequestUri!.ToString().Contains("updateread")) posts++;
+            return VmListRead();   // vm.1 already isRead=true
+        });
+        var result = await c.MarkRead("vm.1", new MarkReadRequest(true), default);
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var dto = Assert.IsType<VoicemailItemDto>(ok.Value);
+        Assert.True(dto.IsRead);
+        Assert.Equal(0, posts);      // idempotent no-op: no updateread POST
+        Assert.Empty(events);        // no broadcast on a no-op
     }
 
     [Fact]

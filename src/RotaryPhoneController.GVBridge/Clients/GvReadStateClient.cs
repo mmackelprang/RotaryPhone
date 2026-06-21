@@ -118,7 +118,7 @@ public class GvReadStateClient
         {
             var url = $"{_baseUrl}/api2thread/updateread?alt=protojson&key={_apiKey}";
             var content = new StringContent(payload, Encoding.UTF8, "application/json+protobuf");
-            var response = await authenticatedClient.PostAsync(url, content, ct);
+            using var response = await authenticatedClient.PostAsync(url, content, ct);
             if (response.IsSuccessStatusCode)
             {
                 _logger.LogInformation("updateread applied");

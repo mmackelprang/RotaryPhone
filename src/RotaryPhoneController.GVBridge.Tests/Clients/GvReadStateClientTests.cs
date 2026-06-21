@@ -7,7 +7,7 @@ namespace RotaryPhoneController.GVBridge.Tests.Clients;
 
 public class GvReadStateClientTests
 {
-    private static GvReadStateClient NewClient(HttpClient http) =>
+    private static GvReadStateClient NewClient() =>
         new(new UpdateReadPayloadBuilder(), NullLogger<GvReadStateClient>.Instance);
 
     [Fact]
@@ -19,7 +19,7 @@ public class GvReadStateClientTests
             capturedUrl = req.RequestUri!.ToString();
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
         }));
-        var client = NewClient(http);
+        var client = NewClient();
 
         var result = await client.MarkVoicemailReadAsync(http, "vm.1", "t.+19195551234", isRead: true);
 
@@ -38,7 +38,7 @@ public class GvReadStateClientTests
             posts++;
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
         }));
-        var client = NewClient(http);
+        var client = NewClient();
 
         var result = await client.MarkSmsThreadReadAsync(
             http, "t.abc", new[] { "m.1", "m.2" }, isRead: true);
@@ -52,7 +52,7 @@ public class GvReadStateClientTests
     {
         var http = new HttpClient(new CapturingHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("x") }));
-        var client = NewClient(http);
+        var client = NewClient();
 
         var result = await client.MarkVoicemailReadAsync(http, "vm.1", "t.1", isRead: true);
 
@@ -72,7 +72,7 @@ public class GvReadStateClientTests
             return new HttpResponseMessage(
                 posts == 1 ? HttpStatusCode.InternalServerError : HttpStatusCode.OK);
         }));
-        var client = NewClient(http);
+        var client = NewClient();
 
         var result = await client.MarkSmsThreadReadAsync(http, "t.abc", new[] { "m.1", "m.2" }, true);
 
@@ -83,8 +83,7 @@ public class GvReadStateClientTests
     [Fact]
     public async Task Mark_NullClient_ClassifiesAdapterUnavailable_NoThrow()
     {
-        var client = NewClient(new HttpClient(new CapturingHandler((_, _) =>
-            new HttpResponseMessage(HttpStatusCode.OK))));
+        var client = NewClient();
         var result = await client.MarkVoicemailReadAsync(
             authenticatedClient: null, "vm.1", "t.1", isRead: true);
         Assert.Equal(GvUpdateReadOutcome.AdapterUnavailable, result.Outcome);
