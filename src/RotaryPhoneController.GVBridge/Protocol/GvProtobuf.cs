@@ -51,6 +51,7 @@ public static class GvProtobuf
             {
                 case null: writer.WriteNullValue(); break;
                 case string s: writer.WriteStringValue(s); break;
+                case bool b: writer.WriteBooleanValue(b); break;
                 case int i: writer.WriteNumberValue(i); break;
                 case long l: writer.WriteNumberValue(l); break;
                 case JsonElement el: el.WriteTo(writer); break;
