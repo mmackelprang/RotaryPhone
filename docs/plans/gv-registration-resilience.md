@@ -45,8 +45,35 @@ without a human noticing first. All recovery stays in RotaryPhone's lane (no Pip
 - Expose a `degraded`/`lastHealthyAt` field on `/api/gvbridge/status` so the RTest dashboard can show it.
 - Tests: watchdog flags unregistered/cookie-invalid/flat-inbound states and fires recovery.
 
+### PR5 — Escalating 603/403 throttle cooldown  *(branch `fix/gv-603-throttle-backoff`)*
+- **Root cause (refined from live evidence):** even with PR1–PR4, the system stayed wedged. A
+  REGISTER `603`/`403` fired `AuthenticationFailed` → the adapter's recovery rung 1 (`RotateCookies`)
+  **succeeded trivially** (cookies were already valid — this is a *throttle*, not a cookie problem) →
+  it **immediately re-REGISTERed** straight back into Google's account-level throttle → another `603`
+  → recovery → re-register → … forever. The PR2 storm-floor only capped the *rate*; it never *stopped*
+  the loop, and Google's throttle only eases after ~10–20 min of **zero** REGISTERs. Two other
+  autonomous paths (the transport `ReconnectLoopAsync` and the watchdog "cookies valid but not
+  registered → force re-register") also kept hammering. Live: 214 `603` of 241 REGISTERs in 60 min.
+- **Fix:** when a post-Digest REGISTER `603`/`403` recurs, enter an **escalating cooldown**
+  (`ReconnectOptions.ThrottleCooldownScheduleSeconds = [60, 300, 900, 1800]`) during which **NO
+  REGISTER is sent** to Google. Gated at the single chokepoint (`GvSipTransport.RegisterAsync`) so
+  it covers all three storm paths (pull `EnsureRegisteredAsync`, push `ReconnectLoopAsync`, adapter
+  `ForceReRegister`). The adapter additionally **defers** ForceReRegister (recovery + watchdog) while
+  `IsThrottled`. A 200-OK resets the cooldown. Honest status: `throttledUntil` / `throttleReason`
+  added to `/api/gvbridge/status` (`degraded` already true).
+- Tests: `GvSipTransportThrottleCooldownTests` (FakeTimeProvider) — cooldown suppresses REGISTER
+  sends, the window escalates, a 200-OK resets it, throttle is surfaced honestly.
+
 ## Out of scope / parallel
 - The `603` may be a Google-side cooldown from the storm; clearing it may require time or a GV-account
   re-auth in the browser (user action). These PRs make the system *recover and report* correctly; they
-  don't bypass a Google account block.
-- `sipregisterinfo/get` credential expiry logs as "~15 years" — likely a misparse; investigate separately.
+  don't bypass a Google account block. **(PR5 now stops *us* from prolonging it.)**
+- `sipregisterinfo/get` credential expiry logs as "~15 years" (live: `expires in 858082000s`, varying
+  per fetch) — a misparse of `root[0][1]` (likely an absolute epoch, not a relative duration).
+  **Investigated 2026-06-21 (PR5): FLAGGED, not fixed.** `SipCredentials.ExpirySeconds` is set in
+  `GvSipCredentialProvider` and only **logged** (`LogFetched` "expires in {Expiry}s") + asserted in two
+  unit tests — it is **never read to schedule re-registration**. GV re-registration is driven entirely
+  by the RFC 6223 `keep=` Via keep-alive period and the reconnect backoff, not by `ExpirySeconds`. So
+  the misparse is cosmetic/log-only and zero-impact. Fixing it would require guessing Google's protojson
+  epoch format (seconds vs millis, absolute vs relative) — high risk of a wrong guess for no behavioral
+  gain. Leave as a low-priority follow-up; revisit only if `ExpirySeconds` is ever wired to timing.

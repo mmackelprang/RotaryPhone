@@ -31,7 +31,12 @@ public record GvBridgeStatusDto(
   // Added by the registration-resilience watchdog: degraded = NOT (cookies valid AND registered);
   // lastHealthyAt = last time both held. Appended to preserve the existing field contract.
   [property: JsonPropertyName("degraded")] bool Degraded = false,
-  [property: JsonPropertyName("lastHealthyAt")] DateTime? LastHealthyAt = null);
+  [property: JsonPropertyName("lastHealthyAt")] DateTime? LastHealthyAt = null,
+  // Added by the 603/403 throttle-cooldown fix: while a cooldown is active the transport sends
+  // NO REGISTER (so Google's account-level throttle can cool). throttledUntil = when it ends;
+  // throttleReason = why. Both null when not throttled. Appended to preserve the field contract.
+  [property: JsonPropertyName("throttledUntil")] DateTime? ThrottledUntil = null,
+  [property: JsonPropertyName("throttleReason")] string? ThrottleReason = null);
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

@@ -43,5 +43,18 @@ internal sealed class ReconnectOptions
     /// </summary>
     public double MinRegisterIntervalSeconds { get; init; } = 2.0;
 
+    /// <summary>
+    /// Escalating cooldown (seconds) after consecutive REGISTER throttles (603 Declined / 403,
+    /// or an auth-failure whose cookie refresh was a no-op). During a cooldown window NO REGISTER
+    /// is attempted at all, so Google's account-level throttle can cool. The Nth consecutive
+    /// throttle uses entry min(N-1, count-1); the last entry is the cap. Reset on a 200-OK REGISTER.
+    ///
+    /// Production default 60s -&gt; 5min -&gt; 15min -&gt; 30min cap. The 2026-06-19 incident showed a
+    /// pure rate-floor (MinRegisterIntervalSeconds) only caps the RATE — it never STOPS the loop,
+    /// and Google's account throttle only eases after ~10–20 min of ZERO REGISTERs. This schedule
+    /// guarantees those zero-REGISTER windows. Tests inject tiny values.
+    /// </summary>
+    public IReadOnlyList<int> ThrottleCooldownScheduleSeconds { get; init; } = [60, 300, 900, 1800];
+
     public static ReconnectOptions Default { get; } = new();
 }

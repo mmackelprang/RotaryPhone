@@ -50,7 +50,9 @@ public class GVBridgeController : ControllerBase
             CookiesValid: _adapter.AreCookiesValid,
             PsidtsAgeSeconds: _adapter.PsidtsAgeSeconds,
             Degraded: _adapter.Degraded,
-            LastHealthyAt: _adapter.LastHealthyAt));
+            LastHealthyAt: _adapter.LastHealthyAt,
+            ThrottledUntil: _adapter.ThrottledUntil,
+            ThrottleReason: _adapter.ThrottleReason));
     }
 
     [HttpGet("adapter/mode")]

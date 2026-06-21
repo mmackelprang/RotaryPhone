@@ -94,6 +94,19 @@ public sealed class GvSipTransport : IAsyncDisposable
     private EventHandler<SipMessageEventArgs>? _currentMessageHandler;
     private EventHandler<WebSocketClosedEventArgs>? _currentClosedHandler;
 
+    // --- 603/403 throttle cooldown (breaks the 2026-06-19 re-register storm) ---
+    // A post-Digest REGISTER 603 (or 403) is Google REJECTING our already-authenticated REGISTER:
+    // an account-level POLICY/THROTTLE rejection, not a cookie problem. The old behaviour
+    // re-REGISTERed immediately on every recovery attempt, hammering straight back into the
+    // throttle forever. Instead we enter an ESCALATING cooldown during which RegisterAsync is
+    // SUPPRESSED (throws WITHOUT sending a REGISTER), so the account throttle can actually cool.
+    // All time math uses _timeProvider so tests are deterministic. Mutated under _throttleLock.
+    private readonly object _throttleLock = new();
+    private int _consecutiveThrottles;       // # of consecutive post-Digest 603/403 declines
+    private long _throttledUntilTimestamp;    // _timeProvider.GetTimestamp() value; 0 = not throttled
+    private DateTime? _throttledUntilUtc;     // wall-clock end of the current cooldown (for honest status)
+    private string? _throttleReason;          // human-readable reason (for honest status)
+
     /// <summary>
     /// Whether SIP registration with Google Voice is currently active AND the underlying
     /// socket is open. A dead socket can never report registered-true (honest status).
@@ -105,6 +118,35 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     /// <summary>UTC timestamp of the most recent successful REGISTER 200-OK, if any.</summary>
     public DateTime? LastConnectedAt { get; private set; }
+
+    /// <summary>
+    /// Whether a 603/403 REGISTER-throttle cooldown is currently active. While true, NO REGISTER
+    /// is sent to Google (RegisterAsync is suppressed) so the account-level throttle can cool.
+    /// Honest status: a throttled transport is, by definition, not registered.
+    /// </summary>
+    public bool IsThrottled
+    {
+        get
+        {
+            lock (_throttleLock)
+            {
+                return _throttledUntilTimestamp != 0 &&
+                       _timeProvider.GetTimestamp() < _throttledUntilTimestamp;
+            }
+        }
+    }
+
+    /// <summary>UTC time the current throttle cooldown ends, or null when not throttled.</summary>
+    public DateTime? ThrottledUntil
+    {
+        get { lock (_throttleLock) { return IsThrottled ? _throttledUntilUtc : null; } }
+    }
+
+    /// <summary>Human-readable reason for the current throttle cooldown, or null when not throttled.</summary>
+    public string? ThrottleReason
+    {
+        get { lock (_throttleLock) { return IsThrottled ? _throttleReason : null; } }
+    }
 
     public event EventHandler<IncomingCallEventArgs>? IncomingCallReceived;
 
@@ -893,6 +935,26 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     private async Task RegisterAsync(CancellationToken ct)
     {
+        // 603/403 throttle gate (highest priority): if a cooldown window is active, SUPPRESS this
+        // attempt entirely — throw WITHOUT touching the channel or sending a REGISTER to Google.
+        // This is the single chokepoint that ALL (re)register paths funnel through (pull-path
+        // EnsureRegisteredAsync, push-path ReconnectLoopAsync, and the adapter's ForceReRegister
+        // via EnsureRegisteredAsync), so it stops every storm path. The no-REGISTER-sent invariant
+        // is the whole point: Google's account-level throttle only eases after a quiet window.
+        if (IsThrottled)
+        {
+            DateTime? until;
+            string? reason;
+            lock (_throttleLock) { until = _throttledUntilUtc; reason = _throttleReason; }
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "REGISTER suppressed: throttle cooldown active until {Until:o} ({Reason})",
+                until, reason);
+#pragma warning restore CA1848, CA1873
+            _registered = false; // honest status: still not registered
+            throw new InvalidOperationException("REGISTER suppressed: throttle cooldown active");
+        }
+
         // Storm guard: never start REGISTER attempts faster than the configured floor, no
         // matter how many paths (reconnect loop, pull-path Ensure, a future bug) call in.
         await ThrottleRegisterAttemptAsync(ct).ConfigureAwait(false);
@@ -977,6 +1039,10 @@ public sealed class GvSipTransport : IAsyncDisposable
                             _registered = true;
                             LastConnectedAt = _timeProvider.GetUtcNow().UtcDateTime;
 
+                            // A 200-OK means Google accepted us — the throttle (if any) has eased.
+                            // Reset the cooldown so future declines start the escalation fresh.
+                            ResetThrottle();
+
                             // RFC 6223 keep= negotiated send-frequency (seconds) from the first
                             // response Via. RFC 5626 §3.5.1 CRLF is the keep-alive METHOD.
                             _keepAliveIntervalSeconds = ParseKeepInterval(message);
@@ -1054,11 +1120,16 @@ public sealed class GvSipTransport : IAsyncDisposable
                         }
                         else if ((int)resp.Status == 403)
                         {
-                            // 403 Forbidden on REGISTER is always a real auth rejection.
+                            // A post-Digest REGISTER 403 means Google rejected our ALREADY-authenticated
+                            // REGISTER (cookies were accepted enough to fetch creds + answer the Digest).
+                            // That is a policy/throttle rejection, NOT a stale-cookie problem — so it
+                            // ENTERS the escalating throttle cooldown (no REGISTER until it cools) in
+                            // addition to escalating via AuthenticationFailed for the cookie ladder.
 #pragma warning disable CA1848, CA1873
-                            _logger.LogWarning("REGISTER rejected 403 Forbidden — real auth failure, escalating");
+                            _logger.LogWarning("REGISTER rejected 403 Forbidden — policy/throttle rejection, escalating + cooling");
 #pragma warning restore CA1848, CA1873
                             _registered = false; // honest status: we are NOT registered
+                            EnterThrottleCooldown(403);
                             RaiseAuthenticationFailed("REGISTER 403");
                             regTcs.TrySetResult(false);
                         }
@@ -1066,12 +1137,15 @@ public sealed class GvSipTransport : IAsyncDisposable
                         {
                             // 603 Declined on REGISTER is a policy/account-level rejection from Google
                             // (observed 2026-06-19 when the account was throttled after a credential-
-                            // failure REGISTER storm). Treat it as a real auth failure so the recovery
-                            // ladder runs, and mark unregistered so /api/gvbridge/status stays honest.
+                            // failure REGISTER storm). Enter the escalating throttle cooldown so NO
+                            // REGISTER is sent until the account throttle cools — the storm fix — AND
+                            // escalate via AuthenticationFailed (recovery ladder) for the cookie case.
+                            // Mark unregistered so /api/gvbridge/status stays honest.
 #pragma warning disable CA1848, CA1873
-                            _logger.LogWarning("REGISTER rejected 603 Declined — registration declined, escalating");
+                            _logger.LogWarning("REGISTER rejected 603 Declined — registration declined, escalating + cooling");
 #pragma warning restore CA1848, CA1873
                             _registered = false; // honest status: we are NOT registered
+                            EnterThrottleCooldown(603);
                             RaiseAuthenticationFailed("REGISTER 603");
                             regTcs.TrySetResult(false);
                         }
@@ -1619,6 +1693,52 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     private void RaiseAuthenticationFailed(string reason) =>
         AuthenticationFailed?.Invoke(this, new AuthenticationFailedEventArgs(reason));
+
+    /// <summary>
+    /// Enter (or escalate) the 603/403 throttle cooldown. The Nth consecutive throttle uses
+    /// schedule entry min(N-1, count-1); the last entry is the cap. While the window is open
+    /// <see cref="RegisterAsync"/> is suppressed so NO REGISTER reaches Google — the only thing
+    /// that lets the account-level throttle cool. Logged at warning so the cooldown is visible.
+    /// </summary>
+    private void EnterThrottleCooldown(int statusCode)
+    {
+        var schedule = _options.ThrottleCooldownScheduleSeconds;
+        if (schedule is null || schedule.Count == 0)
+            return; // cooldown disabled (defensive) — behave as before
+
+        lock (_throttleLock)
+        {
+            _consecutiveThrottles++;
+            var idx = Math.Min(_consecutiveThrottles - 1, schedule.Count - 1);
+            var seconds = schedule[idx];
+
+            var now = _timeProvider.GetTimestamp();
+            _throttledUntilTimestamp = now + (long)(seconds * _timeProvider.TimestampFrequency);
+            _throttledUntilUtc = _timeProvider.GetUtcNow().UtcDateTime.AddSeconds(seconds);
+            _throttleReason =
+                $"REGISTER {statusCode} Declined x{_consecutiveThrottles}, cooling {seconds}s until " +
+                _throttledUntilUtc.Value.ToString("o", CultureInfo.InvariantCulture);
+
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(
+                "REGISTER {Status} throttle x{Count}: entering {Seconds}s cooldown (no REGISTER sent until {Until:o}) " +
+                "so Google's account-level throttle can cool",
+                statusCode, _consecutiveThrottles, seconds, _throttledUntilUtc);
+#pragma warning restore CA1848, CA1873
+        }
+    }
+
+    /// <summary>Clear the throttle cooldown on a successful REGISTER 200-OK.</summary>
+    private void ResetThrottle()
+    {
+        lock (_throttleLock)
+        {
+            _consecutiveThrottles = 0;
+            _throttledUntilTimestamp = 0;
+            _throttledUntilUtc = null;
+            _throttleReason = null;
+        }
+    }
 
     /// <summary>
     /// Parse the RFC 6223 <c>keep=&lt;n&gt;</c> recommended keep-alive frequency (seconds) from

@@ -16,6 +16,8 @@
     <PackageReference Include="xunit" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
     <PackageReference Include="Moq" Version="4.*" />
+    <!-- FakeTimeProvider: deterministic time control for the 603 throttle-cooldown tests. -->
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.*" />
   </ItemGroup>
 
   <ItemGroup>
