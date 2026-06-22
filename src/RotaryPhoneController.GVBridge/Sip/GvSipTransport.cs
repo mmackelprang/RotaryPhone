@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Net;
@@ -281,13 +282,20 @@ public sealed class GvSipTransport : IAsyncDisposable
 
         try
         {
-            // Create RTCPeerConnection for DTLS-SRTP (required by Google)
+            // Create RTCPeerConnection for DTLS-SRTP (required by Google). Bind ICE/RTP to the box's
+            // IPv4 only (same IPv6-unreachable reason as the inbound path — see ResolveLocalIPv4).
+            var mediaBindIPv4 = ResolveLocalIPv4();
+#pragma warning disable CA1848, CA1873
+            _logger.LogInformation(
+                "GV media PC bound to IPv4 {Addr} (ICE IPv4-only — box has no routable IPv6)", mediaBindIPv4);
+#pragma warning restore CA1848, CA1873
             var pc = new SIPSorcery.Net.RTCPeerConnection(new SIPSorcery.Net.RTCConfiguration
             {
                 iceServers = [new SIPSorcery.Net.RTCIceServer { urls = "stun:stun.l.google.com:19302" }],
                 // Google's DTLS relay uses TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (confirmed via Chrome WebRTC stats)
                 X_UseRsaForDtlsCertificate = true,
                 X_UseRtpFeedbackProfile = true, // Use SAVPF profile like Chrome
+                X_BindAddress = mediaBindIPv4,
             });
 
             var audioTrack = new MediaStreamTrack(
@@ -717,12 +725,20 @@ public sealed class GvSipTransport : IAsyncDisposable
             $"\r\n";
         _ = SendSipMessageAsync(ringing);
 
-        // Create peer connection for incoming media
+        // Create peer connection for incoming media. Bind ICE/RTP to the box's IPv4 only — the box
+        // has no routable IPv6, so gathering its ULA IPv6 host candidates makes ICE try an
+        // unreachable IPv6 pair to Google and the media leg dies (SocketException 101). See ResolveLocalIPv4.
+        var mediaBindIPv4 = ResolveLocalIPv4();
+#pragma warning disable CA1848, CA1873
+        _logger.LogInformation(
+            "GV media PC bound to IPv4 {Addr} (ICE IPv4-only — box has no routable IPv6)", mediaBindIPv4);
+#pragma warning restore CA1848, CA1873
         var pc = new RTCPeerConnection(new RTCConfiguration
         {
             iceServers = [new RTCIceServer { urls = "stun:stun.l.google.com:19302" }],
             X_UseRsaForDtlsCertificate = true,
             X_UseRtpFeedbackProfile = true,
+            X_BindAddress = mediaBindIPv4,
         });
 
         var audioTrack = new MediaStreamTrack(
@@ -891,6 +907,40 @@ public sealed class GvSipTransport : IAsyncDisposable
             _logger.LogWarning(ex, "Failed to send SIP message");
         }
 #pragma warning restore CA1031
+    }
+
+    /// <summary>
+    /// Resolve the box's primary IPv4 address (the one that owns the IPv4 default route) so the
+    /// GV media peer connection binds ICE/RTP to IPv4 only. The box has no routable IPv6 — only ULA
+    /// addresses with no IPv6 default route — so if SIPSorcery gathers the ULA IPv6 host candidates
+    /// it will try an unreachable IPv6 candidate pair to Google and the media leg dies at ICE
+    /// (SocketException 101). Binding to this IPv4 address suppresses the IPv6 host candidates entirely.
+    ///
+    /// Uses the standard "connect a UDP socket to a remote and read its chosen local endpoint" trick
+    /// (no packets are sent) — the same pattern used by SIPSorceryAdapter.GetLocalIPForTarget and
+    /// GVTrunkAdapter. Falls back to the known box IPv4 if resolution fails.
+    /// </summary>
+    private IPAddress ResolveLocalIPv4()
+    {
+        // 216.239.36.145 = Google Voice SIP-over-WSS proxy (see class header). Resolving toward it
+        // selects the box's IPv4 default-route source address.
+        const string target = "216.239.36.145";
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Connect(IPAddress.Parse(target), 1);
+            if (socket.LocalEndPoint is IPEndPoint ep && ep.Address.AddressFamily == AddressFamily.InterNetwork)
+                return ep.Address;
+        }
+#pragma warning disable CA1031
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+#pragma warning disable CA1848, CA1873
+            _logger.LogWarning(ex, "Could not resolve local IPv4 for GV media bind — falling back to 192.168.86.50");
+#pragma warning restore CA1848, CA1873
+        }
+        return IPAddress.Parse("192.168.86.50"); // fallback (box's known IPv4)
     }
 
     /// <summary>
