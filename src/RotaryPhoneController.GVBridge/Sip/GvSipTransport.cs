@@ -741,6 +741,23 @@ public sealed class GvSipTransport : IAsyncDisposable
             X_BindAddress = mediaBindIPv4,
         });
 
+        // DIAG (diag/gv-srtp-receive): the INBOUND peer connection previously had NO state-change
+        // handlers wired (the outbound path in InitiateAsync did). Without these we cannot tell
+        // whether ICE actually nominates a pair and reaches connected/completed, or whether the
+        // peer connection ever reaches connected — the core (b) "media never arrives" question.
+        // Visibility only: these subscriptions do not alter ICE/DTLS/SRTP/RTP behavior. Tagged
+        // "DIAG-IN" so the Coordinator can grep one prefix for all inbound-leg diagnostics.
+#pragma warning disable CA1848, CA1873
+        pc.oniceconnectionstatechange += (state) =>
+            _logger.LogInformation("DIAG-IN ICE state for {CallId}: {State}", invCallId, state);
+        pc.onconnectionstatechange += (state) =>
+            _logger.LogInformation("DIAG-IN connection state for {CallId}: {State}", invCallId, state);
+        pc.onicegatheringstatechange += (state) =>
+            _logger.LogInformation("DIAG-IN ICE gathering state for {CallId}: {State}", invCallId, state);
+        pc.onsignalingstatechange += () =>
+            _logger.LogInformation("DIAG-IN signaling state for {CallId}: {State}", invCallId, pc.signalingState);
+#pragma warning restore CA1848, CA1873
+
         var audioTrack = new MediaStreamTrack(
             SDPMediaTypesEnum.audio, false,
             new List<SDPAudioVideoMediaFormat>
@@ -757,6 +774,14 @@ public sealed class GvSipTransport : IAsyncDisposable
             var sdpBody = message[(sdpSep + 4)..].Trim();
             if (sdpBody.StartsWith("v=", StringComparison.Ordinal))
             {
+                // DIAG (diag/gv-srtp-receive): dump Google's FULL remote offer SDP. The a=setup
+                // role (active/passive/actpass), a=fingerprint, a=ice-ufrag, c=, m=audio, a=rtcp,
+                // and every a=candidate line are what answer the SRTP-role and ICE-target questions.
+                // Without the full offer we cannot tell whether Google offered actpass (and what we
+                // chose) or where Google says it will send media.
+#pragma warning disable CA1848, CA1873
+                _logger.LogInformation("DIAG-IN remote OFFER SDP for {CallId}:\n{Sdp}", invCallId, sdpBody);
+#pragma warning restore CA1848, CA1873
                 pc.setRemoteDescription(new RTCSessionDescriptionInit
                 {
                     type = RTCSdpType.offer,
@@ -768,6 +793,15 @@ public sealed class GvSipTransport : IAsyncDisposable
         var answer = pc.createAnswer();
         pc.setLocalDescription(answer);
 
+        // DIAG (diag/gv-srtp-receive): dump OUR local answer SDP. Our a=setup role is the other half
+        // of the DTLS-SRTP role question — if both sides end up active or both passive, the DTLS
+        // handshake completes against the wrong role and SRTP keys derive but never match Google's,
+        // which would present exactly as "keys derived but inboundFramesSent=0". Also surfaces which
+        // local IPv4 candidate(s) we advertised after the IPv4-only bind fix.
+#pragma warning disable CA1848, CA1873
+        _logger.LogInformation("DIAG-IN local ANSWER SDP for {CallId}:\n{Sdp}", invCallId, answer.sdp);
+#pragma warning restore CA1848, CA1873
+
         // Wire audio receive (same as outbound calls)
         var rtpCount = 0;
         const int inOpusChannels = 2;
@@ -775,8 +809,30 @@ public sealed class GvSipTransport : IAsyncDisposable
         var inEncoder = Concentus.OpusCodecFactory.CreateEncoder(48000, 1,
             Concentus.Enums.OpusApplication.OPUS_APPLICATION_VOIP);
 
+        // DIAG (diag/gv-srtp-receive): count EVERY raw inbound RTP packet that survives SRTP
+        // unprotect and reaches the handler, independent of payload type. The decode path below
+        // early-returns on payloadType != 111, so the existing code logged nothing for any other
+        // PT and nothing at all when zero packets arrive. This counter + log fires BEFORE any
+        // filter, so:
+        //   - if "DIAG-IN raw RTP arrived" NEVER appears post-DTLS  -> case (a) SRTP unprotect
+        //     failed OR case (b) media never arrived (cross-check with the SIPSorcery Debug
+        //     "SRTP unprotect"/"connectivity check" lines and the DIAG-IN ICE-state lines).
+        //   - if it appears with pt != 111 -> packets DO arrive and decrypt, but we drop them on
+        //     the payload-type filter (a codec/PT-negotiation issue, not a media-receive issue).
+        var rawRtpCount = 0;
         pc.OnRtpPacketReceived += (ep, mt, pkt) =>
         {
+            rawRtpCount++;
+            if (rawRtpCount <= 10 || rawRtpCount % 250 == 0)
+            {
+#pragma warning disable CA1848, CA1873
+                _logger.LogInformation(
+                    "DIAG-IN raw RTP arrived #{Count} for {CallId} from {Ep} type={MediaType} pt={PayloadType} len={Len} ssrc={Ssrc} seq={Seq}",
+                    rawRtpCount, invCallId, ep, mt, pkt.Header.PayloadType, pkt.Payload.Length,
+                    pkt.Header.SyncSource, pkt.Header.SequenceNumber);
+#pragma warning restore CA1848, CA1873
+            }
+
             if (mt != SDPMediaTypesEnum.audio || pkt.Header.PayloadType != 111) return;
             rtpCount++;
             var pcmBuf = new short[960 * inOpusChannels * 6];

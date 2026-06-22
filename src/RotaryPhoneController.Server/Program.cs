@@ -50,6 +50,17 @@ var builder = WebApplication.CreateBuilder(args);
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
+    // DIAG (diag/gv-srtp-receive): force SIPSorcery's own internal logs to Debug in-build,
+    // regardless of appsettings. The live box runs the Production profile, whose
+    // MinimumLevel.Default is "Information" — that would SUPPRESS the very ICE
+    // connectivity-check, candidate-nomination, DTLS handshake, and SRTP protect/unprotect
+    // messages we need to see why Google's inbound media never decrypts. These overrides
+    // run AFTER ReadFrom.Configuration so they win over any appsettings level, and they are
+    // SCOPED to the SIPSorcery namespaces so the journal isn't flooded with app Debug noise.
+    // (SIPSorcery internal logs reach Serilog because GvSipTransport calls
+    // SIPSorcery.LogFactory.Set(loggerFactory).) Remove this block to revert the diag build.
+    .MinimumLevel.Override("SIPSorcery", Serilog.Events.LogEventLevel.Debug)
+    .MinimumLevel.Override("SIPSorceryMedia", Serilog.Events.LogEventLevel.Debug)
     .CreateLogger();
 
 // Use Serilog
