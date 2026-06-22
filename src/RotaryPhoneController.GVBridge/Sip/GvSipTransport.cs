@@ -919,8 +919,12 @@ public sealed class GvSipTransport : IAsyncDisposable
     /// Uses the standard "connect a UDP socket to a remote and read its chosen local endpoint" trick
     /// (no packets are sent) — the same pattern used by SIPSorceryAdapter.GetLocalIPForTarget and
     /// GVTrunkAdapter. Falls back to the known box IPv4 if resolution fails.
+    ///
+    /// Internal (not private) so the unit suite can assert the post-condition that matters for the
+    /// fix: the returned address is ALWAYS IPv4 (AddressFamily.InterNetwork) — that IPv4-ness is the
+    /// entire correctness claim (an IPv6 bind would reintroduce the unreachable-ULA-candidate bug).
     /// </summary>
-    private IPAddress ResolveLocalIPv4()
+    internal IPAddress ResolveLocalIPv4()
     {
         // 216.239.36.145 = Google Voice SIP-over-WSS proxy (see class header). Resolving toward it
         // selects the box's IPv4 default-route source address.
