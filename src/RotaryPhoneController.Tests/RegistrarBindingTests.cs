@@ -95,4 +95,17 @@ public class RegistrarBindingTests
         Assert.True(binding.IsFresh(now));                      // exactly at expiry, within grace
         Assert.False(binding.IsFresh(now.AddMinutes(6)));       // beyond expiry + 5 min grace
     }
+
+    [Fact]
+    public void IsFresh_IsInclusive_AtExactlyExpiryPlusGrace()
+    {
+        // Pins the boundary: the comparison is <=, so a binding learned exactly expiry + StaleGrace
+        // ago is still fresh. Timestamps are derived from a fixed `now` — no wall-clock sleeps.
+        var now = DateTime.UtcNow;
+        var learnedAt = now - TimeSpan.FromSeconds(3600) - RegistrarBinding.StaleGrace;
+        var binding = new RegistrarBinding("rotaryphone", LearnedIp, 5060, LearnedIp, learnedAt, 3600);
+
+        Assert.True(binding.IsFresh(now));                        // exactly on the boundary
+        Assert.False(binding.IsFresh(now.AddSeconds(1)));         // one second past it
+    }
 }

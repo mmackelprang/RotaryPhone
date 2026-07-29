@@ -379,7 +379,14 @@ public class SIPSorceryAdapter : ISipAdapter
         _sipTransport?.SendResponseAsync(response);
     }
 
-    private void HandleRegister(SIPRequest sipRequest, SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint)
+    /// <summary>
+    /// Processes an inbound REGISTER: learns the device's real address (plan decision D3) and answers 200 OK.
+    ///
+    /// Internal rather than private so the binding-learning rules can be pinned by tests — notably that
+    /// the SOURCE address wins over the Contact host. Without a live transport _sipTransport is null and
+    /// the response send is a no-op, so tests need no socket.
+    /// </summary>
+    internal void HandleRegister(SIPRequest sipRequest, SIPEndPoint localSIPEndPoint, SIPEndPoint remoteEndPoint)
     {
         try
         {
