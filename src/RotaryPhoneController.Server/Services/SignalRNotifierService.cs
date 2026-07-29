@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.SignalR;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
+using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Server.Hubs;
 
@@ -18,7 +20,18 @@ public class SignalRNotifierService : IHostedService
     private readonly AppConfiguration _config;
     private readonly IBluetoothDeviceManager? _deviceManager;
     private readonly SipDiagnosticService _diagnostics;
+    private readonly IBellFailureTracker _bellFailureTracker;
+    private readonly IHT801ConfigService _ht801Service;
     private bool _lastBluetoothConnected;
+
+    // Cached HT801 reachability. The probe runs on a slow cadence inside the existing 1s monitor
+    // loop; BroadcastSystemStatusAsync reads these fields rather than probing synchronously, so a
+    // status broadcast is never blocked on a network timeout.
+    private static readonly TimeSpan Ht801ProbeInterval = TimeSpan.FromSeconds(30);
+    private bool? _ht801Reachable;
+    private DateTime? _ht801LastCheckedUtc;
+    private string? _ht801ProbedAddress;
+    private DateTime _ht801NextProbeUtc = DateTime.MinValue;
 
     public SignalRNotifierService(
         PhoneManagerService phoneManager,
@@ -28,6 +41,8 @@ public class SignalRNotifierService : IHostedService
         ISipAdapter sipAdapter,
         AppConfiguration config,
         SipDiagnosticService diagnostics,
+        IBellFailureTracker bellFailureTracker,
+        IHT801ConfigService ht801Service,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -37,6 +52,8 @@ public class SignalRNotifierService : IHostedService
         _sipAdapter = sipAdapter;
         _config = config;
         _diagnostics = diagnostics;
+        _bellFailureTracker = bellFailureTracker;
+        _ht801Service = ht801Service;
         _deviceManager = deviceManager;
     }
 
@@ -78,6 +95,49 @@ public class SignalRNotifierService : IHostedService
         _diagnostics.OnCallTimelineEvent += entry =>
             _hubContext.Clients.All.SendAsync("CallTimeline", entry);
 
+        // --- Bell failure surfacing ------------------------------------------------------------
+        // The socket-level failure path (CallManager) records straight into the tracker. This pair
+        // of subscriptions covers the delayed evidence: the INVITE reached the wire but the HT801
+        // never answered it (timeout) or refused it (4xx). That is the failure that actually fires
+        // in production — a UDP send to a dead-but-routable address succeeds at the socket level.
+        _diagnostics.OnSentInviteFailed += (callId, reason, target, detail) =>
+        {
+            var resolved = ResolveTargetPhone();
+            if (resolved == null) return;
+
+            var (phoneId, manager) = resolved.Value;
+            _bellFailureTracker.RecordFailure(phoneId, reason, manager.IncomingPhoneNumber,
+                manager.CallId, target, detail, DateTime.UtcNow);
+        };
+
+        _diagnostics.OnSentInviteSucceeded += callId =>
+        {
+            var resolved = ResolveTargetPhone();
+            resolved?.Manager.NotifyBellRingSucceeded();
+        };
+
+        // The ONLY emission point for the hub event. Both detection paths converge on the tracker
+        // first, so exactly one BellInviteFailed goes out per recorded failure.
+        _bellFailureTracker.OnBellFailure += (phoneId, record) =>
+            _hubContext.Clients.All.SendAsync("BellInviteFailed", new
+            {
+                phoneId,
+                callId = record.CallId,
+                direction = "Inbound",
+                callerNumber = record.CallerNumber,
+                occurredAtUtc = record.OccurredAtUtc,
+                reason = record.Reason.ToString(),
+                target = record.Target,
+                detail = record.Detail
+            });
+
+        _bellFailureTracker.OnBellRecovered += phoneId =>
+            _hubContext.Clients.All.SendAsync("BellRecovered", new
+            {
+                phoneId,
+                occurredAtUtc = DateTime.UtcNow
+            });
+
         // Track initial Bluetooth state
         _lastBluetoothConnected = _bluetoothAdapter.IsConnected;
 
@@ -85,6 +145,36 @@ public class SignalRNotifierService : IHostedService
         _ = MonitorBluetoothConnectionAsync(cancellationToken);
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Works out which phone an INVITE-outcome signal belongs to.
+    ///
+    /// Correlation rule: prefer the phone currently in <see cref="CallState.Ringing"/> — a sent
+    /// INVITE is a bell ring, and only a ringing phone has one outstanding. If none is Ringing, fall
+    /// back to the single registered phone (the overwhelmingly common single-ATA deployment). With
+    /// several phones and none ringing there is no honest answer, so the event is DROPPED rather
+    /// than pinned on an arbitrary phone — a misattributed bell alert is worse than a missing one.
+    /// </summary>
+    private (string PhoneId, CallManager Manager)? ResolveTargetPhone()
+    {
+        var phones = _phoneManager.GetAllPhones().ToList();
+
+        var ringing = phones.FirstOrDefault(p => p.CallManager.CurrentState == CallState.Ringing);
+        if (ringing.CallManager != null)
+        {
+            return (ringing.PhoneId, ringing.CallManager);
+        }
+
+        if (phones.Count == 1)
+        {
+            return (phones[0].PhoneId, phones[0].CallManager);
+        }
+
+        _logger.LogDebug(
+            "INVITE outcome could not be attributed to a phone ({Count} phones, none ringing) — dropping",
+            phones.Count);
+        return null;
     }
 
     private void OnStateChanged(string phoneId, CallManager manager)
@@ -116,6 +206,8 @@ public class SignalRNotifierService : IHostedService
                     await BroadcastSystemStatusAsync();
                 }
 
+                await ProbeHt801IfDueAsync();
+
                 await Task.Delay(1000, cancellationToken);
             }
             catch (OperationCanceledException)
@@ -126,6 +218,53 @@ public class SignalRNotifierService : IHostedService
             {
                 _logger.LogWarning(ex, "Error monitoring Bluetooth connection");
             }
+        }
+    }
+
+    /// <summary>
+    /// Probes HT801 reachability on a slow cadence from inside the 1-second monitor loop, and
+    /// broadcasts system status whenever the reachable value CHANGES — including the first
+    /// null -> bool transition, which is what turns "Unknown" into a real answer in the UI.
+    /// </summary>
+    private async Task ProbeHt801IfDueAsync()
+    {
+        if (DateTime.UtcNow < _ht801NextProbeUtc) return;
+        _ht801NextProbeUtc = DateTime.UtcNow + Ht801ProbeInterval;
+
+        var phoneId = _config.Phones.FirstOrDefault()?.Id ?? "default";
+        var address = _ht801Service.GetConfig(phoneId).IpAddress;
+
+        // No usable address is a CONFIGURATION problem, not an offline device. Leave the reachable
+        // value null ("Unknown") rather than reporting a device we never asked about as down.
+        if (string.IsNullOrWhiteSpace(address) || address == "0.0.0.0")
+        {
+            return;
+        }
+
+        bool? reachable;
+        try
+        {
+            var probe = await _ht801Service.TestConnectionAsync(address);
+            reachable = probe.Success;
+        }
+        catch (Exception ex)
+        {
+            // A probe that threw tells us nothing about the device — stay Unknown.
+            _logger.LogDebug(ex, "HT801 reachability probe failed for {Address}", address);
+            reachable = null;
+        }
+
+        var changed = reachable != _ht801Reachable || address != _ht801ProbedAddress;
+
+        _ht801Reachable = reachable;
+        _ht801LastCheckedUtc = DateTime.UtcNow;
+        _ht801ProbedAddress = address;
+
+        if (changed)
+        {
+            _logger.LogInformation("HT801 reachability changed: {Address} -> {Reachable}",
+                address, reachable?.ToString() ?? "Unknown");
+            await BroadcastSystemStatusAsync();
         }
     }
 
@@ -140,7 +279,12 @@ public class SignalRNotifierService : IHostedService
             BluetoothDeviceAddress = _bluetoothAdapter.ConnectedDeviceAddress,
             SipListening = _sipAdapter.IsListening,
             SipListenAddress = _config.SipListenAddress,
-            SipPort = _config.SipPort
+            SipPort = _config.SipPort,
+            // Read the cached probe result — never probe synchronously here, or every status
+            // broadcast would block on a network timeout.
+            Ht801IpAddress = _ht801ProbedAddress,
+            Ht801Reachable = _ht801Reachable,
+            Ht801LastCheckedUtc = _ht801LastCheckedUtc
         };
 
         _logger.LogDebug("Broadcasting system status: Bluetooth={Connected}, SIP={Listening}",

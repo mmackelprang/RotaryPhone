@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Configuration;
 using Xunit;
@@ -21,6 +22,11 @@ public class CallManagerTests
     public CallManagerTests()
     {
         _mockSipAdapter = new Mock<ISipAdapter>();
+        // SendInviteToHT801 now returns bool. Moq's default for bool is FALSE, which would silently
+        // mark every existing test as a bell failure — set the happy path explicitly.
+        _mockSipAdapter
+            .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
+            .Returns(true);
         _mockBluetoothAdapter = new Mock<IBluetoothHfpAdapter>();
         _mockRtpBridge = new Mock<IRtpAudioBridge>();
         _mockCallHistory = new Mock<ICallHistoryService>();
@@ -274,6 +280,111 @@ public class CallManagerTests
         // Assert — number should be accepted (not filtered by non-numeric guard)
         Assert.Equal(number, _callManager.DialedNumber);
     }
+
+    #region Bell failure surfacing
+
+    [Fact]
+    public void SimulateIncomingCall_WhenInviteFails_StaysRinging_AndRecordsBellFailure()
+    {
+        // Arrange — the INVITE cannot be put on the wire.
+        var sipAdapter = new Mock<ISipAdapter>();
+        sipAdapter
+            .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
+            .Returns(false);
+
+        var tracker = new Mock<IBellFailureTracker>();
+
+        var cm = new CallManager(
+            sipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            bellFailureTracker: tracker.Object);
+        cm.Initialize();
+
+        // Act
+        cm.SimulateIncomingCall();
+
+        // Assert — decision D8: the call genuinely IS ringing on the network leg, so the state must
+        // NOT be downgraded. Only the bell failed, and that is reported separately.
+        Assert.Equal(CallState.Ringing, cm.CurrentState);
+        Assert.True(cm.BellInviteFailed);
+
+        tracker.Verify(t => t.RecordFailure(
+            _phoneConfig.Id,
+            BellFailureReason.Unreachable,
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            _phoneConfig.HT801IpAddress,
+            It.IsAny<string>(),
+            It.IsAny<DateTime>()), Times.Once);
+    }
+
+    [Fact]
+    public void CallId_IsMintedWhileRinging_AndClearedOnHangUp()
+    {
+        // Arrange / Act
+        _callManager.SimulateIncomingCall();
+
+        // Assert — a call id exists for the duration of the call so a late bell-failure signal can
+        // be attributed to THIS call rather than "whatever is ringing now".
+        Assert.Equal(CallState.Ringing, _callManager.CurrentState);
+        var callId = _callManager.CallId;
+        Assert.False(string.IsNullOrEmpty(callId));
+
+        _callManager.HangUp();
+
+        Assert.Equal(CallState.Idle, _callManager.CurrentState);
+        Assert.Null(_callManager.CallId);
+    }
+
+    [Fact]
+    public void CallId_IsFreshPerCall()
+    {
+        _callManager.SimulateIncomingCall();
+        var first = _callManager.CallId;
+        _callManager.HangUp();
+
+        _callManager.SimulateIncomingCall();
+        var second = _callManager.CallId;
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void NotifyBellRingSucceeded_ClearsFailureFlag_AndTellsTheTracker()
+    {
+        var sipAdapter = new Mock<ISipAdapter>();
+        sipAdapter
+            .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
+            .Returns(false);
+        var tracker = new Mock<IBellFailureTracker>();
+
+        var cm = new CallManager(
+            sipAdapter.Object,
+            _mockBluetoothAdapter.Object,
+            _mockRtpBridge.Object,
+            _mockLogger.Object,
+            _phoneConfig,
+            49000,
+            _mockCallHistory.Object,
+            bellFailureTracker: tracker.Object);
+        cm.Initialize();
+        cm.SimulateIncomingCall();
+        Assert.True(cm.BellInviteFailed);
+
+        cm.NotifyBellRingSucceeded();
+
+        Assert.False(cm.BellInviteFailed);
+        tracker.Verify(t => t.RecordSuccess(_phoneConfig.Id), Times.Once);
+    }
+
+    #endregion
 
     #region Outbound GV InCall-ordering (defer bridge-start/InCall until cell answers)
 

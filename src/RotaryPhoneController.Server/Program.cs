@@ -13,6 +13,7 @@ using RotaryPhoneController.GVTrunk.Interfaces;
 using RotaryPhoneController.GVBridge.Extensions;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Models;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.Sip;
 using Microsoft.AspNetCore.SignalR;
@@ -176,6 +177,11 @@ builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
     return registry;
 });
 
+// Bell-failure state. Singleton and the SINGLE convergence point for "the bell did not ring":
+// the immediate socket-level failure (CallManager) and the delayed INVITE outcome
+// (SipDiagnosticService: timeout / 4xx) both feed it, and exactly one hub event is emitted from it.
+builder.Services.AddSingleton<IBellFailureTracker, BellFailureTracker>();
+
 // Register phone manager service
 builder.Services.AddSingleton<PhoneManagerService>(sp =>
 {
@@ -201,7 +207,8 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
         callManagerLogger,
         callHistoryService,
         deviceManager,
-        adapterRegistry);
+        adapterRegistry,
+        sp.GetRequiredService<IBellFailureTracker>());
 });
 
 // Register SignalR Notifier Service (Hosted Service)

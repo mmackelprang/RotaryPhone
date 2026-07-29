@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Configuration;
 
@@ -15,6 +16,7 @@ public class CallManager
     private readonly RotaryPhoneConfig _phoneConfig;
     private readonly IBluetoothDeviceManager? _deviceManager;
     private readonly ICallAdapterRegistry? _adapterRegistry;
+    private readonly IBellFailureTracker? _bellFailureTracker;
     private ICallAdapter? _boundAdapter;
     private readonly int _rtpPort;
     private CancellationTokenSource? _ringingTimeoutCts;
@@ -87,6 +89,21 @@ public class CallManager
     /// </summary>
     public DateTime? CallStartedAtUtc { get; private set; }
 
+    /// <summary>
+    /// Identifier for the current call, minted when the call begins (Ringing or Dialing) and cleared
+    /// on Idle. Exists so a late-arriving BellInviteFailed can be attributed to a SPECIFIC call rather
+    /// than "whatever is ringing now" — the failure signal lands seconds after Ringing, and a fast
+    /// hang-up-and-redial inside that window would otherwise mis-attribute the alert.
+    /// </summary>
+    public string? CallId { get; private set; }
+
+    /// <summary>
+    /// True when the most recent ring attempt is known to have failed — the call is genuinely ringing
+    /// on the network leg, but the rotary phone's bell is not. Reset when a new call begins and when
+    /// a ring demonstrably succeeds (see <see cref="NotifyBellRingSucceeded"/>).
+    /// </summary>
+    public bool BellInviteFailed { get; private set; }
+
     public CallManager(
         ISipAdapter sipAdapter,
         IBluetoothHfpAdapter bluetoothAdapter,
@@ -97,7 +114,9 @@ public class CallManager
         ICallHistoryService? callHistoryService = null,
         IBluetoothDeviceManager? deviceManager = null,
         ICallAdapterRegistry? adapterRegistry = null,
-        TimeSpan? outboundDialingTimeout = null)
+        TimeSpan? outboundDialingTimeout = null,
+        // LAST so existing positional call sites keep compiling.
+        IBellFailureTracker? bellFailureTracker = null)
     {
         _sipAdapter = sipAdapter;
         _bluetoothAdapter = bluetoothAdapter;
@@ -108,6 +127,7 @@ public class CallManager
         _callHistoryService = callHistoryService;
         _deviceManager = deviceManager;
         _adapterRegistry = adapterRegistry;
+        _bellFailureTracker = bellFailureTracker;
         // If an outbound GV call is placed but never reaches Active (cell never answers),
         // reset cleanly to Idle after this timeout so the call doesn't hang in Dialing.
         // Default ~45s; injectable for fast, deterministic unit tests.
@@ -235,6 +255,7 @@ public class CallManager
                         }
                         _activeDeviceAddress = connected[0].Address;
                     }
+                    BeginCall();
                     CurrentState = CallState.Dialing;
                     DialedNumber = string.Empty;
                     break;
@@ -293,9 +314,57 @@ public class CallManager
                 _activeDeviceAddress = connected[0].Address;
             }
 
+            BeginCall();
             CurrentState = CallState.Dialing;
             StartCall(number);
         }
+    }
+
+    /// <summary>
+    /// Marks the start of a new call: mints a fresh <see cref="CallId"/> and clears any bell-failure
+    /// flag left over from the previous call. Must be called BEFORE assigning
+    /// <see cref="CurrentState"/>, because that setter fires StateChanged and subscribers read both.
+    /// </summary>
+    private void BeginCall()
+    {
+        CallId = Guid.NewGuid().ToString("N");
+        BellInviteFailed = false;
+    }
+
+    /// <summary>
+    /// The INVITE could not be put on the wire, so the bell definitely did not ring.
+    ///
+    /// CRITICAL (plan decision D8): this deliberately does NOT change the call state. The call
+    /// genuinely IS ringing on the network leg — only the rotary phone's bell failed. Downgrading
+    /// the state would replace one lie with another.
+    /// </summary>
+    private void RecordBellInviteFailure()
+    {
+        _logger.LogError(
+            "Bell INVITE failed — call is ringing on the network leg but the rotary phone will not ring " +
+            "(phone {PhoneId}, callId {CallId})", _phoneConfig.Id, CallId);
+
+        BellInviteFailed = true;
+
+        _bellFailureTracker?.RecordFailure(
+            _phoneConfig.Id,
+            BellFailureReason.Unreachable,
+            IncomingPhoneNumber,
+            CallId,
+            _phoneConfig.HT801IpAddress,
+            "SIP INVITE could not be sent (socket error or SIP transport unavailable)",
+            DateTime.UtcNow);
+
+        // CurrentState was already assigned before the INVITE, so its setter has already fired
+        // StateChanged. Re-raise so subscribers observe the failure flag on the same call.
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Called when the bell demonstrably rang (HT801 answered the INVITE). Clears the failure flag.</summary>
+    public void NotifyBellRingSucceeded()
+    {
+        BellInviteFailed = false;
+        _bellFailureTracker?.RecordSuccess(_phoneConfig.Id);
     }
 
     private void HandleIncomingCall()
@@ -319,11 +388,18 @@ public class CallManager
         }
 
         IncomingPhoneNumber = "Unknown";
+        // Mint the call id BEFORE the state change so a StateChanged subscriber sees a
+        // consistent snapshot (state Ringing + the id that identifies this call).
+        BeginCall();
         CurrentState = CallState.Ringing;
-        
+
         // Send INVITE to HT801 to trigger ring
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
-        
+        var invited = _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+        if (!invited)
+        {
+            RecordBellInviteFailure();
+        }
+
         // Create call history entry for incoming call
         _currentCallHistory = new CallHistoryEntry
         {
@@ -360,6 +436,8 @@ public class CallManager
         }
 
         IncomingPhoneNumber = phoneNumber;
+        // Mint the call id BEFORE the state change — see SimulateIncomingCall.
+        BeginCall();
         CurrentState = CallState.Ringing;
 
         // Start a ringing timeout — if the call isn't answered or cancelled within 60s,
@@ -376,6 +454,9 @@ public class CallManager
                 _sipAdapter.CancelPendingInvite();
                 CurrentState = CallState.Idle;
                 IncomingPhoneNumber = null;
+                // CallId is cleared on every path back to Idle, not just HangUp — a stale id would
+                // let a late bell-failure signal be attributed to a call that no longer exists.
+                CallId = null;
                 _currentCallHistory = null;
                 StateChanged?.Invoke();
             }
@@ -386,7 +467,12 @@ public class CallManager
         // will bind to this same port so HT801's RTP arrives at the correct destination.
         _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP} (SDP RTP port {Port})",
             _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
+        var invited = _sipAdapter.SendInviteToHT801(
+            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
+        if (!invited)
+        {
+            RecordBellInviteFailure();
+        }
 
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
@@ -772,6 +858,7 @@ public class CallManager
             CurrentState = CallState.Idle;
             DialedNumber = string.Empty;
             IncomingPhoneNumber = null;
+            CallId = null;
             CallStartedAtUtc = null;
             _activeDeviceAddress = null;
             _negotiatedRtpPort = null;
