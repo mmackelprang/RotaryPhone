@@ -3,6 +3,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Services;
 
@@ -18,6 +19,7 @@ public class DiagnosticsController : ControllerBase
     private readonly GVApiAdapter _gvAdapter;
     private readonly GVAudioBridgeService _gvAudioBridge;
     private readonly AppConfiguration _config;
+    private readonly IRegistrarBindingStore _bindingStore;
     private readonly ILogger<DiagnosticsController> _logger;
 
     public DiagnosticsController(
@@ -27,6 +29,7 @@ public class DiagnosticsController : ControllerBase
         GVApiAdapter gvAdapter,
         GVAudioBridgeService gvAudioBridge,
         AppConfiguration config,
+        IRegistrarBindingStore bindingStore,
         ILogger<DiagnosticsController> logger)
     {
         _diagnostics = diagnostics;
@@ -35,7 +38,30 @@ public class DiagnosticsController : ControllerBase
         _gvAdapter = gvAdapter;
         _gvAudioBridge = gvAudioBridge;
         _config = config;
+        _bindingStore = bindingStore;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Learned registrar bindings — i.e. where INVITEs will ACTUALLY be sent.
+    /// Use this, NOT /api/phone/system-status, to verify HT801 addressing: system-status reports the
+    /// configured address, which is a different value and can disagree.
+    /// </summary>
+    [HttpGet("sip-registrations")]
+    public IActionResult GetSipRegistrations()
+    {
+        var now = DateTime.UtcNow;
+
+        return Ok(_bindingStore.All().Select(b => new
+        {
+            addressOfRecord = b.AddressOfRecord,
+            address = b.Address,
+            port = b.Port,
+            contactHost = b.ContactHost,
+            learnedAtUtc = b.LearnedAtUtc,
+            expiresSeconds = b.ExpiresSeconds,
+            isFresh = b.IsFresh(now)
+        }));
     }
 
     /// <summary>

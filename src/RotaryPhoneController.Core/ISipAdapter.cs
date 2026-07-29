@@ -18,7 +18,22 @@ public interface ISipAdapter
     /// </summary>
     bool IsListening { get; }
 
-    void SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000);
+    /// <summary>
+    /// Rings the HT801 by sending it a SIP INVITE.
+    /// </summary>
+    /// <param name="extensionToRing">SIP extension to ring (e.g. "1000").</param>
+    /// <param name="targetIP">
+    /// Cold-start fallback address. Implementations that learn a registrar binding from the device's
+    /// own REGISTER prefer the learned address and use this only until one exists (or when it is stale).
+    /// </param>
+    /// <param name="localRtpPort">RTP port to advertise in the INVITE's SDP.</param>
+    /// <returns>
+    /// True when the INVITE reached the wire. False on a socket-level failure or when no SIP
+    /// transport is available — meaning the bell definitely did NOT ring. NOTE: a UDP send to a
+    /// dead-but-routable address still succeeds, so `true` is not proof the bell rang; the
+    /// INVITE-response path (SipDiagnosticService) supplies that.
+    /// </returns>
+    bool SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000);
 
     /// <summary>
     /// Cancel a pending SIP INVITE (stop the rotary phone from ringing).

@@ -198,9 +198,12 @@ public class GVTrunkAdapter : ITrunkAdapter, IDisposable
         return _activeCallId;
     }
 
-    public void SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
+    public bool SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
     {
         _logger.Debug("GVTrunk SendInviteToHT801 called — delegating to primary SIP adapter");
+        // Returns false because this adapter never puts an INVITE on the wire — it only delegates.
+        // No bell was rung here, so claiming success would be a lie to the bell-failure tracker.
+        return false;
     }
 
     public void CancelPendingInvite()

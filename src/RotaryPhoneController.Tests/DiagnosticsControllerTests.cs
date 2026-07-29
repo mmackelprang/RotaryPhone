@@ -147,6 +147,7 @@ public class DiagnosticsControllerTests
       _gvAdapter,
       _gvAudioBridge,
       _config,
+      _bindingStore,
       NullLogger<DiagnosticsController>.Instance);
   }
 

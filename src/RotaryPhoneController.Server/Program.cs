@@ -14,6 +14,7 @@ using RotaryPhoneController.GVBridge.Extensions;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.Core.Diagnostics;
+using RotaryPhoneController.Core.Sip;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using Serilog;
@@ -273,6 +274,10 @@ builder.Services.AddSingleton<IRtpAudioBridge>(sp =>
     return new MockRtpAudioBridge(mockLogger);
 });
 
+// Registrar bindings learned from the HT801's own REGISTER. Singleton: shared by the SIP adapter
+// (writer + reader), the GV audio bridge (reader), and the diagnostics endpoint (reader).
+builder.Services.AddSingleton<IRegistrarBindingStore, RegistrarBindingStore>();
+
 // Register Core services as singletons
 builder.Services.AddSingleton<ISipAdapter>(sp =>
 {
@@ -284,8 +289,9 @@ builder.Services.AddSingleton<ISipAdapter>(sp =>
         .ReadFrom.Configuration(builder.Configuration)
         .Enrich.FromLogContext()
         .CreateLogger();
-    
-    var adapter = new SIPSorceryAdapter(serilogLogger, config);
+
+    var adapter = new SIPSorceryAdapter(
+        serilogLogger, config, sp.GetRequiredService<IRegistrarBindingStore>());
     adapter.StartListening();
     return adapter;
 });

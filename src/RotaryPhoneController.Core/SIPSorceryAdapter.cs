@@ -6,6 +6,7 @@ using SIPSorcery.SIP;
 using SIPSorcery.SIP.App;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
+using RotaryPhoneController.Core.Sip;
 
 namespace RotaryPhoneController.Core;
 
@@ -18,6 +19,13 @@ public class SIPSorceryAdapter : ISipAdapter
     private readonly int _localPort;
     private SIPRequest? _pendingInviteRequest;
     private bool _inviteAnswered;
+
+    /// <summary>
+    /// Where registered endpoints can ACTUALLY be reached, learned from their own REGISTERs.
+    /// Optional so the parameterless-ish test constructors and any non-DI caller keep working;
+    /// when null, addressing falls back to the configured value exactly as before.
+    /// </summary>
+    private readonly IRegistrarBindingStore? _bindingStore;
 
     public event Action<bool>? OnHookChange;
     public event Action<string>? OnDigitsReceived;
@@ -35,18 +43,22 @@ public class SIPSorceryAdapter : ISipAdapter
     /// </summary>
     public bool IsListening => _sipTransport != null;
 
-    public SIPSorceryAdapter(ILogger logger, AppConfiguration config)
+    public SIPSorceryAdapter(ILogger logger, AppConfiguration config,
+        IRegistrarBindingStore? bindingStore = null)
     {
         _logger = logger;
         _localIPAddress = config.SipListenAddress;
         _localPort = config.SipPort;
+        _bindingStore = bindingStore;
     }
 
-    public SIPSorceryAdapter(ILogger logger, string localIPAddress = "0.0.0.0", int localPort = 5060)
+    public SIPSorceryAdapter(ILogger logger, string localIPAddress = "0.0.0.0", int localPort = 5060,
+        IRegistrarBindingStore? bindingStore = null)
     {
         _logger = logger;
         _localIPAddress = localIPAddress;
         _localPort = localPort;
+        _bindingStore = bindingStore;
     }
 
     public void StartListening()
@@ -379,6 +391,58 @@ public class SIPSorceryAdapter : ISipAdapter
             _logger.Debug("Processing REGISTER from {Remote}, Contact={Contact}, Expires={Expires}",
                 remoteEndPoint, contact?.ContactURI, expires);
 
+            // Learn where this device actually lives. RFC 3261 nominates the Contact URI, but a
+            // misconfigured ATA can advertise a stale host there, whereas the source address of the
+            // REGISTER just provably delivered a datagram. Prefer the source; keep Contact for
+            // diagnostics; warn when they disagree. See plan decision D3.
+            var addressOfRecord = sipRequest.Header.To?.ToURI?.User
+                                  ?? sipRequest.Header.From?.FromURI?.User;
+            var contactHost = contact?.ContactURI?.Host;
+
+            if (!string.IsNullOrEmpty(addressOfRecord) && _bindingStore != null)
+            {
+                // NOTE: read Header.Expires DIRECTLY here. The `expires` local above coerces
+                // <= 0 to 3600 for the RESPONSE; a genuine de-registration (Expires: 0) must
+                // still be honoured for binding purposes.
+                if (sipRequest.Header.Expires == 0)
+                {
+                    // Explicit de-registration — drop the binding so we don't ring a device that
+                    // has told us it is going away.
+                    _bindingStore.Remove(addressOfRecord);
+                    _logger.Information("Registrar binding removed for {Aor} (Expires: 0)", addressOfRecord);
+                }
+                else
+                {
+                    // SIPSorcery models Expires as long; RegistrarBinding stores seconds as int.
+                    // Clamp rather than cast blindly — an absurd header value must not wrap negative
+                    // and make the binding instantly stale.
+                    var expiresSeconds = (int)Math.Clamp(expires, 1L, int.MaxValue);
+
+                    var binding = new RegistrarBinding(
+                        addressOfRecord,
+                        remoteEndPoint.Address.ToString(),
+                        remoteEndPoint.Port,
+                        contactHost,
+                        DateTime.UtcNow,
+                        expiresSeconds);
+
+                    _bindingStore.Record(binding);
+
+                    _logger.Information(
+                        "Learned registrar binding: {Aor} -> {Address}:{Port} (contact={ContactHost}, expires={Expires}s)",
+                        binding.AddressOfRecord, binding.Address, binding.Port,
+                        contactHost ?? "(none)", expires);
+
+                    if (contactHost != null &&
+                        !contactHost.Equals(binding.Address, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.Warning(
+                            "REGISTER Contact host {ContactHost} differs from source address {Source} — " +
+                            "using the source address for INVITEs", contactHost, binding.Address);
+                    }
+                }
+            }
+
             var response = SIPResponse.GetResponse(sipRequest, SIPResponseStatusCodesEnum.Ok, null);
             response.Header.Expires = expires;
 
@@ -426,16 +490,60 @@ public class SIPSorceryAdapter : ISipAdapter
         return null;
     }
 
-    public void SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
+    /// <summary>
+    /// Chooses the address an INVITE is actually sent to: a fresh learned registrar binding when one
+    /// exists, otherwise the configured address. The log line this emits is the ONLY trustworthy
+    /// answer to "which address will the bell be rung at" — /api/phone/system-status reports the
+    /// configured value and can disagree.
+    /// </summary>
+    internal string ResolveTargetAddress(string extensionToRing, string configuredIP)
+    {
+        var binding = _bindingStore?.Get(extensionToRing) ?? _bindingStore?.GetSingle();
+
+        if (binding == null)
+        {
+            _logger.Warning(
+                "No registrar binding learned yet — falling back to configured HT801 address " +
+                "{ConfiguredIP}. The bell will not ring if that address is stale.", configuredIP);
+            return configuredIP;
+        }
+
+        if (!binding.IsFresh(DateTime.UtcNow))
+        {
+            _logger.Warning(
+                "Registrar binding for {Aor} is stale (learned {LearnedAt:u}, expiry {Expires}s) — " +
+                "falling back to configured address {ConfiguredIP}",
+                binding.AddressOfRecord, binding.LearnedAtUtc, binding.ExpiresSeconds, configuredIP);
+            return configuredIP;
+        }
+
+        if (!binding.Address.Equals(configuredIP, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.Warning(
+                "Configured HT801 address {ConfiguredIP} does not match the learned address " +
+                "{LearnedIP} — using the learned address. Update " +
+                "RotaryPhone:Phones[].HT801IpAddress (see docs/HT801-ADDRESS.md).",
+                configuredIP, binding.Address);
+        }
+
+        return binding.Address;
+    }
+
+    public bool SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000)
     {
         try
         {
+            // Single chokepoint: every caller (CallManager x2, DiagnosticsController) routes through
+            // here, so resolution lives here rather than at each call site. `targetIP` becomes the
+            // cold-start fallback for the window before the first REGISTER arrives.
+            targetIP = ResolveTargetAddress(extensionToRing, targetIP);
+
             _logger.Information("Sending INVITE to HT801 at {IP} for extension {Extension}", targetIP, extensionToRing);
 
             if (_sipTransport == null)
             {
                 _logger.Error("SIP transport is not initialized. Call StartListening() first.");
-                return;
+                return false;
             }
 
             // Resolve actual local IP when listening on 0.0.0.0
@@ -493,17 +601,18 @@ public class SIPSorceryAdapter : ISipAdapter
                 _logger.Error("INVITE send failed with socket error: {Error}", sendResult);
                 LogSipMessage(SipDirection.Sent, "INVITE", $"{localIP}:{_localPort}", targetEndpoint.ToString(),
                     callId: inviteRequest.Header.CallId, note: $"Send failed: {sendResult}");
+                return false;
             }
-            else
-            {
-                _logger.Information("INVITE sent successfully to HT801");
-                LogSipMessage(SipDirection.Sent, "INVITE", $"{localIP}:{_localPort}", targetEndpoint.ToString(),
-                    callId: inviteRequest.Header.CallId);
-            }
+
+            _logger.Information("INVITE sent successfully to HT801");
+            LogSipMessage(SipDirection.Sent, "INVITE", $"{localIP}:{_localPort}", targetEndpoint.ToString(),
+                callId: inviteRequest.Header.CallId);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.Error(ex, "Failed to send INVITE to HT801");
+            return false;
         }
     }
 
