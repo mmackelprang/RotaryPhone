@@ -355,9 +355,10 @@ public class CallManager
             "SIP INVITE could not be sent (socket error or SIP transport unavailable)",
             DateTime.UtcNow);
 
-        // CurrentState was already assigned before the INVITE, so its setter has already fired
-        // StateChanged. Re-raise so subscribers observe the failure flag on the same call.
-        StateChanged?.Invoke();
+        // Deliberately NO StateChanged re-raise here. The call state has not changed (decision D8), and
+        // re-raising would re-broadcast IncomingCall for a call already announced — which can re-trigger
+        // the incoming-call UI in the consumer. The failure is announced on its own channel: the tracker's
+        // OnBellFailure -> the BellInviteFailed hub event.
     }
 
     /// <summary>Called when the bell demonstrably rang (HT801 answered the INVITE). Clears the failure flag.</summary>
