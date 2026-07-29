@@ -8,6 +8,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
@@ -23,6 +24,7 @@ public class DiagnosticsControllerTests
   private readonly GVApiAdapter _gvAdapter;
   private readonly GVAudioBridgeService _gvAudioBridge;
   private readonly AppConfiguration _config;
+  private readonly RegistrarBindingStore _bindingStore;
 
   public DiagnosticsControllerTests()
   {
@@ -30,10 +32,13 @@ public class DiagnosticsControllerTests
     _ht801Service = new Mock<IHT801ConfigService>();
     _sipAdapter = new Mock<ISipAdapter>();
     _gvAdapter = CreateGvAdapter();
+    _config = new AppConfiguration();
+    _bindingStore = new RegistrarBindingStore();
     _gvAudioBridge = new GVAudioBridgeService(
       Options.Create(new GVBridgeConfig()),
-      NullLogger<GVAudioBridgeService>.Instance);
-    _config = new AppConfiguration();
+      NullLogger<GVAudioBridgeService>.Instance,
+      _config,
+      _bindingStore);
   }
 
   // --- Audio Bridge endpoint tests ---

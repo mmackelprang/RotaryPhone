@@ -1,6 +1,8 @@
 using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.GVBridge.Audio;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Sip;
@@ -17,6 +19,8 @@ public class GVAudioBridgeService : IDisposable
 {
     private readonly GVBridgeConfig _config;
     private readonly ILogger<GVAudioBridgeService> _logger;
+    private readonly AppConfiguration _appConfig;
+    private readonly IRegistrarBindingStore _bindingStore;
 
     private GvSipTransport? _sipTransport;
     private string? _activeCallId;
@@ -34,10 +38,14 @@ public class GVAudioBridgeService : IDisposable
 
     public GVAudioBridgeService(
         IOptions<GVBridgeConfig> config,
-        ILogger<GVAudioBridgeService> logger)
+        ILogger<GVAudioBridgeService> logger,
+        AppConfiguration appConfig,
+        IRegistrarBindingStore bindingStore)
     {
         _config = config.Value;
         _logger = logger;
+        _appConfig = appConfig;
+        _bindingStore = bindingStore;
     }
 
     /// <summary>
@@ -76,7 +84,15 @@ public class GVAudioBridgeService : IDisposable
         // Resolve effective ports: prefer negotiated values, fall back to config.
         var effectiveLocalPort = localRtpPort ?? _config.LocalRtpPort;
         var effectiveRemotePort = remoteRtpPort ?? _config.HT801RtpPort;
-        var effectiveRemoteIp = remoteRtpAddress ?? _config.HT801Ip;
+        // Fallback address when the SDP didn't carry one: prefer the learned registrar binding,
+        // then the single configured phone. There is exactly ONE HT801 address key in this system —
+        // RotaryPhone:Phones[].HT801IpAddress. See docs/HT801-ADDRESS.md.
+        var effectiveRemoteIp = remoteRtpAddress
+            ?? _bindingStore.GetSingle()?.Address
+            ?? _appConfig.Phones.FirstOrDefault()?.HT801IpAddress
+            ?? throw new InvalidOperationException(
+                   "No HT801 address available for the GV audio bridge (no SDP address, no learned " +
+                   "registrar binding, no configured phone).");
 
         _logger.LogInformation(
             "GVAudioBridge resolving ports — local: {LocalPort} (override={LocalOverride}), " +
