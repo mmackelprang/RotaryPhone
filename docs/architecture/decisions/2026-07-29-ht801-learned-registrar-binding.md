@@ -84,9 +84,12 @@ fallback would never engage, because a wrong-but-present Contact is not a missin
 **Decision: when a fresh learned binding exists, it is the INVITE target. The configured address is the
 cold-start fallback and the stale fallback.**
 
-Resolution happens at a single chokepoint inside `SendInviteToHT801`, so all three INVITE call sites
-(`CallManager` × 2, `DiagnosticsController`) get the same answer — a divergence between the "ring test"
-and a real call was itself part of the original bug's camouflage.
+Resolution happens at a single chokepoint, `ISipAdapter.ResolveHt801Address`. Its callers are
+`SendInviteToHT801` (as a backstop for anything that did not pre-resolve), `CallManager`,
+`DiagnosticsController.TestRing`, the GV audio bridge and the HT801 reachability probe — so every leg
+of a call, and every diagnostic that claims to report the target, gets the same answer. A divergence
+between the "ring test" and a real call was itself part of the original bug's camouflage, and a
+divergence between the bell and the audio bridge is the same failure class one leg over.
 
 | Situation | Target used | Logged |
 |---|---|---|
@@ -149,7 +152,7 @@ That property is the point.
 | Risk | Assessment / mitigation |
 |---|---|
 | **A spoofed REGISTER on the LAN** could teach us a wrong address | Accepted. The deployment is a single-ATA, no-NAT home LAN; an attacker able to send SIP to the service from that LAN has better options than misdirecting a doorbell-grade INVITE. Mitigated in depth by the freshness bound (a spoof must be sustained), the configured/learned mismatch warning (a spoof is loudly logged), the observable `sip-registrations` endpoint (a spoof is inspectable), and the configured fallback (a spoof that stops is corrected within one expiry window). No SIP authentication on REGISTER is added here; if the threat model ever changes, digest auth on REGISTER is the correct fix, not abandoning learned bindings |
-| **`GetSingle()` ambiguity** if a second SIP device ever registers | By design, `GetSingle()` returns `null` when more than one binding exists and no AOR matches — the resolver then falls back to configuration rather than guessing. Covered by `Resolve_DoesNotGuess_WhenMultipleBindingsAndNoAorMatch`. This is a deliberate degradation to today's behaviour, not a failure |
+| **`GetSingle()` ambiguity** if a second SIP device ever registers | By design, `GetSingle()` returns `null` when more than one binding exists and no AOR matches — the resolver then falls back to configuration rather than guessing. Covered by `Resolve_DoesNotGuess_WhenMultipleBindingsAndNoAorMatch`. This is a deliberate degradation to today's behaviour, not a failure. It is also **uniform**: every caller (bell, RTP bridge, GV audio bridge, ring test, reachability probe) reaches it through `ResolveHt801Address`, which tries `Get(extension)` before `GetSingle()`. Reimplementing the tail elsewhere would break that uniformity — a `GetSingle()`-only copy falls back to configuration in the two-binding case where the resolver would still match on the AOR |
 
 `GetSingle()` exists because the HT801 registers under the AOR `rotaryphone` while we ring extension
 `1000`. An exact-AOR-match-only lookup would have compiled cleanly, passed unit tests, and never
@@ -158,10 +161,6 @@ engaged in production — the self-healing would have been decorative.
 ### Costs accepted
 
 - Cold start still depends on configuration being correct, for up to ~50 minutes.
-- `CallManager sending INVITE to <ip>` logs the **configured** address (it is emitted before
-  resolution) while `INVITE target endpoint: udp:<ip>:5060` logs the **resolved** one. During a
-  mismatch these disagree, which is confusing on first encounter. Documented prominently in
-  `docs/HT801-ADDRESS.md` §5 rather than papered over — the latter line is authoritative.
 
 ---
 

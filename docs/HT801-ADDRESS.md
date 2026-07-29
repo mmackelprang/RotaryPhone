@@ -86,7 +86,7 @@ regression.
 
 | Signal | Where | What it proves |
 |---|---|---|
-| `CallManager sending INVITE to 1000@<ip>` | journal | A ring was attempted (see the caveat below on which address this prints) |
+| `CallManager sending INVITE to 1000@<ip>` | journal | A ring was attempted, at the **resolved** address — `CallManager` resolves before it logs. Must agree with `INVITE target endpoint`; a disagreement is a bug |
 | `INVITE target endpoint: udp:<ip>:5060` | journal | **The address the datagram actually went to.** Authoritative |
 | `Learned registrar binding: <aor> -> <ip>:5060` | journal | Where the device says it is, from the source address of its REGISTER |
 | `GET /api/diagnostics/sip-registrations` | REST | The current learned bindings — i.e. where INVITEs will actually go |

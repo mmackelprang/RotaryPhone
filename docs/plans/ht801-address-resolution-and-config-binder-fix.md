@@ -1102,12 +1102,13 @@ not raw `ssh`. Deploy overwrites `appsettings.json` and **preserves** `appsettin
     ```
     Configured HT801 address 192.168.86.99 does not match the learned address 192.168.86.240 —
       using the learned address. Update RotaryPhone:Phones[].HT801IpAddress
-    CallManager sending INVITE to 1000@192.168.86.99 ...
+    CallManager sending INVITE to 1000@192.168.86.240 ...
     INVITE target endpoint: udp:192.168.86.240:5060
     ```
-    and **the bell rings anyway**. Note the deliberate discrepancy between the `CallManager` log
-    (configured) and `INVITE target endpoint` (resolved) — the latter is authoritative. Restore the
-    correct configured value afterwards.
+    and **the bell rings anyway**. Both address lines must AGREE — `CallManager` resolves before it
+    logs, so it prints the same resolved address the transport does. A disagreement between those two
+    lines is a bug, not an expected quirk: it means something is targeting an address the resolver did
+    not choose. Restore the correct configured value afterwards.
 11. **Cold-start fallback proof:** restart the service and place a call *before* any REGISTER arrives.
     Expect `No registrar binding learned yet — falling back to configured HT801 address ...` and a
     ringing bell (because the configured value is now correct).
