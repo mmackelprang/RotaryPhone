@@ -32,8 +32,8 @@ public class CallManagerTests
         // and CallManager would ring a null address. Tests that care about resolution live in
         // BellAndAudioTargetAgreementTests, which wires the real resolver.
         _mockSipAdapter
-            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns((string _, string configured) => configured);
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns((string _, string configured, bool _) => configured);
         _mockBluetoothAdapter = new Mock<IBluetoothHfpAdapter>();
         _mockRtpBridge = new Mock<IRtpAudioBridge>();
         _mockCallHistory = new Mock<ICallHistoryService>();
@@ -298,6 +298,12 @@ public class CallManagerTests
         sipAdapter
             .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
             .Returns(false);
+        // Same identity passthrough as the fixture-level mock. Without it Moq returns null for
+        // ResolveHt801Address and the target assertion below would be satisfied by a fallback rather
+        // than by resolution — a weaker test than it reads.
+        sipAdapter
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns((string _, string configured, bool _) => configured);
 
         var tracker = new Mock<IBellFailureTracker>();
 
@@ -370,6 +376,10 @@ public class CallManagerTests
         sipAdapter
             .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
             .Returns(false);
+        // Same identity passthrough as the fixture-level mock — see the note in the bell-failure test.
+        sipAdapter
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns((string _, string configured, bool _) => configured);
         var tracker = new Mock<IBellFailureTracker>();
 
         var cm = new CallManager(

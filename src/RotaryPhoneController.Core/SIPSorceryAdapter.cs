@@ -506,35 +506,69 @@ public class SIPSorceryAdapter : ISipAdapter
     /// This is the single resolver for the whole system. Both the INVITE that rings the bell and the
     /// RTP endpoint that carries the audio go through it, so the two legs cannot disagree. It is
     /// idempotent: resolving an already-resolved address returns that address unchanged.
+    ///
+    /// <paramref name="logDiagnostics"/> controls only the LEVEL of the decision log, never the
+    /// address returned. It is called several times per ring plus once every 30 seconds by the
+    /// reachability probe, so repeat and background callers pass false and the same information
+    /// lands at Debug — one warning per real decision, and quiet never means invisible.
     /// </summary>
-    public string ResolveHt801Address(string extensionToRing, string configuredIP)
+    public string ResolveHt801Address(string extensionToRing, string configuredIP, bool logDiagnostics = true)
     {
         var binding = _bindingStore?.Get(extensionToRing) ?? _bindingStore?.GetSingle();
 
         if (binding == null)
         {
-            _logger.Warning(
+            const string NoBindingTemplate =
                 "No registrar binding learned yet — falling back to configured HT801 address " +
-                "{ConfiguredIP}. The bell will not ring if that address is stale.", configuredIP);
+                "{ConfiguredIP}. The bell will not ring if that address is stale.";
+
+            if (logDiagnostics)
+            {
+                _logger.Warning(NoBindingTemplate, configuredIP);
+            }
+            else
+            {
+                _logger.Debug(NoBindingTemplate, configuredIP);
+            }
+
             return configuredIP;
         }
 
         if (!binding.IsFresh(DateTime.UtcNow))
         {
-            _logger.Warning(
+            const string StaleTemplate =
                 "Registrar binding for {Aor} is stale (learned {LearnedAt:u}, expiry {Expires}s) — " +
-                "falling back to configured address {ConfiguredIP}",
-                binding.AddressOfRecord, binding.LearnedAtUtc, binding.ExpiresSeconds, configuredIP);
+                "falling back to configured address {ConfiguredIP}";
+
+            if (logDiagnostics)
+            {
+                _logger.Warning(StaleTemplate,
+                    binding.AddressOfRecord, binding.LearnedAtUtc, binding.ExpiresSeconds, configuredIP);
+            }
+            else
+            {
+                _logger.Debug(StaleTemplate,
+                    binding.AddressOfRecord, binding.LearnedAtUtc, binding.ExpiresSeconds, configuredIP);
+            }
+
             return configuredIP;
         }
 
         if (!binding.Address.Equals(configuredIP, StringComparison.OrdinalIgnoreCase))
         {
-            _logger.Warning(
+            const string MismatchTemplate =
                 "Configured HT801 address {ConfiguredIP} does not match the learned address " +
                 "{LearnedIP} — using the learned address. Update " +
-                "RotaryPhone:Phones[].HT801IpAddress (see docs/HT801-ADDRESS.md).",
-                configuredIP, binding.Address);
+                "RotaryPhone:Phones[].HT801IpAddress (see docs/HT801-ADDRESS.md).";
+
+            if (logDiagnostics)
+            {
+                _logger.Warning(MismatchTemplate, configuredIP, binding.Address);
+            }
+            else
+            {
+                _logger.Debug(MismatchTemplate, configuredIP, binding.Address);
+            }
         }
 
         return binding.Address;
@@ -544,10 +578,13 @@ public class SIPSorceryAdapter : ISipAdapter
     {
         try
         {
-            // Single chokepoint: every caller (CallManager x2, DiagnosticsController) routes through
-            // here, so resolution lives here rather than at each call site. `targetIP` becomes the
-            // cold-start fallback for the window before the first REGISTER arrives.
-            targetIP = ResolveHt801Address(extensionToRing, targetIP);
+            // Backstop, not the chokepoint: the chokepoint is ResolveHt801Address itself. Both
+            // production callers (CallManager, DiagnosticsController) now pre-resolve — loudly — so
+            // that the bell and the RTP bridge cannot target different hosts. This pass exists so a
+            // caller that did NOT pre-resolve still gets a correct address, and resolution is
+            // idempotent so re-resolving an already-resolved address is a no-op. It logs quietly
+            // precisely so it does not duplicate the decision line the pre-resolving callers emit.
+            targetIP = ResolveHt801Address(extensionToRing, targetIP, logDiagnostics: false);
 
             _logger.Information("Sending INVITE to HT801 at {IP} for extension {Extension}", targetIP, extensionToRing);
 

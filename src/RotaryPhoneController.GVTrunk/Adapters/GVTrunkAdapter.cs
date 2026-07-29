@@ -210,8 +210,12 @@ public class GVTrunkAdapter : ITrunkAdapter, IDisposable
     /// This adapter learns no registrar bindings — it never receives the HT801's REGISTERs; the
     /// primary SIP adapter does. With nothing learned, the honest answer is the configured address,
     /// which is exactly what the primary adapter falls back to in the same situation.
+    ///
+    /// <c>logDiagnostics</c> is accepted for interface parity and ignored: there is no decision here
+    /// to journal, loudly or quietly.
     /// </summary>
-    public string ResolveHt801Address(string extensionToRing, string configuredIP) => configuredIP;
+    public string ResolveHt801Address(string extensionToRing, string configuredIP, bool logDiagnostics = true)
+        => configuredIP;
 
     public void CancelPendingInvite()
     {

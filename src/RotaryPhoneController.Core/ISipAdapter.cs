@@ -48,7 +48,16 @@ public interface ISipAdapter
     /// the exact failure class this work exists to remove, so there is ONE resolver and every leg
     /// goes through it. Do not reimplement this precedence anywhere else.
     /// </remarks>
-    string ResolveHt801Address(string extensionToRing, string configuredIP);
+    /// <param name="extensionToRing">SIP extension whose registrar binding to look up (e.g. "1000").</param>
+    /// <param name="configuredIP">Configured fallback address, used when no fresh binding exists.</param>
+    /// <param name="logDiagnostics">
+    /// Whether to journal the resolution decision at warning level. Pass <c>false</c> for repeat or
+    /// background resolutions (a second pass over an already-resolved address, the 30-second
+    /// reachability probe) so the journal carries exactly ONE line per real decision instead of one
+    /// per caller. Quiet is not silent: the same information is still logged at Debug. The address
+    /// returned is identical either way.
+    /// </param>
+    string ResolveHt801Address(string extensionToRing, string configuredIP, bool logDiagnostics = true);
 
     /// <summary>
     /// Cancel a pending SIP INVITE (stop the rotary phone from ringing).

@@ -45,8 +45,9 @@ public class BellAndAudioTargetAgreementTests
         var sipAdapter = new Mock<ISipAdapter>();
 
         sipAdapter
-            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns((string ext, string configured) => resolver.ResolveHt801Address(ext, configured));
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns((string ext, string configured, bool log) =>
+                resolver.ResolveHt801Address(ext, configured, log));
 
         sipAdapter
             .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))

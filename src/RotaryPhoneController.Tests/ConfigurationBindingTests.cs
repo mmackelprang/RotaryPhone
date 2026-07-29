@@ -74,8 +74,8 @@ public class ConfigurationBindingTests
         // test still asserts exactly what it always did — that the CONFIGURED address is rung,
         // not a value compiled into source.
         sipAdapter
-            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns((string _, string configured) => configured);
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns((string _, string configured, bool _) => configured);
 
         var manager = new PhoneManagerService(
             Mock.Of<ILogger<PhoneManagerService>>(),
