@@ -18,7 +18,7 @@ public class SipDiagnosticServiceTests
     public void HandleSipMessage_AddsToLog()
     {
         var entry = new SipMessageEntry(DateTime.UtcNow, SipDirection.Received, "REGISTER",
-            "192.168.86.250:5060", "0.0.0.0:5060", 200, "OK", null, "call-1");
+            "192.0.2.250:5060", "0.0.0.0:5060", 200, "OK", null, "call-1");
         _service.HandleSipMessage(entry);
         var log = _service.GetRecentMessages(10);
         Assert.Single(log);
@@ -39,7 +39,7 @@ public class SipDiagnosticServiceTests
     public void HandleSipMessage_RegisterUpdatesRegistrationState()
     {
         _service.HandleSipMessage(new SipMessageEntry(DateTime.UtcNow, SipDirection.Received,
-            "REGISTER", "192.168.86.250", "0.0.0.0:5060", null, null, null, null));
+            "REGISTER", "192.0.2.250", "0.0.0.0:5060", null, null, null, null));
         var health = _service.GetHt801Health();
         Assert.True(health.IsRegistered);
         Assert.NotNull(health.LastRegisterReceived);
@@ -51,7 +51,7 @@ public class SipDiagnosticServiceTests
         string? diagnosisIssue = null;
         _service.OnDiagnosisGenerated += (issue, suggestions) => diagnosisIssue = issue;
         _service.HandleSipMessage(new SipMessageEntry(DateTime.UtcNow.AddSeconds(-6), SipDirection.Sent,
-            "INVITE", "local", "sip:1000@192.168.86.250", null, null, null, "call-timeout"));
+            "INVITE", "local", "sip:1000@192.0.2.250", null, null, null, "call-timeout"));
         _service.CheckInviteTimeouts();
         Assert.NotNull(diagnosisIssue);
         Assert.Contains("INVITE", diagnosisIssue);

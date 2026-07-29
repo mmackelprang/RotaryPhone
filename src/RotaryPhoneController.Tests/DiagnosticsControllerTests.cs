@@ -80,7 +80,7 @@ public class DiagnosticsControllerTests
   public async Task GetHt801_NoSipHistory_ReturnsNotRegistered()
   {
     _ht801Service.Setup(s => s.GetConfig(It.IsAny<string>()))
-      .Returns(new HT801Config { IpAddress = "192.168.86.22", Extension = "1000" });
+      .Returns(new HT801Config { IpAddress = "192.0.2.22", Extension = "1000" });
     _ht801Service.Setup(s => s.TestConnectionAsync(It.IsAny<string>()))
       .ReturnsAsync(new HT801ConnectionTestResult { Success = true });
 
@@ -93,7 +93,7 @@ public class DiagnosticsControllerTests
     Assert.False(dto.SipRegistered);
     Assert.Null(dto.LastRegisterReceived);
     Assert.True(dto.IpReachable);
-    Assert.Equal("192.168.86.22", dto.IpAddress);
+    Assert.Equal("192.0.2.22", dto.IpAddress);
     Assert.Equal("1000", dto.Extension);
   }
 
@@ -103,10 +103,10 @@ public class DiagnosticsControllerTests
     // Simulate a REGISTER message so diagnostics sees the HT801 as registered
     _diagnostics.HandleSipMessage(new SipMessageEntry(
       DateTime.UtcNow, SipDirection.Received, "REGISTER",
-      "192.168.86.22:5060", "0.0.0.0:5060", null, null, null, null));
+      "192.0.2.22:5060", "0.0.0.0:5060", null, null, null, null));
 
     _ht801Service.Setup(s => s.GetConfig(It.IsAny<string>()))
-      .Returns(new HT801Config { IpAddress = "192.168.86.22", Extension = "1000" });
+      .Returns(new HT801Config { IpAddress = "192.0.2.22", Extension = "1000" });
     _ht801Service.Setup(s => s.TestConnectionAsync(It.IsAny<string>()))
       .ReturnsAsync(new HT801ConnectionTestResult { Success = true });
 
