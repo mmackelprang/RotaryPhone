@@ -79,10 +79,14 @@ public class SipDiagnosticService : IHostedService, IDisposable
             HandleRegister(entry);
         }
 
-        // Track sent INVITEs
+        // Track sent INVITEs.
+        // A DiagnosticNote on a sent INVITE means the send itself failed. The immediate path already
+        // reported that failure; tracking it here would fire a SECOND, wrongly-reasoned failure when the
+        // response that can never arrive times out.
         if (string.Equals(entry.Method, "INVITE", StringComparison.OrdinalIgnoreCase)
             && entry.Direction == SipDirection.Sent
-            && entry.CallId is not null)
+            && entry.CallId is not null
+            && entry.DiagnosticNote is null)
         {
             lock (_lock)
             {
@@ -121,7 +125,20 @@ public class SipDiagnosticService : IHostedService, IDisposable
         // What to do once the lock is released. The bell events MUST be raised outside the lock —
         // their subscribers take the BellFailureTracker's lock and broadcast over SignalR, and
         // holding both locks in this order would be a lock-ordering hazard.
-        bool succeeded = false;
+        //
+        // A 180/200 to an INVITE is proof the bell rang, so success is raised UNCONDITIONALLY —
+        // deliberately NOT gated on the _pendingInvites lookup. InviteTimeout is 5s, so a 180
+        // arriving at 5.5s finds the entry already evicted by CheckInviteTimeouts; gating success on
+        // the lookup would leave the (false) failure alert stuck until some later call happened to
+        // answer inside 5s. BellFailureTracker.RecordSuccess is a no-op when nothing is stored, so
+        // raising for an untracked call-id is safe.
+        //
+        // The INVITE-method qualifier is load-bearing: responses are logged with their CSeq method,
+        // and a CANCEL or BYE for the same dialog carries the INVITE's Call-ID. Without it, the 200
+        // acknowledging a CANCEL — sent precisely BECAUSE the phone never rang — would clear the
+        // alert. The _pendingInvites lookup used to provide this filtering implicitly.
+        bool succeeded = (code == 180 || code == 200)
+            && string.Equals(entry.Method, "INVITE", StringComparison.OrdinalIgnoreCase);
         bool failed = false;
         BellFailureReason reason = BellFailureReason.Unknown;
         string? target = null;
@@ -131,39 +148,37 @@ public class SipDiagnosticService : IHostedService, IDisposable
         string? timelineEventType = null;
         string? timelineDescription = null;
 
+        // Timeline events stay gated on the pending lookup, exactly as before.
         lock (_lock)
         {
-            if (!_pendingInvites.TryGetValue(callId, out var pending))
-                return;
-
-            // 180 Ringing or 200 OK — INVITE is progressing, remove from tracking
-            if (code == 180 || code == 200)
+            if (_pendingInvites.TryGetValue(callId, out var pending))
             {
-                _pendingInvites.Remove(callId);
-                succeeded = true;
-                timelineEventType = code == 180 ? "RINGING" : "CALL_ANSWERED";
-                timelineDescription = $"{code} response for {callId}";
-            }
-            // 4xx+ error responses — remove and generate diagnosis
-            else if (code >= 400)
-            {
-                _pendingInvites.Remove(callId);
-                failed = true;
-                // 404/480 mean the registrar has no usable binding for the URI we rang; anything
-                // else 4xx/5xx/6xx is the device actively refusing the call.
-                reason = code is 404 or 480
-                    ? BellFailureReason.NotRegistered
-                    : BellFailureReason.Rejected;
-                target = entry.ToAddress ?? pending.Target;
-                detail = $"{code} {entry.StatusText}";
-                diagnosisSuggestions = GetSuggestionsForStatusCode(code);
-                diagnosisIssue = $"INVITE to {entry.ToAddress} failed with {code} {entry.StatusText}";
-                timelineEventType = "INVITE_FAILED";
-                timelineDescription = $"{code} {entry.StatusText} for {callId}";
-            }
-            else
-            {
-                return;
+                // 180 Ringing or 200 OK — INVITE is progressing, remove from tracking
+                if (code == 180 || code == 200)
+                {
+                    _pendingInvites.Remove(callId);
+                    timelineEventType = code == 180 ? "RINGING" : "CALL_ANSWERED";
+                    timelineDescription = $"{code} response for {callId}";
+                }
+                // 4xx+ error responses — remove and generate diagnosis
+                else if (code >= 400)
+                {
+                    _pendingInvites.Remove(callId);
+                    failed = true;
+                    // 404/480 mean the registrar has no usable binding for the URI we rang; anything
+                    // else 4xx/5xx/6xx is the device actively refusing the call.
+                    reason = code is 404 or 480
+                        ? BellFailureReason.NotRegistered
+                        : BellFailureReason.Rejected;
+                    target = entry.ToAddress ?? pending.Target;
+                    detail = $"{code} {entry.StatusText}";
+                    diagnosisSuggestions = GetSuggestionsForStatusCode(code);
+                    diagnosisIssue = $"INVITE to {entry.ToAddress} failed with {code} {entry.StatusText}";
+                    timelineEventType = "INVITE_FAILED";
+                    timelineDescription = $"{code} {entry.StatusText} for {callId}";
+                }
+                // 1xx/2xx-other/3xx: the INVITE is still in flight — leave it pending so a
+                // later timeout can still fire.
             }
         }
 
