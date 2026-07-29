@@ -16,9 +16,11 @@ public class RotaryPhoneConfig
     public string Name { get; set; } = "Rotary Phone";
     
     /// <summary>
-    /// IP address of the HT801 ATA device
+    /// IP address of the HT801 ATA device. No default — a site-specific address compiled into
+    /// source is unfixable by configuration and silently outlives the hardware it described.
+    /// Supplied by "RotaryPhone:Phones[].HT801IpAddress"; validated at startup.
     /// </summary>
-    public string HT801IpAddress { get; set; } = "192.168.86.22";
+    public string HT801IpAddress { get; set; } = "";
     
     /// <summary>
     /// SIP extension to ring on the HT801

@@ -6,9 +6,11 @@ namespace RotaryPhoneController.Core.HT801;
 public class HT801Config
 {
     /// <summary>
-    /// IP address of the HT801
+    /// IP address of the HT801. No default — a site-specific address compiled into source is
+    /// unfixable by configuration and silently outlives the hardware it described. Projected from
+    /// "RotaryPhone:Phones[].HT801IpAddress" by HT801ConfigService.
     /// </summary>
-    public string IpAddress { get; set; } = "192.168.86.22";
+    public string IpAddress { get; set; } = "";
     
     /// <summary>
     /// Admin username for web interface
