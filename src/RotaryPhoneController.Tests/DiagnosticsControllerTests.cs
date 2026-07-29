@@ -38,7 +38,7 @@ public class DiagnosticsControllerTests
       Options.Create(new GVBridgeConfig()),
       NullLogger<GVAudioBridgeService>.Instance,
       _config,
-      _bindingStore);
+      _sipAdapter.Object);
   }
 
   // --- Audio Bridge endpoint tests ---
