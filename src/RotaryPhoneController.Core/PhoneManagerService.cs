@@ -49,8 +49,20 @@ public class PhoneManagerService
 
     private void InitializePhones()
     {
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var phoneConfig in _config.Phones)
         {
+            // Fail loudly rather than discarding. The previous behaviour (warn + return) silently
+            // kept the FIRST entry — which the configuration binder had appended a hardcoded
+            // default ahead of — and rang a stale address.
+            if (!seenIds.Add(phoneConfig.Id))
+            {
+                throw new InvalidOperationException(
+                    $"Duplicate phone Id '{phoneConfig.Id}' in RotaryPhone:Phones. " +
+                    "Each configured phone must have a unique Id.");
+            }
+
             RegisterPhone(
                 phoneConfig.Id,
                 _sipAdapter,
@@ -76,8 +88,9 @@ public class PhoneManagerService
     {
         if (_phoneManagers.ContainsKey(phoneId))
         {
-            _logger.LogWarning("Phone {PhoneId} is already registered", phoneId);
-            return;
+            throw new InvalidOperationException(
+                $"Phone '{phoneId}' is already registered. Re-registering would silently discard " +
+                "the new configuration — check RotaryPhone:Phones for duplicate Ids.");
         }
 
         var callManager = new CallManager(
