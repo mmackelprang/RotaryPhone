@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.SignalR;
 using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
@@ -6,6 +7,7 @@ using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Platform;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.Server.Hubs;
 
 namespace RotaryPhoneController.Server.Services;
@@ -22,16 +24,36 @@ public class SignalRNotifierService : IHostedService
     private readonly SipDiagnosticService _diagnostics;
     private readonly IBellFailureTracker _bellFailureTracker;
     private readonly IHT801ConfigService _ht801Service;
+    private readonly IRegistrarBindingStore _bindingStore;
     private bool _lastBluetoothConnected;
 
-    // Cached HT801 reachability. The probe runs on a slow cadence inside the existing 1s monitor
-    // loop; BroadcastSystemStatusAsync reads these fields rather than probing synchronously, so a
-    // status broadcast is never blocked on a network timeout.
+    // Cached HT801 reachability. The probe is kicked off on a slow cadence from the existing 1s
+    // monitor loop but runs OFF it, so neither the loop nor a status broadcast is ever blocked on a
+    // network timeout — BroadcastSystemStatusAsync just reads these fields.
     private static readonly TimeSpan Ht801ProbeInterval = TimeSpan.FromSeconds(30);
     private bool? _ht801Reachable;
     private DateTime? _ht801LastCheckedUtc;
     private string? _ht801ProbedAddress;
     private DateTime _ht801NextProbeUtc = DateTime.MinValue;
+
+    // 0 = no probe running, 1 = one in flight. Claimed with Interlocked so the fire-and-forget
+    // probe started by the monitor loop can never overlap with itself.
+    private int _probeInFlight;
+
+    // Where each in-flight INVITE came from, keyed by SIP Call-ID.
+    //
+    // The SIP Call-ID is the ONLY stable link between an INVITE and its outcome: the outcome signal
+    // (timeout / 4xx) lands up to 5 seconds after the send, and reading the phone + call id live at
+    // that point attributes the failure to whatever is ringing THEN. A hang-up-and-redial inside that
+    // window would pin the old call's failure on the new call — exactly the mis-attribution
+    // CallManager.CallId exists to prevent. So the origin is captured at SEND time and looked up by
+    // Call-ID when the outcome arrives.
+    private readonly ConcurrentDictionary<string, (string PhoneId, string? CallId)> _inviteOrigins = new();
+
+    // Entries are normally removed within 5s (success, 4xx, or timeout). This appliance drives a
+    // single ATA, so anything approaching this many live INVITEs means entries are leaking rather
+    // than accumulating legitimately — drop the lot instead of growing without bound.
+    private const int MaxInviteOrigins = 64;
 
     public SignalRNotifierService(
         PhoneManagerService phoneManager,
@@ -43,6 +65,7 @@ public class SignalRNotifierService : IHostedService
         SipDiagnosticService diagnostics,
         IBellFailureTracker bellFailureTracker,
         IHT801ConfigService ht801Service,
+        IRegistrarBindingStore bindingStore,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -54,6 +77,7 @@ public class SignalRNotifierService : IHostedService
         _diagnostics = diagnostics;
         _bellFailureTracker = bellFailureTracker;
         _ht801Service = ht801Service;
+        _bindingStore = bindingStore;
         _deviceManager = deviceManager;
     }
 
@@ -88,6 +112,7 @@ public class SignalRNotifierService : IHostedService
         // Subscribe to SIP diagnostic events for real-time broadcasting
         _diagnostics.OnSipMessageLogged += entry =>
             _hubContext.Clients.All.SendAsync("SipMessage", entry);
+        _diagnostics.OnSipMessageLogged += RememberInviteOrigin;
         _diagnostics.OnDiagnosisGenerated += (issue, suggestions) =>
             _hubContext.Clients.All.SendAsync("SipDiagnosis", issue, suggestions);
         _diagnostics.OnHt801HealthUpdate += status =>
@@ -102,6 +127,16 @@ public class SignalRNotifierService : IHostedService
         // in production — a UDP send to a dead-but-routable address succeeds at the socket level.
         _diagnostics.OnSentInviteFailed += (callId, reason, target, detail) =>
         {
+            // Prefer the origin captured when the INVITE was SENT — see _inviteOrigins. A missing
+            // snapshot must never silence a real failure, so fall back to resolving live.
+            if (_inviteOrigins.TryRemove(callId, out var origin))
+            {
+                var callerNumber = _phoneManager.GetPhone(origin.PhoneId)?.IncomingPhoneNumber;
+                _bellFailureTracker.RecordFailure(origin.PhoneId, reason, callerNumber,
+                    origin.CallId, target, detail, DateTime.UtcNow);
+                return;
+            }
+
             var resolved = ResolveTargetPhone();
             if (resolved == null) return;
 
@@ -112,6 +147,13 @@ public class SignalRNotifierService : IHostedService
 
         _diagnostics.OnSentInviteSucceeded += callId =>
         {
+            if (_inviteOrigins.TryRemove(callId, out var origin)
+                && _phoneManager.GetPhone(origin.PhoneId) is { } originManager)
+            {
+                originManager.NotifyBellRingSucceeded();
+                return;
+            }
+
             var resolved = ResolveTargetPhone();
             resolved?.Manager.NotifyBellRingSucceeded();
         };
@@ -145,6 +187,40 @@ public class SignalRNotifierService : IHostedService
         _ = MonitorBluetoothConnectionAsync(cancellationToken);
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Snapshots which phone (and which of its calls) a sent INVITE belongs to, keyed by SIP Call-ID.
+    /// Runs at SEND time precisely because the outcome arrives seconds later — see _inviteOrigins.
+    ///
+    /// A DiagnosticNote means the send already failed at the socket level; CallManager reported that
+    /// synchronously and SipDiagnosticService does not track it, so there is no outcome to correlate.
+    /// </summary>
+    private void RememberInviteOrigin(SipMessageEntry entry)
+    {
+        if (!string.Equals(entry.Method, "INVITE", StringComparison.OrdinalIgnoreCase)
+            || entry.Direction != SipDirection.Sent
+            || entry.CallId is null
+            || entry.DiagnosticNote is not null)
+        {
+            return;
+        }
+
+        // No attributable phone means no useful snapshot — the failure handler's live fallback
+        // reaches the same conclusion, so store nothing rather than a bogus origin.
+        if (ResolveTargetPhone() is not { } resolved) return;
+
+        // Bounded growth guard: entries are normally removed within 5s, so a full table means they
+        // are leaking. Clearing costs at most a fallback to live resolution on the pending outcomes.
+        if (_inviteOrigins.Count > MaxInviteOrigins)
+        {
+            _logger.LogWarning(
+                "INVITE origin table exceeded {Max} entries — clearing. Outcomes still in flight will " +
+                "fall back to live phone resolution.", MaxInviteOrigins);
+            _inviteOrigins.Clear();
+        }
+
+        _inviteOrigins[entry.CallId] = (resolved.PhoneId, resolved.Manager.CallId);
     }
 
     /// <summary>
@@ -206,7 +282,7 @@ public class SignalRNotifierService : IHostedService
                     await BroadcastSystemStatusAsync();
                 }
 
-                await ProbeHt801IfDueAsync();
+                StartHt801ProbeIfDue();
 
                 await Task.Delay(1000, cancellationToken);
             }
@@ -222,17 +298,50 @@ public class SignalRNotifierService : IHostedService
     }
 
     /// <summary>
-    /// Probes HT801 reachability on a slow cadence from inside the 1-second monitor loop, and
-    /// broadcasts system status whenever the reachable value CHANGES — including the first
-    /// null -> bool transition, which is what turns "Unknown" into a real answer in the UI.
+    /// Kicks off the reachability probe when it is due, WITHOUT blocking the 1-second monitor loop.
+    /// TestConnectionAsync waits up to 3s for a ping reply; awaiting it inline delayed Bluetooth
+    /// connection-change detection by up to 3s once every 30s. Interlocked claims the slot so probes
+    /// can never overlap, and the task swallows everything — it must never fault unobserved.
     /// </summary>
-    private async Task ProbeHt801IfDueAsync()
+    private void StartHt801ProbeIfDue()
     {
         if (DateTime.UtcNow < _ht801NextProbeUtc) return;
+        if (Interlocked.CompareExchange(ref _probeInFlight, 1, 0) != 0) return;
+
         _ht801NextProbeUtc = DateTime.UtcNow + Ht801ProbeInterval;
 
-        var phoneId = _config.Phones.FirstOrDefault()?.Id ?? "default";
-        var address = _ht801Service.GetConfig(phoneId).IpAddress;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ProbeHt801Async();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "HT801 reachability probe failed");
+            }
+            finally
+            {
+                Volatile.Write(ref _probeInFlight, 0);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Probes HT801 reachability and broadcasts system status whenever the reachable value CHANGES —
+    /// including the first null -> bool transition, which is what turns "Unknown" into a real answer
+    /// in the UI.
+    /// </summary>
+    private async Task ProbeHt801Async()
+    {
+        // Probe the address an INVITE would ACTUALLY be sent to, resolved the same way
+        // SIPSorceryAdapter.ResolveTargetAddress resolves it. IHT801ConfigService.GetConfig is a
+        // last-wins projection — it seeds from AppConfiguration then overwrites from
+        // data/ht801-config.json — so a stale on-disk file would have us report a fully working
+        // device as unreachable, which is precisely the class of untruth this work removes.
+        var address = _bindingStore.GetSingle() is { } b && b.IsFresh(DateTime.UtcNow)
+            ? b.Address
+            : _config.Phones.FirstOrDefault()?.HT801IpAddress;
 
         // No usable address is a CONFIGURATION problem, not an offline device. Leave the reachable
         // value null ("Unknown") rather than reporting a device we never asked about as down.
