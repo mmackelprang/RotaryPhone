@@ -98,7 +98,12 @@ public class PhoneController : ControllerBase
                 callerNumber = f.CallerNumber,
                 callId = f.CallId,
                 failureCount = f.FailureCount,
-                acknowledged = f.Acknowledged
+                acknowledged = f.Acknowledged,
+                // Diagnostics only, never user-facing — same rule the hub event's target/detail
+                // carry. A client reloading mid-failure would otherwise lose the address the INVITE
+                // actually went to, the single most useful fact when the bell does not ring.
+                target = f.Target,
+                detail = f.Detail
             }
             : null;
 

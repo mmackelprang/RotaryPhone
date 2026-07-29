@@ -148,7 +148,9 @@ Blazor circuit drop:
     "callerNumber":  "+18015550134",
     "callId":        "9f2c1a...",
     "failureCount":  2,
-    "acknowledged":  false
+    "acknowledged":  false,
+    "target":        "192.168.86.240:5060",
+    "detail":        "no response to INVITE after 5000 ms"
   }
 }
 ```
@@ -161,6 +163,14 @@ Blazor circuit drop:
 | `callId` | The failed call — correlates with the hub event and with the top-level `callId` |
 | `failureCount` | Consecutive failed rings since the last success. Drives your "2 calls didn't ring…" phrasing |
 | `acknowledged` | Reflects `POST .../ack` (§5). Survives restart |
+| `target` | Diagnostics only, **never user-facing**. The **resolved** address the INVITE was actually sent to |
+| `detail` | Diagnostics only, **never user-facing**, free text, nullable |
+
+`target` and `detail` carry exactly the same values and the same rules as their counterparts on the
+`BellInviteFailed` hub event (§1) — they are here so a client that reloads *during* a failure does not
+lose the address the ring was sent to, the single most useful diagnostic fact when the bell does not
+ring. Same §3.8 treatment applies: `detail` is untrusted free text, so render it truncated, non-hero,
+never in a toast.
 
 Rehydrate State D from this on first render, per your §7l. `lastBellFailure` is the durable record;
 the hub event is the live one. They carry the same `callId`, so a client that receives both does not
