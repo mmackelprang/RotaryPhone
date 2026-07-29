@@ -84,11 +84,16 @@ public class GVAudioBridgeService : IDisposable
         // Resolve effective ports: prefer negotiated values, fall back to config.
         var effectiveLocalPort = localRtpPort ?? _config.LocalRtpPort;
         var effectiveRemotePort = remoteRtpPort ?? _config.HT801RtpPort;
-        // Fallback address when the SDP didn't carry one: prefer the learned registrar binding,
-        // then the single configured phone. There is exactly ONE HT801 address key in this system —
-        // RotaryPhone:Phones[].HT801IpAddress. See docs/HT801-ADDRESS.md.
+        // Fallback address when the SDP didn't carry one: prefer the learned registrar binding
+        // WHEN FRESH, then the single configured phone. There is exactly ONE HT801 address key in
+        // this system — RotaryPhone:Phones[].HT801IpAddress. See docs/HT801-ADDRESS.md.
+        //
+        // The freshness check implements decision D4 ("the learned binding wins when fresh"). The
+        // plan's Task 2.4 snippet omitted it; without it a binding left over from before the device
+        // moved would beat the configured address indefinitely, which is the opposite of D4's intent.
+        var learned = _bindingStore.GetSingle();
         var effectiveRemoteIp = remoteRtpAddress
-            ?? _bindingStore.GetSingle()?.Address
+            ?? (learned is not null && learned.IsFresh(DateTime.UtcNow) ? learned.Address : null)
             ?? _appConfig.Phones.FirstOrDefault()?.HT801IpAddress
             ?? throw new InvalidOperationException(
                    "No HT801 address available for the GV audio bridge (no SDP address, no learned " +
