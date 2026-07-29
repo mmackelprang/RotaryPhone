@@ -48,7 +48,7 @@ On the existing `RotaryHub` (`/hub`). **Single-DTO shape** — one argument obje
   "occurredAtUtc": "2026-07-29T20:14:07.812Z",
   "reason":        "Timeout",
   "target":        "192.168.86.240:5060",
-  "detail":        "no response to INVITE after 5000ms"
+  "detail":        "no response to INVITE after 5000 ms"
 }
 ```
 

@@ -226,8 +226,10 @@ public class SipDiagnosticService : IHostedService, IDisposable
             // This is the failure that actually fires in production: a UDP send to a
             // dead-but-routable address succeeds at the socket level, so the only evidence the
             // bell did not ring is the absence of a 180/200.
+            // F0, not N0: this string crosses a service boundary into Radio.Web's diagnostics card,
+            // and N0 would render a culture-dependent thousands separator ("5,000 ms").
             OnSentInviteFailed?.Invoke(callId, BellFailureReason.Timeout, target,
-                $"no response to INVITE after {InviteTimeout.TotalMilliseconds:N0} ms");
+                $"no response to INVITE after {InviteTimeout.TotalMilliseconds:F0} ms");
         }
     }
 
