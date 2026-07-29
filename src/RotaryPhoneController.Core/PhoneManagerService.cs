@@ -11,7 +11,13 @@ namespace RotaryPhoneController.Core;
 public class PhoneManagerService
 {
     private readonly ILogger<PhoneManagerService> _logger;
-    private readonly Dictionary<string, CallManager> _phoneManagers = new();
+    // Case-insensitive to match the duplicate-Id guards in InitializePhones and
+    // AppConfigurationValidator. With an ordinal comparer here, "default" and "Default" would be
+    // rejected by those guards but would still have been distinct keys in this dictionary — an
+    // inconsistency that would silently defeat the fail-loud intent if RegisterPhone were ever
+    // called directly. Also makes GetPhone tolerant of casing in API route parameters.
+    private readonly Dictionary<string, CallManager> _phoneManagers =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly ICallHistoryService? _callHistoryService;
     private readonly AppConfiguration _config;
     private readonly ISipAdapter _sipAdapter;
