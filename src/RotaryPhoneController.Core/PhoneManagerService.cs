@@ -117,7 +117,6 @@ public class PhoneManagerService
             outboundDialingTimeout: null,
             bellFailureTracker: _bellFailureTracker);
 
-
         callManager.Initialize();
         _phoneManagers[phoneId] = callManager;
         

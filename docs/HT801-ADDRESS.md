@@ -93,7 +93,7 @@ regression.
 
 ```bash
 sudo journalctl -u rotary-phone.service -f
-curl -s http://radio:5000/api/diagnostics/sip-registrations | jq
+curl -s http://radio:5004/api/diagnostics/sip-registrations | jq
 ```
 
 ### Valid signal (negative)
@@ -172,11 +172,11 @@ address fallbacks, and both sit on an exception path that only runs when the nor
 
 | Location | Literal | What it is |
 |---|---|---|
-| `src/RotaryPhoneController.Core/SIPSorceryAdapter.cs:701` | `192.168.86.50` | `GetLocalIPForTarget` returns this when the UDP-connect probe throws |
+| `src/RotaryPhoneController.Core/SIPSorceryAdapter.cs:810` | `192.168.86.50` | `GetLocalIPForTarget` returns this when the UDP-connect probe throws |
 | `src/RotaryPhoneController.GVBridge/Sip/GvSipTransport.cs:944-947` | `192.168.86.50` | GV media IPv4 bind fallback, same literal, same shape |
 
 Neither affects HT801 addressing, so neither could produce the failure in §7. Both are candidates for
 a follow-up that resolves the local address the same way the HT801 address is now resolved.
 
-(For completeness, `src/RotaryPhoneController.Server/Program.cs:98` also carries a site-specific
+(For completeness, `src/RotaryPhoneController.Server/Program.cs:100` also carries a site-specific
 literal — `http://192.168.86.55:5173`, a dev CORS origin. Not an address fallback, not phone-related.)

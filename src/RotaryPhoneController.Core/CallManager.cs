@@ -779,6 +779,9 @@ public class CallManager
             _logger.LogError(ex, "Failed to place GV outbound call to {Number}", number);
             Volatile.Write(ref _outboundConnectPending, 0);
             _outboundDialingTimeoutCts?.Cancel();
+            // Clear the call id on this path back to Idle too. Every route to Idle must clear it —
+            // a stale id would let a late bell-failure signal be attributed to a call that is over.
+            CallId = null;
             CurrentState = CallState.Idle;
         }
     }
