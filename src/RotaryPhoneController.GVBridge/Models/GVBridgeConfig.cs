@@ -5,7 +5,10 @@ public class GVBridgeConfig
     // RTP audio bridging to HT801
     public int LocalRtpPort { get; set; } = 5070;
     public string LocalIp { get; set; } = "0.0.0.0";
-    public string HT801Ip { get; set; } = "192.168.86.22";
+    // NOTE: there is deliberately no HT801Ip here. The single source of truth for the HT801's
+    // address is RotaryPhone:Phones[].HT801IpAddress (plus the learned registrar binding, which
+    // wins at runtime). A second copy in this section lived only in appsettings.json — the file
+    // every deploy overwrites — so it was a stale-address trap. See docs/HT801-ADDRESS.md.
     public int HT801RtpPort { get; set; } = 5004;
 
     // Google Voice API

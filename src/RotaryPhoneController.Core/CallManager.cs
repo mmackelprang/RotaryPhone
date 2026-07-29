@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Configuration;
 
@@ -15,7 +16,12 @@ public class CallManager
     private readonly RotaryPhoneConfig _phoneConfig;
     private readonly IBluetoothDeviceManager? _deviceManager;
     private readonly ICallAdapterRegistry? _adapterRegistry;
+    private readonly IBellFailureTracker? _bellFailureTracker;
     private ICallAdapter? _boundAdapter;
+
+    // The HT801 address this call resolved to when the bell was rung. Cached so the RTP audio
+    // bridge targets exactly the host the INVITE went to. Null outside a call.
+    private string? _resolvedHt801Address;
     private readonly int _rtpPort;
     private CancellationTokenSource? _ringingTimeoutCts;
     private CancellationTokenSource? _outboundDialingTimeoutCts;
@@ -87,6 +93,21 @@ public class CallManager
     /// </summary>
     public DateTime? CallStartedAtUtc { get; private set; }
 
+    /// <summary>
+    /// Identifier for the current call, minted when the call begins (Ringing or Dialing) and cleared
+    /// on Idle. Exists so a late-arriving BellInviteFailed can be attributed to a SPECIFIC call rather
+    /// than "whatever is ringing now" — the failure signal lands seconds after Ringing, and a fast
+    /// hang-up-and-redial inside that window would otherwise mis-attribute the alert.
+    /// </summary>
+    public string? CallId { get; private set; }
+
+    /// <summary>
+    /// True when the most recent ring attempt is known to have failed — the call is genuinely ringing
+    /// on the network leg, but the rotary phone's bell is not. Reset when a new call begins and when
+    /// a ring demonstrably succeeds (see <see cref="NotifyBellRingSucceeded"/>).
+    /// </summary>
+    public bool BellInviteFailed { get; private set; }
+
     public CallManager(
         ISipAdapter sipAdapter,
         IBluetoothHfpAdapter bluetoothAdapter,
@@ -97,7 +118,9 @@ public class CallManager
         ICallHistoryService? callHistoryService = null,
         IBluetoothDeviceManager? deviceManager = null,
         ICallAdapterRegistry? adapterRegistry = null,
-        TimeSpan? outboundDialingTimeout = null)
+        TimeSpan? outboundDialingTimeout = null,
+        // LAST so existing positional call sites keep compiling.
+        IBellFailureTracker? bellFailureTracker = null)
     {
         _sipAdapter = sipAdapter;
         _bluetoothAdapter = bluetoothAdapter;
@@ -108,6 +131,7 @@ public class CallManager
         _callHistoryService = callHistoryService;
         _deviceManager = deviceManager;
         _adapterRegistry = adapterRegistry;
+        _bellFailureTracker = bellFailureTracker;
         // If an outbound GV call is placed but never reaches Active (cell never answers),
         // reset cleanly to Idle after this timeout so the call doesn't hang in Dialing.
         // Default ~45s; injectable for fast, deterministic unit tests.
@@ -235,6 +259,7 @@ public class CallManager
                         }
                         _activeDeviceAddress = connected[0].Address;
                     }
+                    BeginCall();
                     CurrentState = CallState.Dialing;
                     DialedNumber = string.Empty;
                     break;
@@ -293,9 +318,92 @@ public class CallManager
                 _activeDeviceAddress = connected[0].Address;
             }
 
+            BeginCall();
             CurrentState = CallState.Dialing;
             StartCall(number);
         }
+    }
+
+    /// <summary>
+    /// Marks the start of a new call: mints a fresh <see cref="CallId"/> and clears any bell-failure
+    /// flag left over from the previous call. Must be called BEFORE assigning
+    /// <see cref="CurrentState"/>, because that setter fires StateChanged and subscribers read both.
+    /// </summary>
+    private void BeginCall()
+    {
+        CallId = Guid.NewGuid().ToString("N");
+        BellInviteFailed = false;
+        _resolvedHt801Address = null;
+    }
+
+    /// <summary>
+    /// Resolves the HT801's address ONCE per ring and caches it for the rest of the call, so the
+    /// bell and the audio bridge are guaranteed to target the same host.
+    ///
+    /// Resolving separately at answer time would reintroduce the split this fixes: a binding that is
+    /// fresh when the phone rings can go stale before the handset is lifted, and the two legs would
+    /// then resolve differently. Caching removes that window by construction rather than by luck.
+    /// </summary>
+    private string ResolveAndCacheHt801Address()
+    {
+        _resolvedHt801Address =
+            _sipAdapter.ResolveHt801Address(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+        return _resolvedHt801Address;
+    }
+
+    /// <summary>
+    /// The address this call's audio must be bridged to, in descending order of authority:
+    ///
+    /// 1. <c>_resolvedHt801Address</c> — the address THIS call rang at. Once the bell has rung, the
+    ///    audio has to follow it, even if the binding has moved since.
+    /// 2. <c>_negotiatedRtpIp</c> — the address the HT801 itself put in its SDP. On the OUTBOUND leg
+    ///    no bell was rung, so (1) is null; the device's own SDP is then the most authoritative
+    ///    statement of where it is.
+    /// 3. A fresh resolution. The raw configured value is never used directly: <see cref="HandleScoConnected"/>
+    ///    fires for outbound BT calls too (it gates on the active device, not on <see cref="CallState"/>),
+    ///    so falling back to configuration here would bridge outbound audio to a stale address under
+    ///    exactly the config/learned mismatch this work exists to survive.
+    /// </summary>
+    private string EffectiveHt801Address =>
+        _resolvedHt801Address
+        ?? _negotiatedRtpIp
+        ?? _sipAdapter.ResolveHt801Address(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
+
+    /// <summary>
+    /// The INVITE could not be put on the wire, so the bell definitely did not ring.
+    ///
+    /// CRITICAL (plan decision D8): this deliberately does NOT change the call state. The call
+    /// genuinely IS ringing on the network leg — only the rotary phone's bell failed. Downgrading
+    /// the state would replace one lie with another.
+    /// </summary>
+    private void RecordBellInviteFailure()
+    {
+        _logger.LogError(
+            "Bell INVITE failed — call is ringing on the network leg but the rotary phone will not ring " +
+            "(phone {PhoneId}, callId {CallId})", _phoneConfig.Id, CallId);
+
+        BellInviteFailed = true;
+
+        _bellFailureTracker?.RecordFailure(
+            _phoneConfig.Id,
+            BellFailureReason.Unreachable,
+            IncomingPhoneNumber,
+            CallId,
+            EffectiveHt801Address,
+            "SIP INVITE could not be sent (socket error or SIP transport unavailable)",
+            DateTime.UtcNow);
+
+        // Deliberately NO StateChanged re-raise here. The call state has not changed (decision D8), and
+        // re-raising would re-broadcast IncomingCall for a call already announced — which can re-trigger
+        // the incoming-call UI in the consumer. The failure is announced on its own channel: the tracker's
+        // OnBellFailure -> the BellInviteFailed hub event.
+    }
+
+    /// <summary>Called when the bell demonstrably rang (HT801 answered the INVITE). Clears the failure flag.</summary>
+    public void NotifyBellRingSucceeded()
+    {
+        BellInviteFailed = false;
+        _bellFailureTracker?.RecordSuccess(_phoneConfig.Id);
     }
 
     private void HandleIncomingCall()
@@ -319,11 +427,22 @@ public class CallManager
         }
 
         IncomingPhoneNumber = "Unknown";
+        // Mint the call id BEFORE the state change so a StateChanged subscriber sees a
+        // consistent snapshot (state Ringing + the id that identifies this call).
+        BeginCall();
         CurrentState = CallState.Ringing;
-        
+
+        // Resolve once and reuse for the audio bridge, so bell and audio cannot target
+        // different hosts. See ResolveAndCacheHt801Address.
+        var target = ResolveAndCacheHt801Address();
+
         // Send INVITE to HT801 to trigger ring
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
-        
+        var invited = _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, target);
+        if (!invited)
+        {
+            RecordBellInviteFailure();
+        }
+
         // Create call history entry for incoming call
         _currentCallHistory = new CallHistoryEntry
         {
@@ -360,6 +479,8 @@ public class CallManager
         }
 
         IncomingPhoneNumber = phoneNumber;
+        // Mint the call id BEFORE the state change — see SimulateIncomingCall.
+        BeginCall();
         CurrentState = CallState.Ringing;
 
         // Start a ringing timeout — if the call isn't answered or cancelled within 60s,
@@ -376,6 +497,10 @@ public class CallManager
                 _sipAdapter.CancelPendingInvite();
                 CurrentState = CallState.Idle;
                 IncomingPhoneNumber = null;
+                // CallId is cleared on every path back to Idle, not just HangUp — a stale id would
+                // let a late bell-failure signal be attributed to a call that no longer exists.
+                CallId = null;
+                _resolvedHt801Address = null;
                 _currentCallHistory = null;
                 StateChanged?.Invoke();
             }
@@ -384,9 +509,21 @@ public class CallManager
         // Send INVITE to HT801 to trigger ring.
         // Always use _rtpPort (from config, typically 49000) in the SDP — the audio bridge
         // will bind to this same port so HT801's RTP arrives at the correct destination.
+        // Resolve once and reuse for the audio bridge, so bell and audio cannot target
+        // different hosts. See ResolveAndCacheHt801Address.
+        var target = ResolveAndCacheHt801Address();
+
+        // This line now logs the RESOLVED address, not the configured one. Previously it printed
+        // the configured value while the INVITE went somewhere else, which made the journal
+        // actively misleading during exactly the mismatch it needed to explain.
         _logger.LogInformation("CallManager sending INVITE to {Extension}@{IP} (SDP RTP port {Port})",
-            _phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
-        _sipAdapter.SendInviteToHT801(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress, _rtpPort);
+            _phoneConfig.HT801Extension, target, _rtpPort);
+        var invited = _sipAdapter.SendInviteToHT801(
+            _phoneConfig.HT801Extension, target, _rtpPort);
+        if (!invited)
+        {
+            RecordBellInviteFailure();
+        }
 
         // Create call history entry
         _currentCallHistory = new CallHistoryEntry
@@ -524,8 +661,12 @@ public class CallManager
     {
         if (_activeDeviceAddress != device.Address) return;
 
-        _logger.LogInformation("SCO audio connected for {Device} — starting RTP bridge", device.Address);
-        var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
+        // EffectiveHt801Address, not the configured value: the audio must go to the same host the
+        // bell was rung at, or a stale config produces a ringing phone with no audio.
+        var rtpEndpoint = $"{EffectiveHt801Address}:{_rtpPort}";
+        _logger.LogInformation(
+            "SCO audio connected for {Device} — starting RTP bridge to {Endpoint}",
+            device.Address, rtpEndpoint);
         _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
     }
 
@@ -589,7 +730,8 @@ public class CallManager
             {
                 // Legacy Bluetooth path
                 _ = _bluetoothAdapter.AnswerCallAsync(AudioRoute.RotaryPhone);
-                var rtpEndpoint = $"{_phoneConfig.HT801IpAddress}:{_rtpPort}";
+                // EffectiveHt801Address, not the configured value — same host as the bell.
+                var rtpEndpoint = $"{EffectiveHt801Address}:{_rtpPort}";
                 _ = _rtpBridge.StartBridgeAsync(rtpEndpoint, AudioRoute.RotaryPhone);
             }
         }
@@ -693,6 +835,10 @@ public class CallManager
             _logger.LogError(ex, "Failed to place GV outbound call to {Number}", number);
             Volatile.Write(ref _outboundConnectPending, 0);
             _outboundDialingTimeoutCts?.Cancel();
+            // Clear the call id on this path back to Idle too. Every route to Idle must clear it —
+            // a stale id would let a late bell-failure signal be attributed to a call that is over.
+            CallId = null;
+            _resolvedHt801Address = null;
             CurrentState = CallState.Idle;
         }
     }
@@ -772,6 +918,8 @@ public class CallManager
             CurrentState = CallState.Idle;
             DialedNumber = string.Empty;
             IncomingPhoneNumber = null;
+            CallId = null;
+            _resolvedHt801Address = null;
             CallStartedAtUtc = null;
             _activeDeviceAddress = null;
             _negotiatedRtpPort = null;

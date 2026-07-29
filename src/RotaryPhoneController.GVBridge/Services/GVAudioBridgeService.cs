@@ -1,6 +1,8 @@
 using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using RotaryPhoneController.Core;
+using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.GVBridge.Audio;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Sip;
@@ -17,6 +19,8 @@ public class GVAudioBridgeService : IDisposable
 {
     private readonly GVBridgeConfig _config;
     private readonly ILogger<GVAudioBridgeService> _logger;
+    private readonly AppConfiguration _appConfig;
+    private readonly ISipAdapter _sipAdapter;
 
     private GvSipTransport? _sipTransport;
     private string? _activeCallId;
@@ -34,10 +38,14 @@ public class GVAudioBridgeService : IDisposable
 
     public GVAudioBridgeService(
         IOptions<GVBridgeConfig> config,
-        ILogger<GVAudioBridgeService> logger)
+        ILogger<GVAudioBridgeService> logger,
+        AppConfiguration appConfig,
+        ISipAdapter sipAdapter)
     {
         _config = config.Value;
         _logger = logger;
+        _appConfig = appConfig;
+        _sipAdapter = sipAdapter;
     }
 
     /// <summary>
@@ -76,7 +84,26 @@ public class GVAudioBridgeService : IDisposable
         // Resolve effective ports: prefer negotiated values, fall back to config.
         var effectiveLocalPort = localRtpPort ?? _config.LocalRtpPort;
         var effectiveRemotePort = remoteRtpPort ?? _config.HT801RtpPort;
-        var effectiveRemoteIp = remoteRtpAddress ?? _config.HT801Ip;
+        // There is exactly ONE HT801 address key in this system — RotaryPhone:Phones[].HT801IpAddress
+        // — and exactly one resolver over it, ISipAdapter.ResolveHt801Address. See docs/HT801-ADDRESS.md.
+        //
+        // `remoteRtpAddress` is the ONE intentional exception to "always use the resolver": on a GV
+        // call the HT801 sent its OWN INVITE, so the source address in its SDP is where it is right
+        // now — more authoritative than any binding or config value, and by definition in agreement
+        // with itself. Everything after it goes through the resolver rather than reimplementing its
+        // precedence (learned-when-fresh, then configured); a copy of that tail drifted here before,
+        // consulting GetSingle() only where the resolver matches on the AOR first.
+        //
+        // logDiagnostics is left at its default: reaching this term means the SDP carried no address,
+        // which is a real decision worth one line in the journal.
+        var phone = _appConfig.Phones.FirstOrDefault();
+        var effectiveRemoteIp = remoteRtpAddress
+            ?? (phone is not null
+                ? _sipAdapter.ResolveHt801Address(phone.HT801Extension, phone.HT801IpAddress)
+                : null)
+            ?? throw new InvalidOperationException(
+                   "No HT801 address available for the GV audio bridge (no SDP address, no learned " +
+                   "registrar binding, no configured phone).");
 
         _logger.LogInformation(
             "GVAudioBridge resolving ports — local: {LocalPort} (override={LocalOverride}), " +

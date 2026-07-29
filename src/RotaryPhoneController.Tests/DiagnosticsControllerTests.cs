@@ -8,6 +8,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
@@ -23,6 +24,7 @@ public class DiagnosticsControllerTests
   private readonly GVApiAdapter _gvAdapter;
   private readonly GVAudioBridgeService _gvAudioBridge;
   private readonly AppConfiguration _config;
+  private readonly RegistrarBindingStore _bindingStore;
 
   public DiagnosticsControllerTests()
   {
@@ -30,10 +32,13 @@ public class DiagnosticsControllerTests
     _ht801Service = new Mock<IHT801ConfigService>();
     _sipAdapter = new Mock<ISipAdapter>();
     _gvAdapter = CreateGvAdapter();
+    _config = new AppConfiguration();
+    _bindingStore = new RegistrarBindingStore();
     _gvAudioBridge = new GVAudioBridgeService(
       Options.Create(new GVBridgeConfig()),
-      NullLogger<GVAudioBridgeService>.Instance);
-    _config = new AppConfiguration();
+      NullLogger<GVAudioBridgeService>.Instance,
+      _config,
+      _sipAdapter.Object);
   }
 
   // --- Audio Bridge endpoint tests ---
@@ -75,7 +80,7 @@ public class DiagnosticsControllerTests
   public async Task GetHt801_NoSipHistory_ReturnsNotRegistered()
   {
     _ht801Service.Setup(s => s.GetConfig(It.IsAny<string>()))
-      .Returns(new HT801Config { IpAddress = "192.168.86.22", Extension = "1000" });
+      .Returns(new HT801Config { IpAddress = "192.0.2.22", Extension = "1000" });
     _ht801Service.Setup(s => s.TestConnectionAsync(It.IsAny<string>()))
       .ReturnsAsync(new HT801ConnectionTestResult { Success = true });
 
@@ -88,7 +93,7 @@ public class DiagnosticsControllerTests
     Assert.False(dto.SipRegistered);
     Assert.Null(dto.LastRegisterReceived);
     Assert.True(dto.IpReachable);
-    Assert.Equal("192.168.86.22", dto.IpAddress);
+    Assert.Equal("192.0.2.22", dto.IpAddress);
     Assert.Equal("1000", dto.Extension);
   }
 
@@ -98,10 +103,10 @@ public class DiagnosticsControllerTests
     // Simulate a REGISTER message so diagnostics sees the HT801 as registered
     _diagnostics.HandleSipMessage(new SipMessageEntry(
       DateTime.UtcNow, SipDirection.Received, "REGISTER",
-      "192.168.86.22:5060", "0.0.0.0:5060", null, null, null, null));
+      "192.0.2.22:5060", "0.0.0.0:5060", null, null, null, null));
 
     _ht801Service.Setup(s => s.GetConfig(It.IsAny<string>()))
-      .Returns(new HT801Config { IpAddress = "192.168.86.22", Extension = "1000" });
+      .Returns(new HT801Config { IpAddress = "192.0.2.22", Extension = "1000" });
     _ht801Service.Setup(s => s.TestConnectionAsync(It.IsAny<string>()))
       .ReturnsAsync(new HT801ConnectionTestResult { Success = true });
 
@@ -142,6 +147,7 @@ public class DiagnosticsControllerTests
       _gvAdapter,
       _gvAudioBridge,
       _config,
+      _bindingStore,
       NullLogger<DiagnosticsController>.Instance);
   }
 

@@ -89,6 +89,10 @@ See `2026_PROJECT_PLAN.md` for the detailed migration roadmap to Windows NUC and
 
 To ensure the Grandstream HT801 communicates correctly with the controller, configure the following settings via its web interface:
 
+> For the HT801's **IP address** — where it is configured, how to change it, and how to verify which
+> address the controller actually rings — see `docs/HT801-ADDRESS.md`. There is exactly one place to
+> set it, and one very convincing place *not* to verify it.
+
 ### 1. Basic Settings
 *   **SIP Server**: Enter the IP address of the Windows PC running this software (e.g., `192.168.1.100`).
 

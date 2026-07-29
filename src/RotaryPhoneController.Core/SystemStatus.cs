@@ -51,7 +51,19 @@ public class SystemStatus
     public string? Ht801IpAddress { get; set; }
 
     /// <summary>
-    /// Whether the HT801 is reachable (pingable)
+    /// Whether the HT801 is reachable (pingable).
+    /// <para>
+    /// <c>null</c> means NOT YET PROBED or CANNOT DETERMINE — it does NOT mean offline. Consumers
+    /// must render null as "Unknown", never as "Offline". Coercing unknown to false is how a healthy
+    /// device gets reported as dead (and, worse, how a dead one gets reported as merely unknown when
+    /// the probe is skipped). Pair with <see cref="Ht801LastCheckedUtc"/> to tell the two apart.
+    /// </para>
     /// </summary>
     public bool? Ht801Reachable { get; set; }
+
+    /// <summary>
+    /// When the HT801 reachability probe last ran. Null means never probed in this process —
+    /// which, combined with a null <see cref="Ht801Reachable"/>, means genuinely UNKNOWN, not offline.
+    /// </summary>
+    public DateTime? Ht801LastCheckedUtc { get; set; }
 }

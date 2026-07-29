@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.Core.Audio;
+using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.CallHistory;
 using RotaryPhoneController.Core.Configuration;
 
@@ -26,6 +27,7 @@ public class PhoneManagerService
     private readonly ILogger<CallManager> _callManagerLogger;
     private readonly IBluetoothDeviceManager? _deviceManager;
     private readonly ICallAdapterRegistry? _adapterRegistry;
+    private readonly IBellFailureTracker? _bellFailureTracker;
 
     public PhoneManagerService(
         ILogger<PhoneManagerService> logger,
@@ -36,7 +38,9 @@ public class PhoneManagerService
         ILogger<CallManager> callManagerLogger,
         ICallHistoryService? callHistoryService = null,
         IBluetoothDeviceManager? deviceManager = null,
-        ICallAdapterRegistry? adapterRegistry = null)
+        ICallAdapterRegistry? adapterRegistry = null,
+        // LAST so existing positional call sites keep compiling.
+        IBellFailureTracker? bellFailureTracker = null)
     {
         _logger = logger;
         _config = config;
@@ -47,6 +51,7 @@ public class PhoneManagerService
         _callHistoryService = callHistoryService;
         _deviceManager = deviceManager;
         _adapterRegistry = adapterRegistry;
+        _bellFailureTracker = bellFailureTracker;
 
         InitializePhones();
 
@@ -108,8 +113,10 @@ public class PhoneManagerService
             rtpPort,
             _callHistoryService,
             _deviceManager,
-            _adapterRegistry);
-        
+            _adapterRegistry,
+            outboundDialingTimeout: null,
+            bellFailureTracker: _bellFailureTracker);
+
         callManager.Initialize();
         _phoneManagers[phoneId] = callManager;
         

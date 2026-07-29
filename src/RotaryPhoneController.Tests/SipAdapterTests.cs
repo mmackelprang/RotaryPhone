@@ -77,9 +77,9 @@ public class SipAdapterTests
     {
         // Typical SDP body from an HT801 INVITE
         var sdp = "v=0\r\n" +
-                  "o=- 12345 12345 IN IP4 192.168.86.22\r\n" +
+                  "o=- 12345 12345 IN IP4 192.0.2.22\r\n" +
                   "s=GrandStream\r\n" +
-                  "c=IN IP4 192.168.86.22\r\n" +
+                  "c=IN IP4 192.0.2.22\r\n" +
                   "t=0 0\r\n" +
                   "m=audio 5004 RTP/AVP 0 101\r\n" +
                   "a=rtpmap:0 PCMU/8000\r\n" +
@@ -90,7 +90,7 @@ public class SipAdapterTests
         var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
 
         Assert.Equal(5004, port);
-        Assert.Equal("192.168.86.22", ip);
+        Assert.Equal("192.0.2.22", ip);
     }
 
     [Fact]
@@ -119,12 +119,12 @@ public class SipAdapterTests
     [Fact]
     public void ExtractRtpDetailsFromSdp_MissingMediaLine_ReturnsNegativePort()
     {
-        var sdp = "v=0\r\nc=IN IP4 192.168.86.22\r\n";
+        var sdp = "v=0\r\nc=IN IP4 192.0.2.22\r\n";
 
         var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
 
         Assert.Equal(-1, port);
-        Assert.Equal("192.168.86.22", ip);
+        Assert.Equal("192.0.2.22", ip);
     }
 
     [Fact]
@@ -142,12 +142,12 @@ public class SipAdapterTests
     public void ExtractRtpDetailsFromSdp_UnixLineEndings_ParsesCorrectly()
     {
         // SDP with Unix-style \n line endings
-        var sdp = "v=0\nc=IN IP4 192.168.86.22\nm=audio 5004 RTP/AVP 0 101\na=sendrecv\n";
+        var sdp = "v=0\nc=IN IP4 192.0.2.22\nm=audio 5004 RTP/AVP 0 101\na=sendrecv\n";
 
         var (port, ip) = SIPSorceryAdapter.ExtractRtpDetailsFromSdp(sdp);
 
         Assert.Equal(5004, port);
-        Assert.Equal("192.168.86.22", ip);
+        Assert.Equal("192.0.2.22", ip);
     }
 
     // ---------------------------------------------------------------------
@@ -167,10 +167,10 @@ public class SipAdapterTests
     /// </summary>
     private static SIPSorcery.SIP.SIPRequest BuildHT801OutboundInvite()
     {
-        var targetUri = SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:9193718044@192.168.86.50:5060");
+        var targetUri = SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:9193718044@192.0.2.50:5060");
         var fromHeader = new SIPSorcery.SIP.SIPFromHeader(
             "rotaryphone",
-            SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:rotaryphone@192.168.86.250:5060"),
+            SIPSorcery.SIP.SIPURI.ParseSIPURI("sip:rotaryphone@192.0.2.250:5060"),
             SIPSorcery.SIP.CallProperties.CreateNewTag());
         // UAC's initial INVITE: To header carries NO tag.
         var toHeader = new SIPSorcery.SIP.SIPToHeader(null, targetUri, null);
@@ -181,9 +181,9 @@ public class SipAdapterTests
         invite.Header.ContentType = "application/sdp";
         invite.Body =
             "v=0\r\n" +
-            "o=- 12345 12345 IN IP4 192.168.86.250\r\n" +
+            "o=- 12345 12345 IN IP4 192.0.2.250\r\n" +
             "s=GrandStream\r\n" +
-            "c=IN IP4 192.168.86.250\r\n" +
+            "c=IN IP4 192.0.2.250\r\n" +
             "t=0 0\r\n" +
             "m=audio 5004 RTP/AVP 0 101\r\n" +
             "a=rtpmap:0 PCMU/8000\r\n" +
@@ -196,7 +196,7 @@ public class SipAdapterTests
     {
         var invite = BuildHT801OutboundInvite();
 
-        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.0.2.50", 5060, 49000);
 
         // The whole point of the fix: a 200 OK with an SDP body MUST declare
         // Content-Type: application/sdp or the HT801 ignores the SDP.
@@ -208,13 +208,13 @@ public class SipAdapterTests
     {
         var invite = BuildHT801OutboundInvite();
 
-        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.0.2.50", 5060, 49000);
 
         Assert.False(string.IsNullOrEmpty(response.Body));
         // SDP must advertise the bridge bind port (49000) and our local IP so the
         // HT801 sends its RTP to the right destination.
         Assert.Contains("m=audio 49000 RTP/AVP", response.Body);
-        Assert.Contains("c=IN IP4 192.168.86.50", response.Body);
+        Assert.Contains("c=IN IP4 192.0.2.50", response.Body);
     }
 
     [Fact]
@@ -223,7 +223,7 @@ public class SipAdapterTests
         var invite = BuildHT801OutboundInvite();
         Assert.True(string.IsNullOrEmpty(invite.Header.To.ToTag)); // precondition: UAC INVITE has no To-tag
 
-        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.0.2.50", 5060, 49000);
 
         // A UAS MUST add a To-tag to a dialog-establishing 2xx (RFC 3261 §12.1.1).
         Assert.False(string.IsNullOrEmpty(response.Header.To.ToTag));
@@ -234,7 +234,7 @@ public class SipAdapterTests
     {
         var invite = BuildHT801OutboundInvite();
 
-        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.168.86.50", 5060, 49000);
+        var response = SIPSorceryAdapter.BuildInviteOkResponse(invite, "192.0.2.50", 5060, 49000);
 
         Assert.Equal(SIPSorcery.SIP.SIPResponseStatusCodesEnum.Ok, response.Status);
         Assert.NotNull(response.Header.Contact);

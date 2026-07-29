@@ -81,7 +81,7 @@ describe('Dashboard Component', () => {
         sipListening: false,
         sipListenAddress: '',
         sipPort: 0,
-        ht801IpAddress: '192.168.86.250',
+        ht801IpAddress: '192.0.2.250',
         ht801Reachable: true
       }
     })
@@ -90,6 +90,6 @@ describe('Dashboard Component', () => {
     
     expect(screen.getByText('HT801 ATA')).toBeInTheDocument()
     expect(screen.getByText('Online')).toBeInTheDocument()
-    expect(screen.getByText('192.168.86.250')).toBeInTheDocument()
+    expect(screen.getByText('192.0.2.250')).toBeInTheDocument()
   })
 })

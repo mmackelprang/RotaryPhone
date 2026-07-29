@@ -61,7 +61,6 @@ The GVBridge config section should already be in `appsettings.json` with default
   "WebSocketHost": "127.0.0.1",
   "LocalRtpPort": 5070,
   "LocalIp": "192.168.86.50",
-  "HT801Ip": "192.168.86.250",
   "HT801RtpPort": 5004,
   "AudioSampleRateHz": 16000,
   "AudioChannels": 1,
@@ -77,7 +76,16 @@ The GVBridge config section should already be in `appsettings.json` with default
 | Key | Where to find it |
 |---|---|
 | `LocalIp` | Radio box LAN IP — `hostname -I` |
-| `HT801Ip` | HT801 ATA IP — check router DHCP or HT801 web UI |
+
+### HT801 address
+
+The GVBridge section no longer carries an HT801 address. `GVBridge:HT801Ip` was removed — there is
+exactly **one** HT801 address key in the system, `RotaryPhone:Phones[].HT801IpAddress`, and the
+service also learns the real address from the device's own SIP REGISTER.
+
+See **`docs/HT801-ADDRESS.md`** before changing or verifying it. It covers every location the address
+can appear, the change procedure, and — importantly — which verification signals are trustworthy.
+`/api/phone/system-status` is **not** one of them.
 
 ---
 

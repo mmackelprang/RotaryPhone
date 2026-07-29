@@ -1,5 +1,41 @@
 # Known Issues
 
+## UI says "Ringing" but the bell never rings — INVITE sent to a stale HT801 address (RESOLVED 2026-07-29)
+
+**Status:** ✅ Resolved by the config-binder fix (PR #67, `fix/ht801-invite-target`) and hardened by the
+registrar-binding PR (`feat/ht801-registrar-binding`).
+**Symptom (was):** An inbound call showed **Ringing** in the Radio.Web UI for the full 60-second window
+while the physical rotary phone bell stayed silent. Nothing on screen, in the API, or in the logs said
+anything was wrong. `/api/phone/system-status` reported the *correct* HT801 address throughout.
+**Impact (was):** Every inbound call. The condition persisted for months undetected because the only
+obvious verification signal was the one signal that could not see it.
+**Root cause:** `AppConfiguration.Phones` was pre-seeded with one element carrying a hardcoded
+`192.168.86.22`, and .NET's `ConfigurationBinder` **appends** to a non-null `List<T>` rather than
+replacing it or binding into existing elements. A single-phone config therefore bound to *two* phones —
+the compiled default first, the real configuration second — and `PhoneManagerService` registration was
+first-wins, so it kept the hardcoded one and discarded the real entry with a single
+`Phone default is already registered` warning. Every INVITE went to `.22`. **No edit to any
+configuration file could fix it**, because the stale value was in the binary, not the config.
+Meanwhile `/api/phone/system-status` read a *different*, last-wins projection (`HT801ConfigService`)
+and truthfully reported the configured `.240` — a value that had nothing to do with the INVITE target.
+**Fix:**
+- **PR #67 (bell restoration):** `Phones` starts empty; `Program.cs` fails fast via a new
+  `AppConfigurationValidator` instead of re-seeding a default phone; `PhoneManagerService` throws on a
+  duplicate phone Id instead of silently keeping the first. Regression test `ConfigurationBindingTests`
+  exercises the real binder plus the real `PhoneManagerService` and fails on the pre-fix code.
+- **PR2 (durable):** no site-specific HT801 address anywhere in source; startup validation also rejects
+  a missing/unparseable address or extension; the service **learns** the HT801's address from the source
+  address of its SIP REGISTER and prefers that fresh binding over configuration, so a DHCP move
+  self-heals within one registration interval; `GVBridge:HT801Ip` deleted so there is exactly one
+  address key; new `GET /api/diagnostics/sip-registrations` reports where INVITEs will actually go.
+**Verify (and how NOT to):** use `INVITE target endpoint: udp:<ip>:5060` in the journal, the
+`Learned registrar binding:` line, and `/api/diagnostics/sip-registrations`. **Do not use
+`/api/phone/system-status` → `ht801IpAddress`** — it reports the configured projection, not the INVITE
+target, and reported the correct address for the entire duration of this bug.
+**See:** [`docs/HT801-ADDRESS.md`](HT801-ADDRESS.md) (address locations, change procedure, verification),
+[`docs/plans/ht801-address-resolution-and-config-binder-fix.md`](plans/ht801-address-resolution-and-config-binder-fix.md)
+(full analysis, including the empirical binder repro).
+
 ## Outbound: bridge started at placement → errno-101 blip + early-audio clipping (RESOLVED 2026-06-13)
 
 **Status:** ✅ Resolved by the outbound InCall-ordering PR (`fix/outbound-incall-ordering`).

@@ -34,5 +34,29 @@ public static class AppConfigurationValidator
                 "Each phone must have a unique Id. Duplicates were previously discarded silently, " +
                 "which routed calls to a stale HT801 address.");
         }
+
+        foreach (var phone in config.Phones)
+        {
+            if (string.IsNullOrWhiteSpace(phone.HT801IpAddress))
+            {
+                throw new ConfigurationValidationException(
+                    $"Phone '{phone.Id}' has no HT801IpAddress. Set " +
+                    $"\"RotaryPhone:Phones[].HT801IpAddress\" in appsettings.Production.json " +
+                    "(see docs/HT801-ADDRESS.md).");
+            }
+
+            if (!System.Net.IPAddress.TryParse(phone.HT801IpAddress, out _))
+            {
+                throw new ConfigurationValidationException(
+                    $"Phone '{phone.Id}' has an unparseable HT801IpAddress " +
+                    $"'{phone.HT801IpAddress}'. Expected a literal IPv4 address, e.g. 192.168.86.240.");
+            }
+
+            if (string.IsNullOrWhiteSpace(phone.HT801Extension))
+            {
+                throw new ConfigurationValidationException(
+                    $"Phone '{phone.Id}' has no HT801Extension (the SIP extension to ring, e.g. 1000).");
+            }
+        }
     }
 }

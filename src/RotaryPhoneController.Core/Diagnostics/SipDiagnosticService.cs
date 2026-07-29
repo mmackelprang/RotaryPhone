@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using RotaryPhoneController.Core.Bell;
 
 namespace RotaryPhoneController.Core.Diagnostics;
 
@@ -16,8 +17,10 @@ public class SipDiagnosticService : IHostedService, IDisposable
     private const int MaxBufferSize = 200;
     private readonly LinkedList<SipMessageEntry> _messageBuffer = new();
 
-    // INVITE tracking: callId → sentTime
-    private readonly Dictionary<string, DateTime> _pendingInvites = new();
+    // INVITE tracking: callId → (when it was sent, where it was sent). The target is carried so a
+    // failure can name the address the INVITE actually went to — the single most useful fact when
+    // the bell does not ring.
+    private readonly Dictionary<string, (DateTime SentAt, string? Target)> _pendingInvites = new();
     private static readonly TimeSpan InviteTimeout = TimeSpan.FromSeconds(5);
 
     // HT801 registration state
@@ -38,6 +41,16 @@ public class SipDiagnosticService : IHostedService, IDisposable
     public event Action<string, string[]>? OnDiagnosisGenerated;
     public event Action<Ht801HealthStatus>? OnHt801HealthUpdate;
     public event Action<CallTimelineEntry>? OnCallTimelineEvent;
+
+    /// <summary>
+    /// A sent INVITE failed. The ONLY sent INVITEs in this system are bell rings to the HT801
+    /// (SIPSorceryAdapter is the only source wired into HandleSipMessage), so this is a bell failure.
+    /// Args: (callId, reason, target, detail).
+    /// </summary>
+    public event Action<string, BellFailureReason, string?, string?>? OnSentInviteFailed;
+
+    /// <summary>A sent INVITE was answered with 180 Ringing or 200 OK — the bell demonstrably rang.</summary>
+    public event Action<string>? OnSentInviteSucceeded;
 
     public SipDiagnosticService(ILogger<SipDiagnosticService> logger)
     {
@@ -66,14 +79,18 @@ public class SipDiagnosticService : IHostedService, IDisposable
             HandleRegister(entry);
         }
 
-        // Track sent INVITEs
+        // Track sent INVITEs.
+        // A DiagnosticNote on a sent INVITE means the send itself failed. The immediate path already
+        // reported that failure; tracking it here would fire a SECOND, wrongly-reasoned failure when the
+        // response that can never arrive times out.
         if (string.Equals(entry.Method, "INVITE", StringComparison.OrdinalIgnoreCase)
             && entry.Direction == SipDirection.Sent
-            && entry.CallId is not null)
+            && entry.CallId is not null
+            && entry.DiagnosticNote is null)
         {
             lock (_lock)
             {
-                _pendingInvites[entry.CallId] = entry.Timestamp;
+                _pendingInvites[entry.CallId] = (entry.Timestamp, entry.ToAddress);
             }
 
             AddTimelineEvent("INVITE_SENT", $"INVITE sent to {entry.ToAddress}", entry.CallId);
@@ -105,30 +122,90 @@ public class SipDiagnosticService : IHostedService, IDisposable
 
         if (callId is null) return;
 
+        // What to do once the lock is released. The bell events MUST be raised outside the lock —
+        // their subscribers take the BellFailureTracker's lock and broadcast over SignalR, and
+        // holding both locks in this order would be a lock-ordering hazard.
+        //
+        // A 180/200 to an INVITE is proof the bell rang, so success is raised UNCONDITIONALLY —
+        // deliberately NOT gated on the _pendingInvites lookup. InviteTimeout is 5s, so a 180
+        // arriving at 5.5s finds the entry already evicted by CheckInviteTimeouts; gating success on
+        // the lookup would leave the (false) failure alert stuck until some later call happened to
+        // answer inside 5s. BellFailureTracker.RecordSuccess is a no-op when nothing is stored, so
+        // raising for an untracked call-id is safe.
+        //
+        // The INVITE-method qualifier is load-bearing: responses are logged with their CSeq method,
+        // and a CANCEL or BYE for the same dialog carries the INVITE's Call-ID. Without it, the 200
+        // acknowledging a CANCEL — sent precisely BECAUSE the phone never rang — would clear the
+        // alert. The _pendingInvites lookup used to provide this filtering implicitly.
+        bool succeeded = (code == 180 || code == 200)
+            && string.Equals(entry.Method, "INVITE", StringComparison.OrdinalIgnoreCase);
+        bool failed = false;
+        BellFailureReason reason = BellFailureReason.Unknown;
+        string? target = null;
+        string? detail = null;
+        string? diagnosisIssue = null;
+        string[]? diagnosisSuggestions = null;
+        string? timelineEventType = null;
+        string? timelineDescription = null;
+
+        // Timeline events stay gated on the pending lookup, exactly as before.
         lock (_lock)
         {
-            if (!_pendingInvites.ContainsKey(callId))
-                return;
-
-            // 180 Ringing or 200 OK — INVITE is progressing, remove from tracking
-            if (code == 180 || code == 200)
+            if (_pendingInvites.TryGetValue(callId, out var pending))
             {
-                _pendingInvites.Remove(callId);
-                string eventType = code == 180 ? "RINGING" : "CALL_ANSWERED";
-                AddTimelineEvent(eventType, $"{code} response for {callId}", callId);
-                return;
+                // 180 Ringing or 200 OK — INVITE is progressing, remove from tracking
+                if (code == 180 || code == 200)
+                {
+                    _pendingInvites.Remove(callId);
+                    timelineEventType = code == 180 ? "RINGING" : "CALL_ANSWERED";
+                    timelineDescription = $"{code} response for {callId}";
+                }
+                // 4xx+ error responses — remove and generate diagnosis
+                else if (code >= 400)
+                {
+                    _pendingInvites.Remove(callId);
+                    failed = true;
+                    // 404/480 mean the registrar has no usable binding for the URI we rang; anything
+                    // else 4xx/5xx/6xx is the device actively refusing the call.
+                    reason = code is 404 or 480
+                        ? BellFailureReason.NotRegistered
+                        : BellFailureReason.Rejected;
+                    // Prefer the address recorded when the INVITE was SENT. This entry is a
+                    // RECEIVED response, and received messages are logged from=remote, to=LOCAL —
+                    // so entry.ToAddress here is OUR endpoint, not the HT801's. Reporting that as
+                    // the bell target would be actively misleading now that `target` is surfaced
+                    // over SignalR and REST. Fall back to the responder's address if, somehow,
+                    // nothing was recorded at send time.
+                    target = pending.Target ?? entry.FromAddress;
+                    detail = $"{code} {entry.StatusText}";
+                    diagnosisSuggestions = GetSuggestionsForStatusCode(code);
+                    diagnosisIssue = $"INVITE to {entry.ToAddress} failed with {code} {entry.StatusText}";
+                    timelineEventType = "INVITE_FAILED";
+                    timelineDescription = $"{code} {entry.StatusText} for {callId}";
+                }
+                // 1xx/2xx-other/3xx: the INVITE is still in flight — leave it pending so a
+                // later timeout can still fire.
             }
+        }
 
-            // 4xx+ error responses — remove and generate diagnosis
-            if (code >= 400)
-            {
-                _pendingInvites.Remove(callId);
-                string[] suggestions = GetSuggestionsForStatusCode(code);
-                string issue = $"INVITE to {entry.ToAddress} failed with {code} {entry.StatusText}";
-                _logger.LogWarning("SIP diagnosis: {Issue}", issue);
-                OnDiagnosisGenerated?.Invoke(issue, suggestions);
-                AddTimelineEvent("INVITE_FAILED", $"{code} {entry.StatusText} for {callId}", callId);
-            }
+        if (diagnosisIssue is not null)
+        {
+            _logger.LogWarning("SIP diagnosis: {Issue}", diagnosisIssue);
+            OnDiagnosisGenerated?.Invoke(diagnosisIssue, diagnosisSuggestions!);
+        }
+
+        if (timelineEventType is not null)
+        {
+            AddTimelineEvent(timelineEventType, timelineDescription!, callId);
+        }
+
+        if (succeeded)
+        {
+            OnSentInviteSucceeded?.Invoke(callId);
+        }
+        else if (failed)
+        {
+            OnSentInviteFailed?.Invoke(callId, reason, target, detail);
         }
     }
 
@@ -137,21 +214,21 @@ public class SipDiagnosticService : IHostedService, IDisposable
     /// </summary>
     public void CheckInviteTimeouts()
     {
-        List<(string callId, DateTime sentTime)> timedOut;
+        List<(string CallId, string? Target)> timedOut;
 
         lock (_lock)
         {
             var now = DateTime.UtcNow;
             timedOut = _pendingInvites
-                .Where(kv => now - kv.Value > InviteTimeout)
-                .Select(kv => (kv.Key, kv.Value))
+                .Where(kv => now - kv.Value.SentAt > InviteTimeout)
+                .Select(kv => (kv.Key, kv.Value.Target))
                 .ToList();
 
             foreach (var (callId, _) in timedOut)
                 _pendingInvites.Remove(callId);
         }
 
-        foreach (var (callId, sentTime) in timedOut)
+        foreach (var (callId, target) in timedOut)
         {
             string issue = $"INVITE timeout: no response for call {callId} after {InviteTimeout.TotalSeconds}s";
             string[] suggestions = new[]
@@ -166,6 +243,14 @@ public class SipDiagnosticService : IHostedService, IDisposable
             _logger.LogWarning("SIP diagnosis: {Issue}", issue);
             OnDiagnosisGenerated?.Invoke(issue, suggestions);
             AddTimelineEvent("INVITE_TIMEOUT", $"No response for {callId}", callId);
+
+            // This is the failure that actually fires in production: a UDP send to a
+            // dead-but-routable address succeeds at the socket level, so the only evidence the
+            // bell did not ring is the absence of a 180/200.
+            // F0, not N0: this string crosses a service boundary into Radio.Web's diagnostics card,
+            // and N0 would render a culture-dependent thousands separator ("5,000 ms").
+            OnSentInviteFailed?.Invoke(callId, BellFailureReason.Timeout, target,
+                $"no response to INVITE after {InviteTimeout.TotalMilliseconds:F0} ms");
         }
     }
 

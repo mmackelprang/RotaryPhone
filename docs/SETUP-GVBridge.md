@@ -155,7 +155,6 @@ The GVBridge section (update IPs for your network):
     "WebSocketHost": "127.0.0.1",
     "LocalRtpPort": 5070,
     "LocalIp": "0.0.0.0",
-    "HT801Ip": "192.168.86.22",
     "HT801RtpPort": 5004,
     "AudioSampleRateHz": 16000,
     "AudioChannels": 1,
@@ -166,6 +165,11 @@ The GVBridge section (update IPs for your network):
   }
 }
 ```
+
+> **There is no `GVBridge:HT801Ip` key.** It was removed — the HT801's address has exactly one
+> home, `RotaryPhone:Phones[].HT801IpAddress`, and at runtime the address learned from the device's
+> own SIP REGISTER wins over it. See **[docs/HT801-ADDRESS.md](HT801-ADDRESS.md)** for the one place
+> to change the address and how to verify it correctly.
 
 ### Key files on the radio box
 

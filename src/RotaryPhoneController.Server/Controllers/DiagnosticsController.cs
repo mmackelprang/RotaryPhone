@@ -3,6 +3,7 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
+using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Services;
 
@@ -18,6 +19,7 @@ public class DiagnosticsController : ControllerBase
     private readonly GVApiAdapter _gvAdapter;
     private readonly GVAudioBridgeService _gvAudioBridge;
     private readonly AppConfiguration _config;
+    private readonly IRegistrarBindingStore _bindingStore;
     private readonly ILogger<DiagnosticsController> _logger;
 
     public DiagnosticsController(
@@ -27,6 +29,7 @@ public class DiagnosticsController : ControllerBase
         GVApiAdapter gvAdapter,
         GVAudioBridgeService gvAudioBridge,
         AppConfiguration config,
+        IRegistrarBindingStore bindingStore,
         ILogger<DiagnosticsController> logger)
     {
         _diagnostics = diagnostics;
@@ -35,7 +38,30 @@ public class DiagnosticsController : ControllerBase
         _gvAdapter = gvAdapter;
         _gvAudioBridge = gvAudioBridge;
         _config = config;
+        _bindingStore = bindingStore;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Learned registrar bindings — i.e. where INVITEs will ACTUALLY be sent.
+    /// Use this, NOT /api/phone/system-status, to verify HT801 addressing: system-status reports the
+    /// configured address, which is a different value and can disagree.
+    /// </summary>
+    [HttpGet("sip-registrations")]
+    public IActionResult GetSipRegistrations()
+    {
+        var now = DateTime.UtcNow;
+
+        return Ok(_bindingStore.All().Select(b => new
+        {
+            addressOfRecord = b.AddressOfRecord,
+            address = b.Address,
+            port = b.Port,
+            contactHost = b.ContactHost,
+            learnedAtUtc = b.LearnedAtUtc,
+            expiresSeconds = b.ExpiresSeconds,
+            isFresh = b.IsFresh(now)
+        }));
     }
 
     /// <summary>
@@ -139,6 +165,11 @@ public class DiagnosticsController : ControllerBase
 
     /// <summary>
     /// Send a test INVITE to the HT801 to verify SIP connectivity.
+    ///
+    /// The log line and the response body report where the INVITE ACTUALLY went, not what is
+    /// configured. <see cref="IHT801ConfigService.GetConfig"/> is a last-wins projection over
+    /// data/ht801-config.json and is explicitly NOT a valid verification signal for addressing
+    /// (docs/HT801-ADDRESS.md), so it is used only for the extension and as the resolver's fallback.
     /// </summary>
     [HttpPost("test-ring")]
     public IActionResult TestRing([FromQuery] string? phoneId = null)
@@ -146,14 +177,16 @@ public class DiagnosticsController : ControllerBase
         phoneId ??= _config.Phones.FirstOrDefault()?.Id ?? "default";
         var ht801Config = _ht801Service.GetConfig(phoneId);
 
-        _logger.LogInformation("Sending test INVITE to HT801 at {Ip} for extension {Ext}",
-            ht801Config.IpAddress, ht801Config.Extension);
+        var target = _sipAdapter.ResolveHt801Address(ht801Config.Extension, ht801Config.IpAddress);
 
-        _sipAdapter.SendInviteToHT801(ht801Config.Extension, ht801Config.IpAddress);
+        _logger.LogInformation("Sending test INVITE to HT801 at {Ip} for extension {Ext}",
+            target, ht801Config.Extension);
+
+        _sipAdapter.SendInviteToHT801(ht801Config.Extension, target);
 
         return Ok(new
         {
-            Message = $"Test INVITE sent to {ht801Config.Extension}@{ht801Config.IpAddress}",
+            Message = $"Test INVITE sent to {ht801Config.Extension}@{target}",
             PhoneId = phoneId
         });
     }
