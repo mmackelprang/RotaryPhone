@@ -352,11 +352,22 @@ public class CallManager
     }
 
     /// <summary>
-    /// The address this call is actually using — the value resolved when the bell was rung. Falls
-    /// back to configuration only for call paths that never rang the bell (e.g. an outbound call
-    /// answered on the handset before any INVITE was sent).
+    /// The address this call's audio must be bridged to, in descending order of authority:
+    ///
+    /// 1. <c>_resolvedHt801Address</c> — the address THIS call rang at. Once the bell has rung, the
+    ///    audio has to follow it, even if the binding has moved since.
+    /// 2. <c>_negotiatedRtpIp</c> — the address the HT801 itself put in its SDP. On the OUTBOUND leg
+    ///    no bell was rung, so (1) is null; the device's own SDP is then the most authoritative
+    ///    statement of where it is.
+    /// 3. A fresh resolution. The raw configured value is never used directly: <see cref="HandleScoConnected"/>
+    ///    fires for outbound BT calls too (it gates on the active device, not on <see cref="CallState"/>),
+    ///    so falling back to configuration here would bridge outbound audio to a stale address under
+    ///    exactly the config/learned mismatch this work exists to survive.
     /// </summary>
-    private string EffectiveHt801Address => _resolvedHt801Address ?? _phoneConfig.HT801IpAddress;
+    private string EffectiveHt801Address =>
+        _resolvedHt801Address
+        ?? _negotiatedRtpIp
+        ?? _sipAdapter.ResolveHt801Address(_phoneConfig.HT801Extension, _phoneConfig.HT801IpAddress);
 
     /// <summary>
     /// The INVITE could not be put on the wire, so the bell definitely did not ring.

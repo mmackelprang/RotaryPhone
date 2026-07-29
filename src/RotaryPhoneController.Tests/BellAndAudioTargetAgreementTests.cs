@@ -37,7 +37,13 @@ public class BellAndAudioTargetAgreementTests
     /// INVITE was actually aimed at. The adapter needs no live SIP transport: only resolution is
     /// exercised, and the INVITE itself is captured rather than sent.
     /// </summary>
-    private static Harness BuildHarness(IRegistrarBindingStore store)
+    /// <param name="deviceManager">
+    /// Optional BT device manager, needed only by the outbound test — the SCO-connected event it
+    /// raises is the outbound leg's entry into the RTP bridge.
+    /// </param>
+    private static Harness BuildHarness(
+        IRegistrarBindingStore store,
+        Mock<IBluetoothDeviceManager>? deviceManager = null)
     {
         var resolver = new SIPSorceryAdapter(Mock.Of<Serilog.ILogger>(), "0.0.0.0", 5060, store);
 
@@ -70,7 +76,8 @@ public class BellAndAudioTargetAgreementTests
             rtpBridge.Object,
             Mock.Of<ILogger<CallManager>>(),
             phoneConfig,
-            RtpPort);
+            RtpPort,
+            deviceManager: deviceManager?.Object);
         callManager.Initialize();
 
         return new Harness(callManager, rtpBridge, () => inviteTarget);
@@ -154,5 +161,38 @@ public class BellAndAudioTargetAgreementTests
 
         h.RtpBridge.Verify(
             x => x.StartBridgeAsync($"{LearnedIp}:{RtpPort}", AudioRoute.RotaryPhone), Times.Once);
+    }
+
+    [Fact]
+    public void OutboundCall_BridgesToTheLearnedAddress_EvenThoughNoBellWasRung()
+    {
+        // The OUTBOUND leg has no bell ring, so there is no address cached from one. HandleScoConnected
+        // fires here all the same — it gates on the active BT device, not on CallState — so if the
+        // fallback were the raw configured address, a config/learned mismatch would bridge outbound
+        // audio to the stale host. Same failure class as the inbound split, on the leg without a ring.
+        var store = new RegistrarBindingStore();
+        store.Record(new RegistrarBinding("rotaryphone", LearnedIp, 5060, LearnedIp,
+            DateTime.UtcNow, 3600));
+
+        var device = new BluetoothDevice("AA:BB:CC:DD:EE:FF", "Test Phone",
+            IsConnected: true, IsPaired: true, HasActiveCall: false, HasIncomingCall: false,
+            HasScoAudio: false);
+
+        var deviceManager = new Mock<IBluetoothDeviceManager>();
+        deviceManager.SetupGet(m => m.ConnectedDevices).Returns(new[] { device });
+
+        var h = BuildHarness(store, deviceManager);
+
+        // Handset lifted from Idle: an outbound call. No INVITE is sent, so nothing is cached.
+        h.CallManager.HandleHookChange(true);
+        Assert.Null(h.InviteTarget());
+
+        // SCO comes up and the audio bridge starts.
+        deviceManager.Raise(m => m.OnScoAudioConnected += null, device);
+
+        h.RtpBridge.Verify(
+            x => x.StartBridgeAsync($"{LearnedIp}:{RtpPort}", AudioRoute.RotaryPhone), Times.Once);
+        h.RtpBridge.Verify(
+            x => x.StartBridgeAsync($"{ConfiguredIp}:{RtpPort}", AudioRoute.RotaryPhone), Times.Never);
     }
 }
