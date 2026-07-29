@@ -41,7 +41,9 @@ if (args.Contains("gv-login"))
     else
         logger.LogError("Cookie extraction failed. Ensure Chrome/Chromium is running and you are logged into voice.google.com.");
 
-    return;
+    // Returning a value anywhere in top-level statements makes the implicit Main return int,
+    // so this early exit must be explicit too.
+    return 0;
 }
 
 var builder = WebApplication.CreateBuilder(args);
@@ -62,11 +64,18 @@ builder.Services.AddSingleton<Serilog.ILogger>(Log.Logger);
 var appConfig = new AppConfiguration();
 builder.Configuration.GetSection("RotaryPhone").Bind(appConfig);
 
-// Validate configuration
-if (appConfig.Phones.Count == 0)
+// Validate configuration — fail fast and loudly. There is no safe default here: the previous
+// behaviour (warn, then append a `new RotaryPhoneConfig()`) reintroduced a hardcoded HT801 address
+// and produced a service that looked healthy while the bell never rang.
+try
 {
-    Log.Warning("No phones configured, using default configuration");
-    appConfig.Phones.Add(new RotaryPhoneConfig());
+    AppConfigurationValidator.Validate(appConfig);
+}
+catch (ConfigurationValidationException ex)
+{
+    Log.Fatal("Invalid RotaryPhone configuration: {Message}", ex.Message);
+    Log.CloseAndFlush();
+    return 1;
 }
 
 // Add services to the container.
@@ -394,3 +403,7 @@ app.MapGVBridge();
 app.MapFallbackToFile("index.html");
 
 app.Run();
+
+// Normal shutdown. Explicit because the config-validation failure path above returns 1, which makes
+// the implicit Main return int — every code path must then return a value.
+return 0;

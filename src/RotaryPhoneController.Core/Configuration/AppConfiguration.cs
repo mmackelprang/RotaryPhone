@@ -119,10 +119,11 @@ public class AppConfiguration
     public string ContactsStoragePath { get; set; } = "data/contacts.json";
     
     /// <summary>
-    /// List of configured rotary phones
+    /// List of configured rotary phones. Bound from "RotaryPhone:Phones".
+    /// MUST start empty. .NET's ConfigurationBinder APPENDS to a non-null List&lt;T&gt; rather than
+    /// replacing it or binding into existing elements, so any pre-seeded element survives binding
+    /// and — because registration was first-wins — shadowed the real configuration entirely.
+    /// See docs/plans/ht801-address-resolution-and-config-binder-fix.md.
     /// </summary>
-    public List<RotaryPhoneConfig> Phones { get; set; } = new()
-    {
-        new RotaryPhoneConfig()
-    };
+    public List<RotaryPhoneConfig> Phones { get; set; } = new();
 }
