@@ -36,6 +36,21 @@ public interface ISipAdapter
     bool SendInviteToHT801(string extensionToRing, string targetIP, int localRtpPort = 49000);
 
     /// <summary>
+    /// Resolves the address the HT801 can actually be reached at: a fresh learned registrar binding
+    /// when one exists, otherwise <paramref name="configuredIP"/>.
+    /// </summary>
+    /// <remarks>
+    /// Exposed on the interface so that callers needing the SAME address for a DIFFERENT purpose —
+    /// specifically the RTP audio bridge — cannot drift from the address the bell was rung at.
+    /// Before this existed, <see cref="SendInviteToHT801"/> resolved internally while the legacy
+    /// Bluetooth/SipTrunk RTP bridge used the raw configured value, so a config/learned mismatch
+    /// produced a call that rang at one address and streamed audio to another. That split-brain is
+    /// the exact failure class this work exists to remove, so there is ONE resolver and every leg
+    /// goes through it. Do not reimplement this precedence anywhere else.
+    /// </remarks>
+    string ResolveHt801Address(string extensionToRing, string configuredIP);
+
+    /// <summary>
     /// Cancel a pending SIP INVITE (stop the rotary phone from ringing).
     /// Sends SIP CANCEL/BYE for an unanswered INVITE dialog.
     /// </summary>

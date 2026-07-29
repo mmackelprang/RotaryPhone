@@ -70,6 +70,12 @@ public class ConfigurationBindingTests
     {
         var appConfig = BindSinglePhone();
         var sipAdapter = new Mock<ISipAdapter>();
+        // No registrar binding learned: resolution passes the configured address through, so this
+        // test still asserts exactly what it always did — that the CONFIGURED address is rung,
+        // not a value compiled into source.
+        sipAdapter
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns((string _, string configured) => configured);
 
         var manager = new PhoneManagerService(
             Mock.Of<ILogger<PhoneManagerService>>(),

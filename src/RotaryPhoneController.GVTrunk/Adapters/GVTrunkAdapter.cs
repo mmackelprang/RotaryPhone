@@ -206,6 +206,13 @@ public class GVTrunkAdapter : ITrunkAdapter, IDisposable
         return false;
     }
 
+    /// <summary>
+    /// This adapter learns no registrar bindings — it never receives the HT801's REGISTERs; the
+    /// primary SIP adapter does. With nothing learned, the honest answer is the configured address,
+    /// which is exactly what the primary adapter falls back to in the same situation.
+    /// </summary>
+    public string ResolveHt801Address(string extensionToRing, string configuredIP) => configuredIP;
+
     public void CancelPendingInvite()
     {
         _logger.Debug("GVTrunk CancelPendingInvite called");

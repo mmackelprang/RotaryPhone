@@ -27,6 +27,13 @@ public class CallManagerTests
         _mockSipAdapter
             .Setup(x => x.SendInviteToHT801(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>()))
             .Returns(true);
+        // Address resolution passes the configured value straight through — the "no registrar
+        // binding learned yet" case. Without this, Moq returns null for a string-returning method
+        // and CallManager would ring a null address. Tests that care about resolution live in
+        // BellAndAudioTargetAgreementTests, which wires the real resolver.
+        _mockSipAdapter
+            .Setup(x => x.ResolveHt801Address(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns((string _, string configured) => configured);
         _mockBluetoothAdapter = new Mock<IBluetoothHfpAdapter>();
         _mockRtpBridge = new Mock<IRtpAudioBridge>();
         _mockCallHistory = new Mock<ICallHistoryService>();

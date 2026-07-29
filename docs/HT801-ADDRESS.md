@@ -112,21 +112,29 @@ rather than warned about, so the line should never appear again.
 > INVITE went to `.22`.** It is the reason the bug survived so long. Do not use it to verify
 > addressing — use the four signals above.
 
-### A deliberate quirk during a configured/learned mismatch
+### What a configured/learned mismatch looks like
 
-When the configured address and the learned binding disagree, the two log lines print *different*
-addresses on purpose:
+The warning names the problem; every line after it shows the address traffic actually went to:
 
 ```
 Configured HT801 address 192.168.86.99 does not match the learned address 192.168.86.240 —
   using the learned address. Update RotaryPhone:Phones[].HT801IpAddress
-CallManager sending INVITE to 1000@192.168.86.99 ...     <- CONFIGURED (what the caller asked for)
-INVITE target endpoint: udp:192.168.86.240:5060          <- RESOLVED (where it actually went)
+CallManager sending INVITE to 1000@192.168.86.240 (SDP RTP port 49000)
+INVITE target endpoint: udp:192.168.86.240:5060
+SCO audio connected for ... — starting RTP bridge to 192.168.86.240:49000
 ```
 
-`CallManager sending INVITE to ...` is emitted by the caller before resolution, so it shows the
-**configured** address. **`INVITE target endpoint:` is authoritative** — that is the address the
-socket wrote to, and the bell rings there. The warning line names the config key to fix.
+The warning is the **only** place the stale configured value appears, and it names the key to fix.
+
+**The bell line and the audio line must agree.** Both are resolved once per call, from the same
+resolver, and the result is cached for the duration of the call — so they cannot diverge. If you
+ever see `INVITE target endpoint` and `starting RTP bridge to` pointing at different hosts, that is
+a bug, not a quirk.
+
+> An earlier draft of this document described a "deliberate quirk" in which `CallManager sending
+> INVITE to ...` printed the *configured* address while the INVITE went somewhere else. That was
+> real, and it was removed before this shipped: a journal line printing an address the datagram
+> never went to is precisely the kind of half-truth that let the original bug hide for months.
 
 ---
 

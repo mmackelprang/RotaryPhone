@@ -498,12 +498,16 @@ public class SIPSorceryAdapter : ISipAdapter
     }
 
     /// <summary>
-    /// Chooses the address an INVITE is actually sent to: a fresh learned registrar binding when one
-    /// exists, otherwise the configured address. The log line this emits is the ONLY trustworthy
+    /// Chooses the address the HT801 is actually reached at: a fresh learned registrar binding when
+    /// one exists, otherwise the configured address. The log line this emits is the ONLY trustworthy
     /// answer to "which address will the bell be rung at" — /api/phone/system-status reports the
     /// configured value and can disagree.
+    ///
+    /// This is the single resolver for the whole system. Both the INVITE that rings the bell and the
+    /// RTP endpoint that carries the audio go through it, so the two legs cannot disagree. It is
+    /// idempotent: resolving an already-resolved address returns that address unchanged.
     /// </summary>
-    internal string ResolveTargetAddress(string extensionToRing, string configuredIP)
+    public string ResolveHt801Address(string extensionToRing, string configuredIP)
     {
         var binding = _bindingStore?.Get(extensionToRing) ?? _bindingStore?.GetSingle();
 
@@ -543,7 +547,7 @@ public class SIPSorceryAdapter : ISipAdapter
             // Single chokepoint: every caller (CallManager x2, DiagnosticsController) routes through
             // here, so resolution lives here rather than at each call site. `targetIP` becomes the
             // cold-start fallback for the window before the first REGISTER arrives.
-            targetIP = ResolveTargetAddress(extensionToRing, targetIP);
+            targetIP = ResolveHt801Address(extensionToRing, targetIP);
 
             _logger.Information("Sending INVITE to HT801 at {IP} for extension {Extension}", targetIP, extensionToRing);
 

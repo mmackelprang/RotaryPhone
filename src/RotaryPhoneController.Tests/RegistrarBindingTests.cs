@@ -22,14 +22,14 @@ public class RegistrarBindingTests
         var store = new RegistrarBindingStore();
         store.Record(Fresh("1000", LearnedIp));
 
-        Assert.Equal(LearnedIp, AdapterWith(store).ResolveTargetAddress("1000", ConfiguredIp));
+        Assert.Equal(LearnedIp, AdapterWith(store).ResolveHt801Address("1000", ConfiguredIp));
     }
 
     [Fact]
     public void Resolve_FallsBackToConfigured_WhenNothingLearnedYet()
     {
         Assert.Equal(ConfiguredIp,
-            AdapterWith(new RegistrarBindingStore()).ResolveTargetAddress("1000", ConfiguredIp));
+            AdapterWith(new RegistrarBindingStore()).ResolveHt801Address("1000", ConfiguredIp));
     }
 
     [Fact]
@@ -40,7 +40,7 @@ public class RegistrarBindingTests
         store.Record(new RegistrarBinding("1000", LearnedIp, 5060, LearnedIp,
             DateTime.UtcNow.AddHours(-2), 60));
 
-        Assert.Equal(ConfiguredIp, AdapterWith(store).ResolveTargetAddress("1000", ConfiguredIp));
+        Assert.Equal(ConfiguredIp, AdapterWith(store).ResolveHt801Address("1000", ConfiguredIp));
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public class RegistrarBindingTests
         var store = new RegistrarBindingStore();
         store.Record(Fresh("rotaryphone", LearnedIp));
 
-        Assert.Equal(LearnedIp, AdapterWith(store).ResolveTargetAddress("1000", ConfiguredIp));
+        Assert.Equal(LearnedIp, AdapterWith(store).ResolveHt801Address("1000", ConfiguredIp));
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public class RegistrarBindingTests
         store.Record(Fresh("rotaryphone", LearnedIp));
         store.Record(Fresh("kitchen", "192.0.2.241"));
 
-        Assert.Equal(ConfiguredIp, AdapterWith(store).ResolveTargetAddress("1000", ConfiguredIp));
+        Assert.Equal(ConfiguredIp, AdapterWith(store).ResolveHt801Address("1000", ConfiguredIp));
     }
 
     [Fact]
