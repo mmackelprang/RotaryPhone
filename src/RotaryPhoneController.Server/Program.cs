@@ -208,7 +208,9 @@ builder.Services.AddSingleton<PhoneManagerService>(sp =>
         callHistoryService,
         deviceManager,
         adapterRegistry,
-        sp.GetRequiredService<IBellFailureTracker>());
+        // Named, not positional: PhoneManagerService's tail is optional parameters, and a silent
+        // mis-bind there is exactly the bug class this change set exists to eliminate.
+        bellFailureTracker: sp.GetRequiredService<IBellFailureTracker>());
 });
 
 // Register SignalR Notifier Service (Hosted Service)
