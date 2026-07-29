@@ -7,7 +7,6 @@ using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Core.Platform;
-using RotaryPhoneController.Core.Sip;
 using RotaryPhoneController.Server.Hubs;
 
 namespace RotaryPhoneController.Server.Services;
@@ -24,7 +23,6 @@ public class SignalRNotifierService : IHostedService
     private readonly SipDiagnosticService _diagnostics;
     private readonly IBellFailureTracker _bellFailureTracker;
     private readonly IHT801ConfigService _ht801Service;
-    private readonly IRegistrarBindingStore _bindingStore;
     private bool _lastBluetoothConnected;
 
     // Cached HT801 reachability. The probe is kicked off on a slow cadence from the existing 1s
@@ -65,7 +63,6 @@ public class SignalRNotifierService : IHostedService
         SipDiagnosticService diagnostics,
         IBellFailureTracker bellFailureTracker,
         IHT801ConfigService ht801Service,
-        IRegistrarBindingStore bindingStore,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -77,7 +74,6 @@ public class SignalRNotifierService : IHostedService
         _diagnostics = diagnostics;
         _bellFailureTracker = bellFailureTracker;
         _ht801Service = ht801Service;
-        _bindingStore = bindingStore;
         _deviceManager = deviceManager;
     }
 
@@ -334,14 +330,20 @@ public class SignalRNotifierService : IHostedService
     /// </summary>
     private async Task ProbeHt801Async()
     {
-        // Probe the address an INVITE would ACTUALLY be sent to, resolved the same way
-        // SIPSorceryAdapter.ResolveTargetAddress resolves it. IHT801ConfigService.GetConfig is a
-        // last-wins projection — it seeds from AppConfiguration then overwrites from
-        // data/ht801-config.json — so a stale on-disk file would have us report a fully working
+        // Probe the address an INVITE would ACTUALLY be sent to, by asking the one resolver rather
+        // than reimplementing its precedence here — a copy drifts, and this one had: it looked at
+        // GetSingle() only, so with two registered bindings it fell back to configuration where the
+        // resolver would have matched on the AOR. IHT801ConfigService.GetConfig is likewise unusable
+        // here: it is a last-wins projection (seeded from AppConfiguration, then overwritten from
+        // data/ht801-config.json), so a stale on-disk file would have us report a fully working
         // device as unreachable, which is precisely the class of untruth this work removes.
-        var address = _bindingStore.GetSingle() is { } b && b.IsFresh(DateTime.UtcNow)
-            ? b.Address
-            : _config.Phones.FirstOrDefault()?.HT801IpAddress;
+        //
+        // logDiagnostics: false — this runs every 30 seconds and must not spam the journal with a
+        // decision the ring path already logs once, loudly.
+        var phone = _config.Phones.FirstOrDefault();
+        var address = phone is null
+            ? null
+            : _sipAdapter.ResolveHt801Address(phone.HT801Extension, phone.HT801IpAddress, logDiagnostics: false);
 
         // No usable address is a CONFIGURATION problem, not an offline device. Leave the reachable
         // value null ("Unknown") rather than reporting a device we never asked about as down.
