@@ -170,7 +170,13 @@ public class SipDiagnosticService : IHostedService, IDisposable
                     reason = code is 404 or 480
                         ? BellFailureReason.NotRegistered
                         : BellFailureReason.Rejected;
-                    target = entry.ToAddress ?? pending.Target;
+                    // Prefer the address recorded when the INVITE was SENT. This entry is a
+                    // RECEIVED response, and received messages are logged from=remote, to=LOCAL —
+                    // so entry.ToAddress here is OUR endpoint, not the HT801's. Reporting that as
+                    // the bell target would be actively misleading now that `target` is surfaced
+                    // over SignalR and REST. Fall back to the responder's address if, somehow,
+                    // nothing was recorded at send time.
+                    target = pending.Target ?? entry.FromAddress;
                     detail = $"{code} {entry.StatusText}";
                     diagnosisSuggestions = GetSuggestionsForStatusCode(code);
                     diagnosisIssue = $"INVITE to {entry.ToAddress} failed with {code} {entry.StatusText}";

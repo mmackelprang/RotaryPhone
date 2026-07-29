@@ -198,6 +198,12 @@ public class SipDiagnosticServiceTests
         Assert.Equal($"{code} {statusText}", failure.Detail);
         Assert.Empty(signals.Successes);
 
+        // Target must be where the INVITE was SENT (the HT801), not where the response was
+        // received (us). Received messages are logged from=remote, to=LOCAL, so reading the
+        // response's ToAddress would report our own endpoint as the bell target — which is now
+        // user-visible via the BellInviteFailed hub event and GET /api/phone/status.
+        Assert.Equal("192.0.2.250:5060", failure.Target);
+
         // Resolved, so the timeout sweep must not fire a second failure for it.
         _service.CheckInviteTimeouts();
         Assert.Single(signals.Failures);
