@@ -4,10 +4,19 @@ using RotaryPhoneController.GVBridge.Adapters;
 namespace RotaryPhoneController.GVBridge.Clients;
 
 /// <summary>
-/// Default recording fetcher. Best-known shape: GET recording/get?id=&lt;mediaId&gt;&amp;key=&lt;API_KEY&gt;
-/// over the shared authenticated HttpClient (ADR §3.2). UNVERIFIED — ADR §11 step 3 may show the
-/// media reference is an embedded URL instead; if so, the ONLY change is this class (detect an
-/// absolute URL in mediaRef and GET it directly).
+/// Default recording fetcher.
+/// <para>
+/// VERIFIED (2026-07-31 capture): the media reference at message index 11 is a FULLY ABSOLUTE URL —
+/// <c>https://www.google.com/voice/media/svm/&lt;acct&gt;/&lt;token&gt;</c>, no query string. That is a
+/// DIFFERENT host from the API base (clients6.google.com), and a browser <c>fetch()</c> from the
+/// voice.google.com origin is CORS-blocked, so the bytes must be proxied server-side — which is
+/// exactly what this class plus GvVoicemailController's /audio route already do.
+/// </para>
+/// <para>
+/// The absolute-URL branch below is therefore now the production path. The relative
+/// <c>recording/get?id=...&amp;key=...</c> fallback is retained only for non-URL references; no
+/// captured voicemail has ever used it.
+/// </para>
 /// </summary>
 /// <remarks>
 /// Two construction paths exist:
@@ -62,8 +71,9 @@ public class GvRecordingFetcher : IGvRecordingFetcher
 
         try
         {
-            // UNVERIFIED — ADR §11 step 3. If mediaRef is already an absolute media URL, GET it
-            // directly (auth rides the shared handler either way); otherwise resolve via recording/get.
+            // VERIFIED production path: mediaRef is an absolute www.google.com media URL — GET it
+            // directly (auth rides the shared handler, which is cookie-based and so applies across
+            // google.com hosts). The relative form is a legacy fallback only.
             var url = Uri.TryCreate(mediaRef, UriKind.Absolute, out _)
                 ? mediaRef
                 : $"{_baseUrl}/recording/get?id={Uri.EscapeDataString(mediaRef)}&key={_apiKey}";

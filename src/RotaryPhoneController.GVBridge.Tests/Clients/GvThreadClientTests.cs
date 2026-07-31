@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using RotaryPhoneController.GVBridge.Clients;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Clients;
@@ -23,7 +24,7 @@ public class GvThreadClientTests
         {
             capturedUrl = req.RequestUri?.ToString();
             return new HttpResponseMessage(HttpStatusCode.OK)
-            { Content = new StringContent("""{"threads":[],"nextPageToken":null}""") };
+            { Content = new StringContent(GvWireBuilder.EmptyResponse()) };
         });
 
         await client.ListThreadsAsync(GvThreadFolder.Sms, count: 20);
@@ -36,11 +37,9 @@ public class GvThreadClientTests
     [Fact]
     public async Task ListThreadsAsync_ParsesThreadsViaParser()
     {
-        var body = """
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-          [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false]]]],
-         "nextPageToken":"P2"}
-        """;
+        var body = GvWireBuilder.SmsResponse(
+            threadId: "t.+19195551234", messageId: "m.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, text: "hi", isRead: 0);
         var client = NewClient(_ => new HttpResponseMessage(HttpStatusCode.OK)
         { Content = new StringContent(body) });
 
@@ -48,7 +47,8 @@ public class GvThreadClientTests
 
         Assert.Single(result.Threads);
         Assert.Equal("t.+19195551234", result.Threads[0].ThreadId);
-        Assert.Equal("P2", result.NextPageToken);
+        // root[2] is a version cursor, not a page token — paging is UNVERIFIED, so this is always null.
+        Assert.Null(result.NextPageToken);
     }
 
     [Fact]

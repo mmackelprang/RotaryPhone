@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using RotaryPhoneController.GVBridge.Clients;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Clients;
@@ -22,12 +23,12 @@ public class GvSmsClientTests
     private static HttpResponseMessage SmsListResponse() =>
         new(HttpStatusCode.OK)
         {
-            Content = new StringContent("""
-            {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-              [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false],
-               ["m.2","t.+19195551234",1,"+19195551234","hello back",1718841700000,true]]]],
-             "nextPageToken":null}
-            """)
+            Content = new StringContent(GvWireBuilder.Response(
+                GvWireBuilder.Thread("t.+19195551234", folder: 2, isRead: 0, "+19195551234",
+                    GvWireBuilder.Message("m.1", 1718841600000, "+19195551234",
+                        GvWireBuilder.TypeSmsInbound, isRead: 0, smsText: "hi"),
+                    GvWireBuilder.Message("m.2", 1718841700000, "+19195551234",
+                        GvWireBuilder.TypeSmsOutbound, isRead: 1, smsText: "hello back"))))
         };
 
     [Fact]

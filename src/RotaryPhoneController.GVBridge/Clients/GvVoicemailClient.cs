@@ -36,8 +36,26 @@ public class GvVoicemailClient
         if (doc is null) return GvVoicemailListResult.Empty(succeeded: false);
 
         var items = _parser.ParseVoicemailList(doc.RootElement);
+        var rawThreads = _parser.CountThreads(doc.RootElement);
+
+        // "The JSON parsed" is NOT "we got data". If GV returned threads but our positional indices
+        // yielded nothing, that is a wire-shape break, not an empty voicemail folder — report it as a
+        // failure so GvVoicemailController's 502 guard fires instead of serving a healthy-looking
+        // empty 200. Conflating these two is why the broken parser went unnoticed for weeks.
+        if (rawThreads > 0 && items.Count == 0)
+        {
+            _logger.LogError(
+                "Voicemail wire-shape drift: {RawThreads} raw threads parsed to 0 voicemails. " +
+                "Positional indices no longer match Google's response — re-capture and update " +
+                "PositionalGvThreadParser.", rawThreads);
+            return GvVoicemailListResult.Empty(succeeded: false);
+        }
+
         var token = _parser.ParseNextPageToken(doc.RootElement);
-        _logger.LogDebug("Listed {Count} voicemails", items.Count);
+        // Information, not Debug: the service runs at Information, so a Debug line here is invisible
+        // in production — "Listed 0 voicemails" needs to be visible every cycle to catch a regression.
+        _logger.LogInformation("Listed {Count} voicemails from {RawThreads} raw threads",
+            items.Count, rawThreads);
         return new GvVoicemailListResult(items, token, Succeeded: true);
     }
 

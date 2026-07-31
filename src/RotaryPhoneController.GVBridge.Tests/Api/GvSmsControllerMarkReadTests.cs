@@ -6,6 +6,7 @@ using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -14,27 +15,23 @@ public class GvSmsControllerMarkReadTests
 {
     private const string BaseUrl = "https://clients6.google.com/voice/v1/voiceclient";
 
-    // SMS-folder list fixture: one thread t.+19195551234 (hasUnread=true) + its message m.1. This is the
-    // REAL positional fixture from GvSmsControllerTests so PositionalGvThreadParser parses it (thread +
-    // one message m.1 on that thread).
+    // SMS-folder list fixture: one thread t.+19195551234 (isRead=0 -> HasUnread=true) + its message m.1.
+    // Real captured-shape fixture (via GvWireBuilder) so PositionalGvThreadParser actually parses it
+    // (thread + one message m.1 on that thread).
     private static HttpResponseMessage SmsList() => new(HttpStatusCode.OK)
     {
-        Content = new StringContent("""
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-          [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false]]]],
-         "nextPageToken":null}
-        """)
+        Content = new StringContent(GvWireBuilder.SmsResponse(
+            threadId: "t.+19195551234", messageId: "m.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, text: "hi", isRead: 0))
     };
 
-    // Same shape as SmsList() but the thread already hasUnread=false (the 4th thread element,
-    // ThreadHasUnreadIdx=3, flipped to false) — used to exercise the idempotent already-read no-op path.
+    // Same shape as SmsList() but the thread is already isRead=1 (READ -> HasUnread=false) — used to
+    // exercise the idempotent already-read no-op path.
     private static HttpResponseMessage SmsListRead() => new(HttpStatusCode.OK)
     {
-        Content = new StringContent("""
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,false,
-          [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false]]]],
-         "nextPageToken":null}
-        """)
+        Content = new StringContent(GvWireBuilder.SmsResponse(
+            threadId: "t.+19195551234", messageId: "m.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, text: "hi", isRead: 1))
     };
 
     private (GvSmsController c, List<ReadStateChangedDto> events) NewController(

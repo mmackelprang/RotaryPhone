@@ -7,6 +7,7 @@ using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -44,11 +45,10 @@ public class GvVoicemailControllerTests : IDisposable
     private static HttpResponseMessage VmListResponse() =>
         new(HttpStatusCode.OK)
         {
-            Content = new StringContent("""
-            {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-              [["vm.1","t.+19195551234","+19195551234","Alice",1718841600000,23,false,"call me","media-1"]]]],
-             "nextPageToken":null}
-            """)
+            Content = new StringContent(GvWireBuilder.VoicemailResponse(
+                threadId: "t.+19195551234", messageId: "vm.1", counterparty: "+19195551234",
+                epochMs: 1718841600000, durationSeconds: 23, isRead: 0, transcript: "call me",
+                mediaUrl: "https://www.google.com/voice/media/svm/acct/media-1"))
         };
 
     [Fact]

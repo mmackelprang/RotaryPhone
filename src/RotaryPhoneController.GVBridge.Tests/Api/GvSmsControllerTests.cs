@@ -6,6 +6,7 @@ using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -45,11 +46,9 @@ public class GvSmsControllerTests
     private static HttpResponseMessage Response() =>
         new(HttpStatusCode.OK)
         {
-            Content = new StringContent("""
-            {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-              [["m.1","t.+19195551234",0,"+19195551234","hi",1718841600000,false]]]],
-             "nextPageToken":null}
-            """)
+            Content = new StringContent(GvWireBuilder.SmsResponse(
+                threadId: "t.+19195551234", messageId: "m.1", counterparty: "+19195551234",
+                epochMs: 1718841600000, text: "hi", isRead: 0))
         };
 
     [Fact]
@@ -61,8 +60,9 @@ public class GvSmsControllerTests
         var dto = Assert.IsType<SmsThreadListDto>(ok.Value);
         Assert.Single(dto.Threads);
         Assert.Equal("t.+19195551234", dto.Threads[0].ThreadId);
-        Assert.Equal("Alice", dto.Threads[0].CounterpartyName);
-        Assert.True(dto.Threads[0].HasUnread);
+        // No display name exists anywhere on the wire — GV returns E.164 only.
+        Assert.Null(dto.Threads[0].CounterpartyName);
+        Assert.True(dto.Threads[0].HasUnread);   // isRead:0 on the wire == UNREAD
     }
 
     [Fact]

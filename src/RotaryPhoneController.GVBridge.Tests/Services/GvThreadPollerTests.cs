@@ -4,6 +4,7 @@ using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Services;
@@ -34,22 +35,37 @@ public class GvThreadPollerTests
     private static HttpResponseMessage SmsResponse(string body) =>
         new(System.Net.HttpStatusCode.OK) { Content = new StringContent(body) };
 
-    private const string OneInbound = """
-        {"threads":[["t.1",["+19195551234","Alice"],1000,true,
-          [["m.1","t.1",0,"+19195551234","first",1000,false]]]],"nextPageToken":null}
-        """;
-    private const string TwoInbound = """
-        {"threads":[["t.1",["+19195551234","Alice"],2000,true,
-          [["m.1","t.1",0,"+19195551234","first",1000,false],
-           ["m.2","t.1",0,"+19195551234","second",2000,false]]]],"nextPageToken":null}
-        """;
+    private static HttpResponseMessage EmptyFolder() =>
+        SmsResponse(GvWireBuilder.EmptyResponse());
+
+    // Thread isRead=0 (UNREAD) with one inbound message m.1.
+    private static string OneInbound() => GvWireBuilder.Response(
+        GvWireBuilder.Thread("t.1", folder: 2, isRead: 0, "+19195551234",
+            GvWireBuilder.Message("m.1", 1000, "+19195551234",
+                GvWireBuilder.TypeSmsInbound, isRead: 0, smsText: "first")));
+
+    // Same thread, with a second, newer inbound message m.2.
+    private static string TwoInbound() => GvWireBuilder.Response(
+        GvWireBuilder.Thread("t.1", folder: 2, isRead: 0, "+19195551234",
+            GvWireBuilder.Message("m.1", 1000, "+19195551234",
+                GvWireBuilder.TypeSmsInbound, isRead: 0, smsText: "first"),
+            GvWireBuilder.Message("m.2", 2000, "+19195551234",
+                GvWireBuilder.TypeSmsInbound, isRead: 0, smsText: "second")));
+
+    // Same thread, now with an outbound reply m.3 (thread isRead=1 — the outbound reply cleared unread).
+    private static string OutboundReply() => GvWireBuilder.Response(
+        GvWireBuilder.Thread("t.1", folder: 2, isRead: 1, "+19195551234",
+            GvWireBuilder.Message("m.1", 1000, "+19195551234",
+                GvWireBuilder.TypeSmsInbound, isRead: 0, smsText: "first"),
+            GvWireBuilder.Message("m.3", 3000, "+19195551234",
+                GvWireBuilder.TypeSmsOutbound, isRead: 1, smsText: "me replying")));
 
     [Fact]
     public async Task FirstPoll_SeedsWithoutRaising()
     {
         // SMS folder poll + voicemail folder poll per cycle → enqueue both.
         var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
-        { SmsResponse(OneInbound), SmsResponse("""{"threads":[],"nextPageToken":null}""") }));
+        { SmsResponse(OneInbound()), EmptyFolder() }));
 
         await poller.PollOnceAsync(default);
 
@@ -61,8 +77,8 @@ public class GvThreadPollerTests
     {
         var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
         {
-            SmsResponse(OneInbound), SmsResponse("""{"threads":[],"nextPageToken":null}"""), // seed
-            SmsResponse(TwoInbound), SmsResponse("""{"threads":[],"nextPageToken":null}""")  // new m.2
+            SmsResponse(OneInbound()), EmptyFolder(), // seed
+            SmsResponse(TwoInbound()), EmptyFolder()  // new m.2
         }));
 
         await poller.PollOnceAsync(default); // seed
@@ -85,13 +101,13 @@ public class GvThreadPollerTests
         {
             // cycle 1: SMS folder 401 (fail) + voicemail folder empty 200
             new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized),
-            SmsResponse("""{"threads":[],"nextPageToken":null}"""),
+            EmptyFolder(),
             // cycle 2: SMS folder now succeeds WITH history → must seed, not flood
-            SmsResponse(OneInbound),
-            SmsResponse("""{"threads":[],"nextPageToken":null}"""),
+            SmsResponse(OneInbound()),
+            EmptyFolder(),
             // cycle 3: a genuinely newer inbound (m.2) → fires exactly once
-            SmsResponse(TwoInbound),
-            SmsResponse("""{"threads":[],"nextPageToken":null}""")
+            SmsResponse(TwoInbound()),
+            EmptyFolder()
         }));
 
         await poller.PollOnceAsync(default); // failed SMS poll — no seed
@@ -106,21 +122,16 @@ public class GvThreadPollerTests
     [Fact]
     public async Task OutboundMessage_DoesNotRaise()
     {
-        const string outbound = """
-            {"threads":[["t.1",["+19195551234","Alice"],3000,false,
-              [["m.1","t.1",0,"+19195551234","first",1000,false],
-               ["m.3","t.1",1,"+19195551234","me replying",3000,true]]]],"nextPageToken":null}
-            """;
         var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
         {
-            SmsResponse(OneInbound), SmsResponse("""{"threads":[],"nextPageToken":null}"""),
-            SmsResponse(outbound), SmsResponse("""{"threads":[],"nextPageToken":null}""")
+            SmsResponse(OneInbound()), EmptyFolder(),
+            SmsResponse(OutboundReply()), EmptyFolder()
         }));
 
         await poller.PollOnceAsync(default);
         await poller.PollOnceAsync(default);
 
-        Assert.Empty(received); // outbound (direction=1) is not an inbound "received" event
+        Assert.Empty(received); // outbound (type=11) is not an inbound "received" event
     }
 
     [Fact]
@@ -129,15 +140,10 @@ public class GvThreadPollerTests
         // id-consistency (PR4 Task 1 Step 1c): a NEW outbound message must re-surface via OnSmsSent
         // (NOT OnSmsReceived) carrying the SAME csid: id the controller echo uses, so the UI collapses
         // the optimistic bubble. Inbound behavior is unchanged.
-        const string outbound = """
-            {"threads":[["t.1",["+19195551234","Alice"],3000,false,
-              [["m.1","t.1",0,"+19195551234","first",1000,false],
-               ["m.3","t.1",1,"+19195551234","me replying",3000,true]]]],"nextPageToken":null}
-            """;
         var (poller, received) = NewPoller(new Queue<HttpResponseMessage>(new[]
         {
-            SmsResponse(OneInbound), SmsResponse("""{"threads":[],"nextPageToken":null}"""),
-            SmsResponse(outbound), SmsResponse("""{"threads":[],"nextPageToken":null}""")
+            SmsResponse(OneInbound()), EmptyFolder(),
+            SmsResponse(OutboundReply()), EmptyFolder()
         }));
         var sent = new List<SmsMessageDto>();
         poller.OnSmsSent += dto => sent.Add(dto);
@@ -181,6 +187,6 @@ public class GvThreadPollerTests
             => Task.FromResult(responses.Count > 0
                 ? responses.Dequeue()
                 : new HttpResponseMessage(System.Net.HttpStatusCode.OK)
-                  { Content = new StringContent("""{"threads":[],"nextPageToken":null}""") });
+                  { Content = new StringContent(GvWireBuilder.EmptyResponse()) });
     }
 }
