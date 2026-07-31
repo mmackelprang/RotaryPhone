@@ -3,10 +3,9 @@ using System.Text.Json;
 namespace RotaryPhoneController.GVBridge.Clients;
 
 /// <summary>
-/// Parser seam isolating GV's UNVERIFIED positional-array field positions (ADR §3, §8, §11).
-/// The ONLY implementation that knows field indices is <see cref="PositionalGvThreadParser"/>;
-/// when ADR §11 live capture pins the real positions, the fix is localized to that one class.
-/// Clients depend on this interface, not on raw indices.
+/// Parser seam isolating GV's positional-array field positions. The ONLY implementation that knows
+/// field indices is <see cref="PositionalGvThreadParser"/>, whose positions are VERIFIED against a
+/// checked-in live capture. Clients depend on this interface, not on raw indices.
 /// </summary>
 public interface IGvThreadParser
 {
@@ -21,4 +20,16 @@ public interface IGvThreadParser
 
     /// <summary>Extract the next-page token from a list response, or null if none.</summary>
     string? ParseNextPageToken(JsonElement root);
+
+    /// <summary>
+    /// Count the raw thread nodes present in the payload, WITHOUT interpreting any field positions
+    /// beyond the root envelope.
+    /// <para>
+    /// This exists so callers can tell "GV genuinely returned an empty folder" (0 raw threads) apart
+    /// from "GV returned data our positional indices failed to interpret" (raw threads &gt; 0 but 0
+    /// parsed items). Conflating those two is what let a completely broken parser look like a healthy
+    /// empty inbox for weeks. Callers MUST treat the second case as a failure, not as empty.
+    /// </para>
+    /// </summary>
+    int CountThreads(JsonElement root);
 }

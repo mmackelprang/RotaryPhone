@@ -40,16 +40,29 @@ public static class GvProtobuf
         return current.ValueKind == JsonValueKind.Array ? current : null;
     }
 
+    /// <summary>
+    /// Build a positional JSON array request body. Nested <c>object?[]</c> values are written as
+    /// nested arrays (recursively), which the api2thread/list body needs for its trailing
+    /// <c>[null,1,1,1]</c> flags element.
+    /// </summary>
     public static string BuildArray(params object?[] values)
     {
         using var ms = new MemoryStream();
         using var writer = new Utf8JsonWriter(ms);
+        WriteArray(writer, values);
+        writer.Flush();
+        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+    }
+
+    private static void WriteArray(Utf8JsonWriter writer, object?[] values)
+    {
         writer.WriteStartArray();
         foreach (var val in values)
         {
             switch (val)
             {
                 case null: writer.WriteNullValue(); break;
+                case object?[] nested: WriteArray(writer, nested); break;
                 case string s: writer.WriteStringValue(s); break;
                 case bool b: writer.WriteBooleanValue(b); break;
                 case int i: writer.WriteNumberValue(i); break;
@@ -59,7 +72,5 @@ public static class GvProtobuf
             }
         }
         writer.WriteEndArray();
-        writer.Flush();
-        return System.Text.Encoding.UTF8.GetString(ms.ToArray());
     }
 }

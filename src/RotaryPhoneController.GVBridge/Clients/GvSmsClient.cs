@@ -94,7 +94,12 @@ public class GvSmsClient
         if (doc is null) return GvSmsListResult.Empty(succeeded: false);
 
         var all = _parser.ParseSmsMessages(doc.RootElement);
-        return new GvSmsListResult(all.Where(m => m.ThreadId == threadId).ToList(), Succeeded: true);
+        if (!ShapeIsSane(doc.RootElement, all.Count)) return GvSmsListResult.Empty(succeeded: false);
+
+        var forThread = all.Where(m => m.ThreadId == threadId).ToList();
+        _logger.LogInformation("Listed {Count} SMS for thread {ThreadId} (of {Total} parsed)",
+            forThread.Count, threadId, all.Count);
+        return new GvSmsListResult(forThread, Succeeded: true);
     }
 
     /// <summary>
@@ -105,9 +110,32 @@ public class GvSmsClient
         int count = 50, CancellationToken ct = default)
     {
         using var doc = await _threadClient.ListRawAsync(GvThreadFolder.Sms, count, pageToken: null, ct);
-        return doc is null
-            ? GvSmsListResult.Empty(succeeded: false)
-            : new GvSmsListResult(_parser.ParseSmsMessages(doc.RootElement), Succeeded: true);
+        if (doc is null) return GvSmsListResult.Empty(succeeded: false);
+
+        var all = _parser.ParseSmsMessages(doc.RootElement);
+        if (!ShapeIsSane(doc.RootElement, all.Count)) return GvSmsListResult.Empty(succeeded: false);
+
+        _logger.LogInformation("Listed {Count} recent SMS messages", all.Count);
+        return new GvSmsListResult(all, Succeeded: true);
+    }
+
+    /// <summary>
+    /// Wire-shape drift guard. GV returning threads that our positional indices turn into zero
+    /// messages is a parser break, NOT an empty inbox — the poller must not seed its high-water mark
+    /// from that, and the controller must not serve it as an empty 200. Returns false on drift.
+    /// </summary>
+    private bool ShapeIsSane(JsonElement root, int parsedCount)
+    {
+        var rawThreads = _parser.CountThreads(root);
+        if (rawThreads > 0 && parsedCount == 0)
+        {
+            _logger.LogError(
+                "SMS wire-shape drift: {RawThreads} raw threads parsed to 0 messages. Positional " +
+                "indices no longer match Google's response — re-capture and update " +
+                "PositionalGvThreadParser.", rawThreads);
+            return false;
+        }
+        return true;
     }
 
     /// <summary>

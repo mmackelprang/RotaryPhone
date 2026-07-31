@@ -15,6 +15,18 @@
 > the sense that shipped, working code in this repo calls them with the documented shape — the
 > request/response *shape* is trusted; the new endpoints' *exact field positions* are not.
 
+> ### UPDATE 2026-07-31 — the synthesized shapes in §3 and §5.3 were WRONG
+>
+> The §11 checklist below was written and then **never performed**, and PR1–PR3 shipped against the
+> synthesized shapes anyway. Essentially every positional guess was incorrect, and GV voicemail + SMS
+> read therefore returned **nothing** from the day it shipped. The unit tests did not catch it because
+> each fixture was hand-built to match the shape the parser assumed — full green CI provided zero
+> protection.
+>
+> §11 steps 1–3 have now been performed against a live authenticated session. **See §11.1
+> Verification results for the real contract — it, not §3/§5.3, is authoritative.** The sections below
+> are left unedited as a record of what was assumed, and as a caution about shipping on synthesis.
+
 ---
 
 ## 1. Context
@@ -497,14 +509,14 @@ positions).
 All steps reuse the shipped authenticated `HttpClient` (or `curl` with a freshly-captured cookie
 header + a computed SAPISIDHASH). For each, **capture the raw response and pin the field positions.**
 
-1. **Thread list shape.** `POST api2thread/list` with a few candidate bodies (`[]`, `[<folder>]`,
+1. ✅ **DONE 2026-07-31 (see §11.1).** **Thread list shape.** `POST api2thread/list` with a few candidate bodies (`[]`, `[<folder>]`,
    `[<folder>,null,<count>]`). Identify: the folder enum for **SMS/inbox** vs **voicemail**, the
    page-token position, and per-message field positions (id, threadId, counterparty, timestamp,
    read-flag, text). → unblocks PR1, PR3.
-2. **Voicemail node shape.** In the voicemail-folder list, find the **media reference** (id vs URL)
+2. ✅ **DONE 2026-07-31 (see §11.1).** **Voicemail node shape.** In the voicemail-folder list, find the **media reference** (id vs URL)
    and the **transcript** field. Confirm whether transcript is inline and whether it's ever empty for
    a voicemail the web UI shows transcribed. → unblocks PR1, PR2.
-3. **Recording fetch.** Resolve the media reference to a fetch (`recording/get?id=…` or an embedded
+3. ✅ **DONE 2026-07-31 (see §11.1).** **Recording fetch.** Resolve the media reference to a fetch (`recording/get?id=…` or an embedded
    URL). Confirm content-type, that auth is required, and that **range requests** are honored (or that
    we must buffer fully before serving ranges). → unblocks PR2 audio proxy.
 4. **SMS send round-trip.** `POST api2thread/sendsms` with `[null,null,null,null,"test","t.+<E164>"]`
@@ -517,6 +529,108 @@ header + a computed SAPISIDHASH). For each, **capture the raw response and pin t
    `INVALID_ARGUMENT` is gone. Record the result either way. → decides PR6.
 7. **Auth gate smoke.** With `InterServiceAuthKey` set, confirm the new endpoints 401 without the
    header and 200 with it, and that RadioConsole can still reach them once configured. → validates PR5.
+
+---
+
+## 11.1 Verification results (2026-07-31)
+
+Steps 1–3 performed via CDP against the authenticated Chromium session on the `radio` box. Redacted
+captures are checked in at `src/RotaryPhoneController.GVBridge.Tests/Fixtures/capture/` (request
+bodies verbatim, response leaf values replaced with identical-length placeholders — positions,
+nesting and lengths preserved and asserted programmatically). Raw captures stay on the box and are
+never committed.
+
+**This section is the authoritative contract. §3 and §5.3 are superseded.**
+
+### Request body — `POST api2thread/list?alt=protojson&key=…`
+
+```
+[folder, count, 15, null, null, [null,1,1,1]]
+```
+
+`count` is at **index 1**, not 2. The trailing flags array is required. Index 2's constant `15` and
+the flags array are reproduced verbatim; their meanings are unknown.
+
+| Folder | Wire value | Status |
+|---|:--:|---|
+| Messages / SMS | 2 | VERIFIED |
+| Calls | 3 | VERIFIED |
+| Voicemail | 4 | VERIFIED |
+| All | — | **UNVERIFIED — never captured.** `ToWireValue()` throws rather than guess |
+
+The folder is echoed back on every thread at `thread[5] = [1, folder]`, which the tests assert as a
+round-trip.
+
+### Response envelope
+
+```
+root = [ threads[], "numericString", "versionCursor" ]      // an ARRAY of 3
+```
+
+There is **no `threads` property and no `nextPageToken`** — the root is not an object at all. This
+single fact is what made the original parser return null for every real response.
+
+`root[2]` is a version cursor (`v1-1-<digits>`), **not a demonstrated page token**. Paging was not
+captured, so `ParseNextPageToken` returns null and `ListRawAsync` warns if handed a token rather than
+silently re-reading page 1.
+
+### Thread node — 11 elements (12 for SMS)
+
+```
+[ threadId, isRead, messages[], null, participants[], [1, folder], null, null, [cp], null, 0 ]
+```
+
+`threadId` is `c.<ID>` for voicemail/calls and `t.<E164>` for SMS. Lengths are **not** fixed — SMS
+threads carry a 12th element — so nothing may hard-code a length.
+
+### Message node — 19 elements (one captured calls message had 22)
+
+| Idx | Meaning |
+|:--:|---|
+| 0 | messageId |
+| 1 | timestamp, epoch ms |
+| 2 | **account owner E.164 — OURS, not the sender** |
+| 3 | counterparty array (len 2 or 7); `[0]`/`[1]` are the identifier |
+| 4 | type — `2` voicemail, `10`/`11` SMS in/out, `1`/`14`/`0` calls |
+| 5 | isRead |
+| 6 | transcript `[confidence, [[word,null,null,conf],…]]` or null |
+| 8 | duration seconds (null for SMS) |
+| 9 | SMS text (empty string for voicemail/calls) |
+| 11 | **absolute** voicemail media URL (null for SMS/calls) |
+| 15 | counterparty identifier |
+
+### Read-state polarity — `1` = READ, `0` = UNREAD
+
+The field is **`isRead`, not `hasUnread`**, so the original `HasUnread` was inverted as well as
+mislocated. Determined empirically: the SMS folder returned `{0: 2, 1: 18}` against a UI reporting
+exactly "Messages: 2 unread". Thread-level and message-level flags agree.
+
+### Voicemail audio (step 3)
+
+`message[11]` is a **fully absolute** `https://www.google.com/voice/media/svm/<acct>/<token>`
+(~222 chars, no query string) — *not* `recording/get?id=…&key=…`. Note the **different host** from
+the API base (`clients6.google.com`). Verified playable (`readyState: 4`, 22 s), which also
+cross-validates `message[8]` as duration (21 recorded vs 22 measured). A browser `fetch()` from the
+voice.google.com origin is CORS-blocked, so the bytes must be proxied server-side — the §6.4
+proxy+cache design was already correct.
+
+### Things the synthesis did not anticipate
+
+- **No display name exists anywhere in the payload** — only identifiers. `FromName` /
+  `CounterpartyName` can never be populated from this response; contact resolution is the consumer's
+  job (RadioConsole already has `ContactResolutionService`).
+- **The counterparty is not always a phone number.** Real SMS traffic includes bare numeric **short
+  codes** (5–6 digits) and **36-char opaque sender ids** alongside E.164 — in the capture, 45 E.164,
+  20 short codes, 7 opaque. Anything assuming a leading `+` or a dialable number will mishandle
+  roughly a third of inbound SMS. The parser passes the value through verbatim.
+- **Message nodes carry no threadId** — it lives on the parent thread and must be propagated, which
+  the poller's high-water mark and per-thread filtering both depend on.
+
+### Still unverified
+
+- The `All` folder wire value (step 1, partial).
+- Paging semantics / `root[2]` (step 1, partial).
+- Steps 4–7 (SMS send round-trip, inbound diff, signaler retest, auth gate smoke).
 
 ---
 

@@ -7,6 +7,7 @@ using RotaryPhoneController.GVBridge.Api;
 using RotaryPhoneController.GVBridge.Clients;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Api;
@@ -17,25 +18,24 @@ public class GvVoicemailControllerMarkReadTests : IDisposable
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"vmmr-{Guid.NewGuid():N}");
     public void Dispose() { if (Directory.Exists(_dir)) Directory.Delete(_dir, true); }
 
-    // The list fixture (one voicemail vm.1, isRead=false). Identical shape to GvVoicemailControllerTests.
+    // The list fixture (one voicemail vm.1, isRead=0/UNREAD). Real captured-shape fixture (via
+    // GvWireBuilder), identical scenario to GvVoicemailControllerTests.
     private static HttpResponseMessage VmList() => new(HttpStatusCode.OK)
     {
-        Content = new StringContent("""
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-          [["vm.1","t.+19195551234","+19195551234","Alice",1718841600000,23,false,"call me","media-1"]]]],
-         "nextPageToken":null}
-        """)
+        Content = new StringContent(GvWireBuilder.VoicemailResponse(
+            threadId: "t.+19195551234", messageId: "vm.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, durationSeconds: 23, isRead: 0, transcript: "call me",
+            mediaUrl: "https://www.google.com/voice/media/svm/acct/media-1"))
     };
 
-    // Same shape as VmList() but vm.1 already isRead=true (the 7th node element, VmIsReadIdx=6, flipped to
-    // true) — used to exercise the idempotent already-read no-op path.
+    // Same shape as VmList() but vm.1 is already isRead=1 (READ) — used to exercise the idempotent
+    // already-read no-op path.
     private static HttpResponseMessage VmListRead() => new(HttpStatusCode.OK)
     {
-        Content = new StringContent("""
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-          [["vm.1","t.+19195551234","+19195551234","Alice",1718841600000,23,true,"call me","media-1"]]]],
-         "nextPageToken":null}
-        """)
+        Content = new StringContent(GvWireBuilder.VoicemailResponse(
+            threadId: "t.+19195551234", messageId: "vm.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, durationSeconds: 23, isRead: 1, transcript: "call me",
+            mediaUrl: "https://www.google.com/voice/media/svm/acct/media-1"))
     };
 
     private (GvVoicemailController c, List<ReadStateChangedDto> events) NewController(

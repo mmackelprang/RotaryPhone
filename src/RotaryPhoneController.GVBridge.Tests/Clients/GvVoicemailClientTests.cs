@@ -1,6 +1,7 @@
 using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using RotaryPhoneController.GVBridge.Clients;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Clients;
@@ -31,11 +32,10 @@ public class GvVoicemailClientTests
     [Fact]
     public async Task ListVoicemailsAsync_ParsesMediaIdAndTranscript()
     {
-        var body = """
-        {"threads":[["t.+19195551234",["+19195551234","Alice"],1718841600000,true,
-          [["vm.1","t.+19195551234","+19195551234","Alice",1718841600000,23,false,"call me","media-1"]]]],
-         "nextPageToken":null}
-        """;
+        var body = GvWireBuilder.VoicemailResponse(
+            threadId: "t.+19195551234", messageId: "vm.1", counterparty: "+19195551234",
+            epochMs: 1718841600000, durationSeconds: 23, isRead: 0, transcript: "call me",
+            mediaUrl: "https://www.google.com/voice/media/svm/acct/media-1");
         var client = NewClient(_ => new HttpResponseMessage(HttpStatusCode.OK)
         { Content = new StringContent(body) });
 
@@ -43,7 +43,7 @@ public class GvVoicemailClientTests
 
         Assert.Single(result.Items);
         Assert.Equal("vm.1", result.Items[0].MessageId);
-        Assert.Equal("media-1", result.Items[0].MediaId);
+        Assert.Equal("https://www.google.com/voice/media/svm/acct/media-1", result.Items[0].MediaId);
         Assert.Equal("call me", result.Items[0].Transcript);
     }
 

@@ -62,15 +62,33 @@ public class GvThreadClient
         if (root is null) return GvThreadListResult.Empty(succeeded: false);
 
         var threads = _parser.ParseThreadList(root.RootElement);
+        var rawThreads = _parser.CountThreads(root.RootElement);
+
+        // Wire-shape drift guard: GV sent threads but our positional indices produced nothing.
+        // Report failure so callers surface it, instead of it looking like an empty folder.
+        if (rawThreads > 0 && threads.Count == 0)
+        {
+            _logger.LogError(
+                "api2thread/list wire-shape drift for folder {Folder}: {RawThreads} raw threads " +
+                "parsed to 0 nodes. Positional indices no longer match Google's response — re-capture " +
+                "and update PositionalGvThreadParser.", folder, rawThreads);
+            return GvThreadListResult.Empty(succeeded: false);
+        }
+
+        _logger.LogInformation("Listed {Count} threads from {RawThreads} raw threads for folder {Folder}",
+            threads.Count, rawThreads, folder);
         var token = _parser.ParseNextPageToken(root.RootElement);
         return new GvThreadListResult(threads, token, Succeeded: true);
     }
 
     /// <summary>
     /// Raw list call shared by thread/voicemail/SMS read paths — returns the parsed JsonDocument or
-    /// null on failure. Request body positions (folder, pageToken, count) are UNVERIFIED — ADR §11
-    /// step 1. Built via GvProtobuf.BuildArray so the positional shape is in one obvious place.
-    /// Caller is responsible for disposing the returned JsonDocument.
+    /// null on failure. Caller is responsible for disposing the returned JsonDocument.
+    /// <para>
+    /// Request body is VERIFIED against a live capture (2026-07-31):
+    /// <c>[folder, count, 15, null, null, [null,1,1,1]]</c>. Note <c>count</c> is at index 1 — the
+    /// previous <c>[folder, pageToken, count]</c> shape was synthesized and wrong.
+    /// </para>
     /// </summary>
     public async Task<JsonDocument?> ListRawAsync(
         GvThreadFolder folder, int count, string? pageToken, CancellationToken ct = default)
@@ -84,11 +102,27 @@ public class GvThreadClient
             return null;
         }
 
+        // Paging is UNVERIFIED: the capture was a single un-paged request, so we know neither which
+        // body position carries a page token nor whether root[2]'s version cursor is one. Rather than
+        // guess a position, we ignore the token and say so — silently dropping it would make a caller
+        // believe it was paging while it re-read page 1 forever.
+        if (pageToken is not null)
+        {
+            _logger.LogWarning(
+                "api2thread/list ignoring pageToken for folder {Folder} — the request body's paging " +
+                "field position is UNVERIFIED (no paged capture exists). Returning the first page.",
+                folder);
+        }
+
         try
         {
             var url = $"{_baseUrl}/api2thread/list?alt=protojson&key={_apiKey}";
-            // UNVERIFIED positional body — ADR §11 step 1 (candidate: [folder, pageToken?, count?]).
-            var payload = GvProtobuf.BuildArray(folder.ToWireValue(), pageToken, count);
+            // VERIFIED body: [folder, count, 15, null, null, [null,1,1,1]].
+            // Index 2's constant 15 and the trailing flags array are sent verbatim as captured; their
+            // meanings are unknown, so they are reproduced rather than reinterpreted.
+            var payload = GvProtobuf.BuildArray(
+                folder.ToWireValue(), count, 15, null, null,
+                new object?[] { null, 1, 1, 1 });
             var content = new StringContent(payload, Encoding.UTF8, "application/json+protobuf");
             var response = await http.PostAsync(url, content, ct);
             if (!response.IsSuccessStatusCode)
