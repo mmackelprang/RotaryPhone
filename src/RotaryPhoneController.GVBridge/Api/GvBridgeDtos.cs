@@ -36,7 +36,14 @@ public record GvBridgeStatusDto(
   // NO REGISTER (so Google's account-level throttle can cool). throttledUntil = when it ends;
   // throttleReason = why. Both null when not throttled. Appended to preserve the field contract.
   [property: JsonPropertyName("throttledUntil")] DateTime? ThrottledUntil = null,
-  [property: JsonPropertyName("throttleReason")] string? ThrottleReason = null);
+  [property: JsonPropertyName("throttleReason")] string? ThrottleReason = null,
+  // Added by the B2 auth-blackout fix: honest data-plane health. cookiesValid/degraded now also
+  // reflect these. authBlackout is the field RadioConsole's reconnecting banner should bind to —
+  // `available` deliberately stays true (it gates GetAuthenticatedClient() internally; flipping it
+  // would make the adapter refuse its own recovery retry). See spec §4.3.
+  [property: JsonPropertyName("authBlackout")] bool AuthBlackout = false,
+  [property: JsonPropertyName("lastApiSuccessAt")] DateTime? LastApiSuccessAt = null,
+  [property: JsonPropertyName("lastApiAuthFailureAt")] DateTime? LastApiAuthFailureAt = null);
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

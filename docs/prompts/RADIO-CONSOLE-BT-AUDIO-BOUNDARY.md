@@ -6,7 +6,7 @@
 > adapter, profiles, or WirePlumber configs without updating this document.
 >
 > **Canonical location:** `D:\prj\RotaryPhone\docs\prompts\RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`
-> **Last updated:** 2026-05-25 by RotaryPhone session (Phase B PR3)
+> **Last updated:** 2026-08-01 by RotaryPhone session (Builder — GV auth-blackout B2 closeout; **API/deploy hazard only, no BT or audio behavior change**). ⚠️ Two items need Radio Console's attention: the `authBlackout` sub-second caveat under Integration Points, and the deploy hazard that can rewrite RotaryPhone's `BluetoothAdapter` setting under Operational Notes.
 >
 > **If you need to change any boundary (adapter assignment, WP config, profile ownership),
 > update this document first, then coordinate with the other session.**
@@ -129,7 +129,7 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 |--------|-------|---------|:-----------:|
 | GET | `/api/phone/system-status` | Platform / BT / SIP / HT801 reachability | A (existing) |
 | GET | `/api/phone/status` | Current call state | A (existing) |
-| GET | `/api/gvbridge/status` | GV API availability + SipRegistered + CookiesValid | B (PR1) |
+| GET | `/api/gvbridge/status` | GV API availability + SipRegistered + CookiesValid (+ `authBlackout` / `lastApiSuccessAt` / `lastApiAuthFailureAt` — see the auth-blackout note below) | B (PR1), extended by B2 |
 | GET | `/api/gvbridge/adapter/mode` | Available + active call adapter mode | A (existing) |
 | PUT | `/api/gvbridge/adapter/mode` | Switch active adapter mode | A (existing) |
 | GET | `/api/gvbridge/cookies` | Cookie status metadata (no secrets) | B (PR2) |
@@ -155,6 +155,30 @@ Radio.Web connects to RotaryPhone.API at `http://radio:5004`:
 | GET | `/api/callhistory` | Call history | A (existing) |
 
 **JSON conventions:** All response payloads are camelCase or PascalCase depending on whether the controller returns an anonymous object (camelCase) or a typed DTO/record (PascalCase). RTest's `Radio.Web` configures `JsonSerializerOptions.PropertyNameCaseInsensitive = true` so both work transparently. **New endpoints should prefer typed records** for OpenAPI/Swagger schema clarity.
+
+**GV auth-blackout status fields (B2, 2026-08-01) — `degraded`, NOT `available`:** `/api/gvbridge/status`
+gains three append-only fields so GV auth health is derived from **the last real data-plane call** rather
+than from a periodic probe of a different endpoint: **`authBlackout`** (bool — the most recent real GV
+call was rejected for auth and nothing has succeeded since), **`lastApiSuccessAt`** and
+**`lastApiAuthFailureAt`** (nullable UTC). `cookiesValid` is now `probe passed AND NOT authBlackout`, and
+`degraded` derives from it, so both go false the moment a real call is rejected instead of reporting
+healthy for up to 30 minutes. ⚠️ **`available` deliberately stays `true` during a blackout** — it gates
+`GetAuthenticatedClient()` *inside* RotaryPhone, so flipping it would make the adapter refuse its own
+recovery retry and turn a ~9-minute blackout into a hard stop. **Radio Console's "GV is reconnecting"
+banner must bind to `degraded` or `authBlackout`, not to `available`.** The four original field names
+(`available`, `activeMode`, `sipRegistered`, `cookiesValid`) are unchanged. See
+`docs/handoffs/radioconsole-gv-auth-blackout-reply.md`.
+
+> ⚠️ **Post-fix, `authBlackout` may be true for well under a second — do not bind a banner to it naively.**
+> Measured on the box 2026-08-01: the one live blackout during a 90-minute UAT lasted **920 ms**
+> (`lastApiAuthFailureAt` → `lastApiSuccessAt`), and **zero** `authBlackout:true` samples were captured
+> across **411** status polls. That is the fix working — recovery is now faster than any practical polling
+> rate — but it means a banner bound directly to `authBlackout` at a 10-second cadence will **effectively
+> never appear**, and if it ever does it will flicker for one frame. **Recommended:** treat a `true`
+> reading as an *event*, latch it, and hold the banner for a minimum display window (a few seconds), or
+> drive the UI from sustained failure (e.g. N consecutive failed reads) rather than from the instantaneous
+> flag. `lastApiAuthFailureAt` / `lastApiSuccessAt` are the better inputs for "how long has this been bad" —
+> they are timestamps, so they survive between polls where the boolean does not.
 
 **Inter-service auth (PR5, default-off):** ALL `/api/gvbridge/*` REST endpoints above **and** the `/hub` SignalR connection accept an **optional** `X-RotaryPhone-Auth: <key>` header. The header is **required only when** RotaryPhone's `GVBridge:InterServiceAuthKey` is set (default empty = LAN-only, no auth, no behavior change). When the key is set, requests/connections without a matching header get **401** (REST) or an **aborted connection** (hub); the compare is constant-time. **EXCEPTION:** `/api/gvbridge/event` (the browser-extension content-script callback) stays open — never gated. The secret is supplied at runtime out-of-source (env `GVBridge__InterServiceAuthKey` / user-secrets), never committed. See the Cookie Management Security note and the handoff (`docs/handoffs/radioconsole-gv-voicemail-sms-ui-handoff.md`) for how RTest sends it.
 
@@ -198,6 +222,35 @@ Radio.API's `PhoneCallIntegrationService` connects to RotaryPhone's SignalR hub 
 ---
 
 ## Operational Notes
+
+### ⚠️ Deploying RotaryPhone can silently rewrite its BT adapter config
+
+**This is a live hazard on every RotaryPhone deploy — read before deploying, and after.**
+
+`/opt/rotary-phone/appsettings.Production.json` holds RotaryPhone's **`BluetoothAdapter: hci1`** and
+`UseActualBluetoothHfp` settings. That file **ships inside the publish artifact** (the SDK's default
+`appsettings*.json` content glob), and `deploy/Deploy-ToLinux.ps1`'s **tar-pipe fallback** path can
+overwrite the box's authoritative copy with the repo template: its backup/restore straddles a
+`tar --unlink-first` that errors on directories and exits 2, so `set -e` aborts the chain before the
+restore runs. The **rsync** path is safe (`--exclude 'appsettings.Production.json'`); only the fallback
+bites. Observed for real during PR #72 UAT on 2026-08-01 and restored by hand.
+
+**Why Radio Console cares:** a RotaryPhone deploy could silently change which BT adapter RotaryPhone
+claims. If `BluetoothAdapter` ever came back as `hci0`, RotaryPhone would reach for the **TP-Link UB500 —
+Radio Console's music adapter** — violating rule 1/2 below and breaking A2DP audio, with no log line on
+either side saying a config changed.
+
+**Mandatory until the tooling is fixed** (tracked in RotaryPhone's `docs/KNOWN-ISSUES.md`, finding L3):
+
+```bash
+# BEFORE any RotaryPhone deploy
+sudo cp /opt/rotary-phone/appsettings.Production.json /opt/rotary-phone/appsettings.Production.json.bak
+# AFTER — must print hci1
+grep -n 'BluetoothAdapter' /opt/rotary-phone/appsettings.Production.json
+```
+
+If it is not `hci1`, restore the backup and restart `rotary-phone` before doing anything else.
+**No BT/audio behavior is changed by this note** — it documents a deploy hazard that could change it.
 
 ### Service Restart Order
 
@@ -319,3 +372,5 @@ Some changes affect both services (e.g., BlueZ restart, udev rules, systemd serv
 | 2026-06-20 | RotaryPhone session | PR5: inter-service auth gate. New optional `GVBridge:InterServiceAuthKey` (default empty = LAN-only, no behavior change). When set, `X-RotaryPhone-Auth: <key>` is REQUIRED on all `/api/gvbridge/*` REST endpoints AND the `/hub` SignalR connection (header, or access_token query for browser WS); 401/abort otherwise; constant-time compare. `/api/gvbridge/event` (extension content-script) stays open. Secret supplied at runtime via env (`GVBridge__InterServiceAuthKey`) / user-secrets — never committed. REQUIRED before any non-LAN exposure of RotaryPhone. RadioConsole must send the header on REST + an access-token provider on its HubConnection once the key is set (cross-repo; handoff updated). |
 | 2026-06-20 | RotaryPhone session | **API only — no BT/audio change.** GV mark-read / durable read-state contract **RATIFIED** (build HELD by owner). Added two Integration-Points routes — `POST /api/gvbridge/voicemail/{id}/read` and `POST /api/gvbridge/sms/threads/{threadId}/read` (`{ "isRead": bool }` → returns the updated `VoicemailItemDto`/`SmsThreadDto`; **GV write-through** = Google is the single source of truth, no local store; 200 idempotent / 404 / 502) — and a new `/hub` event `ReadStateChanged` (`{ kind, id, threadId, isRead, changedAtUtc }`, fired on a mark route call now / on poller-detected external read flips as a fast-follow). Auth: auto-covered by the PR5 prefix gate (no special posture). Mark-unread is best-effort. Delete deferred. Decision record: `docs/architecture/decisions/2026-06-20-gv-markread-readstate-contract.md`; reply to RadioConsole: `docs/handoffs/radioconsole-gv-markread-reply.md`. Build ships dark behind `EnableMarkRead` (default off) when funded; first real `updateread` pending the ADR §11 live capture. |
 | 2026-06-21 | RotaryPhone session (Builder) | **API only — no BT/audio change.** GV mark-read **Path A SHIPPED DARK** (owner-hold lifted). Both mark routes above + the `ReadStateChanged` on-mark (path a) broadcast are now implemented behind `EnableMarkRead` (default **FALSE** → both routes return `409 markread_disabled` with **NO** GV call). Status taxonomy live: 200 applied-or-idempotent / 404 unknown / 502 upstream / 409 disabled / 400 `unread_unsupported` (isRead:false while `AllowMarkUnread`=false). The GV `api2thread/updateread` wire format (positions/grain/unread support) stays **UNVERIFIED**, isolated behind `IUpdateReadPayloadBuilder` — first real `updateread` pending ADR §11 step 8 on-box live capture. **Fixture-verified only; nothing mutates GV until the owner flips the flag.** Path B (poller-detected external read-flip → live "hear-on-phone clears the kiosk badge") is still a fast-follow, NOT in this PR. |
+| 2026-08-01 | RotaryPhone session (Builder) | **API only — no BT/audio change.** GV **auth-blackout (B2) fixed**. `/api/gvbridge/status` gains three append-only fields — `authBlackout`, `lastApiSuccessAt`, `lastApiAuthFailureAt` — and `cookiesValid`/`degraded` are now derived from **the last real data-plane call** instead of a 30-minute-stale probe of a *different* endpoint (`threadinginfo/get` vs the `api2thread/list` that was actually 401ing). ⚠️ **`available` deliberately stays `true` during a blackout** (it gates `GetAuthenticatedClient()` internally — flipping it would make the adapter refuse its own recovery retry); **Radio Console must bind its "GV is reconnecting" banner to `degraded` / `authBlackout`, not `available`** — this needs their agreement, see `docs/handoffs/radioconsole-gv-auth-blackout-reply.md`. Also: `CookieRefreshIntervalMinutes` now actually drives a proactive PSIDTS refresh (default **8 min**; `0` = kill switch) where it previously had **zero readers**; a 401 on the `api2thread` read path now runs the shared cookie-recovery ladder and replays **once** (write paths signal but never replay — ADR §4.2 #4); and `GVApiAdapter.ActivateAsync` is now **re-entrant**, so the box-side cron's 20-minute `refresh-from-browser` POST stops leaking a health timer, an `HttpClient` and a whole `GvSipTransport` per pass (~72/day) — which is also why the 30-minute watchdog, the only timed path into cookie recovery, had never fired. **No BT adapter, profile, or WirePlumber change; hci0/hci1 ownership untouched.** Box-side note: the cron at `/opt/rotary-phone/refresh-gv-cookies.sh` is **deliberately left running** — do not remove it as part of this change. |
+| 2026-08-01 | RotaryPhone session (Builder) | **API/deploy hazard only — NO BT or audio behavior change; hci0/hci1 ownership, profiles and WirePlumber configs all untouched.** Closing out B2 (PR #72 merged after live on-box UAT: 932 requests, **zero 502s**, `api2thread/list returned Unauthorized` 33/hr → **0/hr**). Two items Radio Console needs: **(1)** ⚠️ **`authBlackout` may be true for well under a second.** Measured live: the one blackout in a 90-minute soak lasted **920 ms**, and **zero** `authBlackout:true` samples appeared across **411** status polls. A "GV is reconnecting" banner bound naively to that boolean at a 10 s cadence will effectively **never show**. Latch it as an event with a minimum display window, or derive the UI from `lastApiAuthFailureAt`/`lastApiSuccessAt` (timestamps survive between polls; the boolean does not). Integration Points updated with the full guidance. **(2)** ⚠️ **A RotaryPhone deploy can silently rewrite `/opt/rotary-phone/appsettings.Production.json`, including `BluetoothAdapter: hci1`** — the file ships inside the publish artifact and `Deploy-ToLinux.ps1`'s tar-pipe fallback loses it when `tar --unlink-first` exits 2 and `set -e` skips the restore (the rsync path is safe). If that value ever came back as `hci0`, RotaryPhone would reach for **Radio Console's UB500** and break A2DP, silently. New Operational Notes section documents the mandatory backup-and-verify around every deploy; fix proposed in RotaryPhone `docs/KNOWN-ISSUES.md` (finding L3, still OPEN). Also unchanged from the previous entry: the box-side cron `/opt/rotary-phone/refresh-gv-cookies.sh` is **still deliberately running** — retiring it is a separate box-side change, do not remove it as a side effect. |

@@ -381,6 +381,30 @@ stub `HttpMessageHandler` that returns 401 then 200, and a fake `IGvAuthenticate
 
 ## Task 3 — Make `ActivateAsync` re-entrant (F6/F7)
 
+> **⚠️ AMENDED IN BUILD — this task shipped as conditional transport *reuse*, not unconditional teardown.**
+> The code sketch below is the plan **as originally approved**, kept for the record. On owner instruction
+> ("don't ship the 20-minute SIP churn and monitor it — remove it") the shipped implementation keys on a
+> single predicate, `CanReuseTransport => _sipTransport?.IsRegistered == true`, evaluated *after* the
+> incoming cookie set is loaded, with three outcomes:
+>
+> | Transport | Credentials | Behavior |
+> |---|---|---|
+> | Registered | unchanged | Total no-op — transport, `HttpClient` and **both timers** untouched; no probe, no re-register |
+> | Registered | changed *(the common case)* | Cookies adopted and clients rebuilt; **transport + timers kept**; no re-register |
+> | Absent / not registered | either | The unconditional teardown + rebuild below, unchanged, with its `_activeCallId` guards intact |
+>
+> This is safe because `GvSipTransport` caches no credentials — it holds a `Func<Task<SipCredentials>>`
+> invoked fresh on every register (`Sip/GvSipTransport.cs:1021`) that resolves the `HttpClient` lazily by
+> field, which is why recovery rung 2 already swaps cookies while keeping the transport.
+> **Reuse fixes F7 harder than the teardown did:** the teardown re-armed a fresh 30-minute health timer on
+> every 20-minute cron fire — precisely the starvation shape F7 describes — whereas the reuse paths leave
+> the original timer running on its own anchor. Acceptance criterion 6 still holds in every branch: paths
+> A and B construct nothing, so nothing can leak.
+>
+> **Consequence for anyone running the test plan:** `re-activating — tearing down the previous generation
+> first` is no longer the expected line on a live box with SIP registered. See the inverted pass/fail
+> table under Live UAT step 3.
+
 **Files:** `src/RotaryPhoneController.GVBridge/Adapters/GVApiAdapter.cs`
 
 **Must land before Task 4.** Today a re-activation (which the external refresher triggers every ~20 min via
@@ -431,6 +455,14 @@ than duplicating construction.
 | `ActivateAsync_CalledTwice_DoesNotLeakHealthTimer` | Exactly one armed timer after two activations |
 | `ActivateAsync_DuringActiveCall_KeepsTransport` | `_activeCallId != null` → transport instance is unchanged, cookies still adopted |
 | `ActivateAsync_Reentrant_StillAdoptsNewCookies` | The refresher's contract is preserved (the point of the fix) |
+
+> **Amended in build (see the banner above).** The first two rows shipped merged into one hard-gate test,
+> `ActivateAsync_TwoFullActivations_LeaveExactlyOneTransportAndOneOfEachTimer`, which exercises the
+> teardown path (path C) genuinely — its transport never registers, so reuse is never eligible. Two
+> further tests cover the reuse paths that replaced the unconditional teardown: registered + unchanged
+> credentials reuses the transport, `HttpClient` and timer **instances** with zero probes and zero SIP
+> sends; registered + changed credentials keeps the transport and timer instances while adopting the new
+> cookies onto a rebuilt client, and **never re-registers**.
 
 ---
 
@@ -670,12 +702,38 @@ curl -s localhost:5004/api/gvbridge/status
 |---|---|---|
 | 1 | **Window-blind soak (the headline test).** Poll `GET /api/gvbridge/sms/threads` and one non-group thread every 60 s for **30 minutes**, starting at an **arbitrary** wall-clock time — deliberately *not* aligned to a `CDP cookie refresh` line. Record every status code with its timestamp. | **0 × HTTP 502.** This is acceptance criterion 4: the pre-fix window-awareness discipline is retired, and its retirement is the proof. |
 | 2 | **Honest status during a blackout.** If any 502 does occur, immediately `curl -s localhost:5004/api/gvbridge/status`. | `degraded:true`, `cookiesValid:false`, `authBlackout:true`, `lastApiAuthFailureAt` recent. `available` stays `true` **by design** (spec §4.3). |
-| 3 | **Re-entrancy (F6/F7).** `curl -X POST localhost:5004/api/gvbridge/cookies/refresh-from-browser` twice, ~2 min apart, with no call in progress. Then bounded log read. | New cookies adopted both times (`Cookies saved` + `re-activated`); logs show `re-activating — tearing down the previous generation first`; **one** `SIP registration successful` per pass, no accumulation. |
+| 3 | **Re-entrancy (F6/F7).** `curl -X POST localhost:5004/api/gvbridge/cookies/refresh-from-browser` twice, ~2 min apart, with no call in progress. Then bounded log read. **⚠️ Read the inverted pass/fail semantics below before scoring this step.** | New cookies adopted both times (`Cookies saved` + `re-activated`), **one** `GvSipTransport` and **one** health-check timer at the end, no accumulation. **Which log line proves the pass depends on the transport's health** — see the table below. |
+
+> ### ⚠️ Step 3's pass signal is INVERTED from what this plan originally said
+>
+> This step originally instructed the tester to grep for
+> `re-activating — tearing down the previous generation first` as the **pass** signal. That was correct
+> only against the plan's original unconditional dispose-then-rebuild shape (Task 3 as written below).
+> The shipped implementation uses **conditional transport reuse** — a healthy registered transport is kept
+> rather than torn down. Against the shipped code, that teardown line **must not appear** while SIP is
+> registered, and its presence is a **failure**. Scoring this step by the old text turns a successful run
+> into a false failure — which is exactly what happened during the 2026-08-01 UAT (finding **M2**).
+>
+> | What you see with `sipRegistered:true` | Verdict |
+> |---|---|
+> | `GVApi: re-activation adopting new credentials — SIP transport is healthy, keeping it` | ✅ **PASS** — path B, the expected production case (the cron's cookie header differs on nearly every fire) |
+> | `GVApi: re-activation is a no-op — …` | ✅ **PASS** — path A, valid but rare live; credentials happened not to change |
+> | `GVApi: re-activating — tearing down the previous generation first` | ❌ **FAIL** — a healthy transport was rebuilt; conditional reuse did not engage |
+>
+> `re-activating — tearing down the previous generation first` is the **correct and expected** line only
+> when the transport is **absent or not registered** (path C — e.g. first activation after a restart, or
+> after a dropped WebSocket). It is a pass signal there and a failure signal everywhere else.
+>
+> **The stronger result to check:** `sipRegistered` stays `true` **across** both refreshes, and
+> `lastConnectedAt` holds a **single distinct value** throughout — proving the WebSocket was never rebuilt.
+> Likewise `lastHealthyAt` should advance on a clean 30-minute cadence anchored to the *original*
+> activation, not re-armed by each refresh; that is **F7 fixed**, and it is a stronger proof than the
+> object-count check this step originally asked for.
 | 4 | **Reactive recovery fires.** Bounded log read after the soak. | Where a 401 occurred, it is followed by `api2thread/list auth-failed … recovering cookies and retrying once` and then a success — not a 502 to the caller. |
 | 5 | **Proactive cadence is real.** Bounded log read over 30 min. | `proactive PSIDTS refresh succeeded` appears at the configured interval (~8 min), and `CookieRefreshIntervalMinutes` demonstrably governs it (acceptance criterion 1). |
 | 6 | **No storm, no REGISTER churn.** Same log window. | No `REGISTER suppressed`, no throttle-cooldown entries, no repeated connect/REGISTER cycles. `RotateCookies` call count ≈ soak minutes ÷ interval, not ≈ poll count. |
 | 7 | **Kill switch.** Set `CookieRefreshIntervalMinutes: 0`, restart, bounded log read. | No proactive refresh lines; reactive path still recovers a 401. |
-| 8 | **Inbound call still rings** (regression guard — Task 3 touches `_sipTransport` teardown). | Phone rings; two-way audio; `sipRegistered:true`, `wsConnected:true`. |
+| 8 | **Inbound call still rings** (regression guard — Task 3 touches `_sipTransport` teardown). ⛔ **NOT RUN at merge — see KNOWN-ISSUES "Open verification items".** | Phone rings; two-way audio; `sipRegistered:true`, `wsConnected:true`. |
 
 **After (acceptance criterion 5):**
 

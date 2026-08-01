@@ -34,6 +34,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private GvAccountClient? _accountClient;
     private GvSipTransport? _sipTransport;
     private Timer? _healthCheckTimer;
+    private Timer? _cookieRefreshTimer;
 
     private string? _activeCallId;
     private bool _disposed;
@@ -49,8 +50,29 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private ICookieRotator? _cookieRotator;
     private HttpClient? _rotatorHttpClient;
 
-    // Single-flight guard so concurrent AuthenticationFailed events don't stampede the refresh.
-    private int _refreshingCookies;
+    // Single-flight recovery. A second caller arriving mid-recovery AWAITS the in-flight run rather
+    // than being turned away — during a blackout the poller and several RadioConsole requests hit 401
+    // within milliseconds and must all ride one refresh. Guarded by _recoveryLock.
+    private readonly object _recoveryLock = new();
+    private Task<bool>? _recoveryTask;
+
+    // Failure-only cooldown: after a ladder run that FAILED, suppress new runs for this long so a real
+    // Google outage can't drive RotateCookies at the poll rate (the 2026-06-19 storm shape).
+    private DateTime _recoveryCooldownUntilUtc = DateTime.MinValue;
+
+    // Serializes the PUBLIC ActivateAsync / DeactivateAsync bodies, so a cron-driven re-activation
+    // cannot interleave with a mode switch — or with a second re-activation — and leave the adapter
+    // half torn down (transport disposed, clients not yet rebuilt).
+    //
+    // DEADLOCK RULE: taken by the PUBLIC entry points ONLY. ActivateCoreAsync calls the teardown
+    // internally (TryDeactivateForReactivationAsync → TearDownGenerationAsync), so the core paths
+    // must NEVER re-take it. Verified safe: nothing inside this class calls the public
+    // ActivateAsync/DeactivateAsync (TryCdpRefreshAsync, ReloadCookiesAsync and
+    // RecoverFromAuthFailureAsync all go through ReloadCookiesAsync, which is ungated), and the only
+    // external caller — CallAdapterRegistry.SwitchModeAsync — deactivates the OUTGOING adapter and
+    // activates the INCOMING one, never both on the same instance. GvCookieManager reaches the
+    // adapter only through that registry.
+    private readonly SemaphoreSlim _activationGate = new(1, 1);
 
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
@@ -77,9 +99,39 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public DateTime? SipLastConnectedAt => _sipTransport?.LastConnectedAt;
 
     /// <summary>
-    /// Whether the last cookie health check passed (cookies are still accepted by Google).
+    /// Cookies are valid only if the last PROBE passed AND no real data-plane call has since been
+    /// rejected for auth. The probe alone is a 30-minute-stale reading of a DIFFERENT endpoint
+    /// (threadinginfo/get) than the one that fails (api2thread/list) — spec F5.
     /// </summary>
-    public bool AreCookiesValid => _areCookiesValid;
+    public bool AreCookiesValid => _areCookiesValid && !AuthBlackout;
+
+    // Data-plane truth (spec §4.3). A health field derived from a PROBE reports healthy straight
+    // through an outage — the 2026-07-31 blackout reported cookiesValid:true while api2thread/list
+    // was returning 401. These are written by the actual GV calls, not by threadinginfo/get.
+    private DateTime? _lastApiSuccessAtUtc;
+    private DateTime? _lastApiAuthFailureAtUtc;
+
+    /// <summary>UTC of the last 2xx from a real GV data-plane call.</summary>
+    public DateTime? LastApiSuccessAt => _lastApiSuccessAtUtc;
+
+    /// <summary>UTC of the last 401/403 from a real GV data-plane call.</summary>
+    public DateTime? LastApiAuthFailureAt => _lastApiAuthFailureAtUtc;
+
+    /// <summary>
+    /// True when the most recent real GV data-plane call was rejected for auth and nothing has
+    /// succeeded since. This is the field RadioConsole's "Google Voice is reconnecting" banner
+    /// should bind to — NOT <see cref="IsAvailable"/>, which stays true by design (spec §4.3).
+    /// </summary>
+    public bool AuthBlackout =>
+        _lastApiAuthFailureAtUtc is { } fail &&
+        (_lastApiSuccessAtUtc is not { } ok || fail > ok);
+
+    /// <summary>Called by the GV clients after every real data-plane call. Cheap, lock-free.</summary>
+    public void RecordApiOutcome(bool success, bool authFailure)
+    {
+        if (success) _lastApiSuccessAtUtc = DateTime.UtcNow;
+        else if (authFailure) _lastApiAuthFailureAtUtc = DateTime.UtcNow;
+    }
 
     /// <summary>
     /// True when GVApi IS the active/available path but is NOT fully usable — cookies invalid OR
@@ -88,7 +140,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// state is already conveyed by <c>available:false</c>. Surfaced honestly so the dashboard can
     /// see real degradation early (the 2026-06-19 outage was invisible because status lied).
     /// </summary>
-    public bool Degraded => IsAvailable && !(_areCookiesValid && (_sipTransport?.IsRegistered ?? false));
+    /// <remarks>
+    /// Derives from the <see cref="AreCookiesValid"/> PROPERTY (not the raw probe field), so an
+    /// auth blackout on the data plane makes <c>degraded</c> honest for free — spec §4.3.
+    /// </remarks>
+    public bool Degraded => IsAvailable && !(AreCookiesValid && (_sipTransport?.IsRegistered ?? false));
 
     /// <summary>
     /// UTC time the adapter was last fully healthy (cookies valid AND SIP registered), per the
@@ -217,32 +273,126 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             ht801Ip ?? "(null)", ht801Port?.ToString() ?? "(null)", invitePort?.ToString() ?? "(null)");
     }
 
+    /// <summary>
+    /// Public activation entry point. Serialized against <see cref="DeactivateAsync"/> and against a
+    /// concurrent activation by <c>_activationGate</c>; all the real work lives in
+    /// <see cref="ActivateCoreAsync"/>, which must NOT take the gate again (see the field remark).
+    /// </summary>
     public async Task ActivateAsync(CancellationToken ct = default)
+    {
+        await _activationGate.WaitAsync(ct);
+        try
+        {
+            await ActivateCoreAsync(ct);
+        }
+        finally
+        {
+            _activationGate.Release();
+        }
+    }
+
+    private async Task ActivateCoreAsync(CancellationToken ct)
     {
         _logger.LogInformation("GVApiAdapter activating...");
 
-        // 1. Load encryption key: prefer key file (written by CookieRetriever), fallback to config
-        string encryptionKeyBase64;
-        var keyFilePath = _config.CookieKeyFilePath;
-        if (!string.IsNullOrEmpty(keyFilePath) && File.Exists(keyFilePath))
+        // Resolve the key and load the INCOMING cookie set FIRST, into locals, mutating no field.
+        // The re-entrancy decision below has to see the incoming credentials to decide whether the
+        // live SIP transport may be kept; it used to sit above this block, where it structurally
+        // could not. A failure here leaves every field untouched and falls straight through to the
+        // unchanged teardown path — same observable behaviour as before this restructure.
+        var encryptionKeyBase64 = await TryResolveEncryptionKeyAsync();
+        GvCookieStore? incomingStore = null;
+        GvCookieSet? incomingCookies = null;
+        if (encryptionKeyBase64 != null)
         {
-            var keyBytes = await File.ReadAllBytesAsync(keyFilePath);
-            encryptionKeyBase64 = Convert.ToBase64String(keyBytes);
-            _logger.LogDebug("Loaded encryption key from {Path}", keyFilePath);
+            incomingStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
+            incomingCookies = await incomingStore.LoadAsync();
         }
-        else if (!string.IsNullOrEmpty(_config.CookieEncryptionKey))
+
+        // ---------------------------------------------------------------- the re-entrancy decision
+        //
+        // RE-ENTRANCY (F6/F7). CallAdapterRegistry.SwitchModeAsync skips DeactivateAsync when the
+        // mode is unchanged, so the box-side cron re-enters here on the LIVE adapter every ~20 min.
+        // Before the F6 fix each pass LEAKED an armed 30-min Timer, an HttpClient and a whole
+        // GvSipTransport; the first fix cured the leak by tearing the generation down every time,
+        // which churned a perfectly healthy, registered WebSocket on every cron fire. This is the
+        // conditional form: churn nothing that is still healthy.
+        //
+        // RACE SAFETY — READ BEFORE EDITING. Paths A and B never touch _sipTransport, so an INVITE
+        // arriving mid-re-activation cannot catch a half-disposed transport: there is no teardown to
+        // race. DO NOT reintroduce a teardown (or a re-register) into either branch.
+        if (incomingCookies is { } incoming && !string.IsNullOrEmpty(incoming.Sapisid) && CanReuseTransport)
         {
-            encryptionKeyBase64 = _config.CookieEncryptionKey;
+            if (CredentialsUnchanged(_cookieSet, incoming))
+            {
+                // A. Nothing changed and nothing is broken. Rebuild NOTHING — not the transport, not
+                // the HttpClient, and above all not the timers: re-arming a fresh 30-minute health
+                // timer on every cron fire is F7, the starvation bug this PR exists to fix.
+                _logger.LogInformation(
+                    "GVApi: re-activation is a no-op — credentials unchanged and SIP transport healthy; " +
+                    "reusing everything");
+
+                // The transport is registered and we are holding exactly the credentials already in
+                // use, so a re-activation must not leave the adapter marked unavailable — the
+                // refresher's contract is "after this returns, GVApi is the live path". Nothing is
+                // probed here, so this only ever RESTORES availability; Degraded/AuthBlackout still
+                // report any real data-plane failure honestly (spec §4.3).
+                if (!IsAvailable) SetAvailable(true);
+                return;
+            }
+
+            // B. New credentials, healthy transport. Adopt the credentials, keep the transport AND
+            // the timers. Deliberately does NOT re-register: a PSIDTS rotation does not invalidate a
+            // live SIP registration, and re-registering on the cron's cadence would re-create the
+            // 2026-06-19 REGISTER-storm risk (spec §4.1). The transport resolves _httpClient lazily
+            // through SingleHttpClientFactory and caches no credentials, so the swap below reaches
+            // its NEXT sipregisterinfo/get with no rebuild at all.
+            _logger.LogInformation(
+                "GVApi: re-activation adopting new credentials — SIP transport is healthy, keeping it");
+            _cookieStore = incomingStore;
+            await ReloadCookiesAsync(ct);
+            return;
         }
-        else
+
+        // C. No transport, or one that is not registered — the full teardown + rebuild, unchanged.
+        if (_sipTransport != null || _healthCheckTimer != null)
         {
-            _logger.LogError("No cookie encryption key found. Run 'gv-login' first.");
+            if (_activeCallId != null)
+            {
+                // A call is up. Adopt the new cookies but do NOT tear down the transport — that
+                // would drop the live call.
+                _logger.LogInformation(
+                    "GVApi: re-activating during an active call — refreshing cookies only, keeping SIP transport");
+                await RefreshAuthenticatedClientsAsync(ct);
+                return;
+            }
+
+            _logger.LogInformation("GVApi: re-activating — tearing down the previous generation first");
+            if (!await TryDeactivateForReactivationAsync(ct))
+            {
+                // A call started while we were tearing down (the timer disposals inside can block
+                // for SECONDS on an in-flight health probe — see TryDeactivateForReactivationAsync).
+                // Nothing irreversible happened yet: restore the timers we disposed, adopt the new
+                // cookies, and leave the ringing/active call — and its transport — alone.
+                _logger.LogInformation(
+                    "GVApi: re-activation aborted — a call started during teardown; " +
+                    "keeping SIP transport and refreshing cookies only");
+                StartPeriodicTimers();
+                await RefreshAuthenticatedClientsAsync(ct);
+                return;
+            }
+        }
+
+        // 1. Adopt the encryption key / cookie set resolved above.
+        if (encryptionKeyBase64 == null)
+        {
+            // TryResolveEncryptionKeyAsync already logged why.
             SetAvailable(false);
             return;
         }
 
-        _cookieStore = new GvCookieStore(_config.CookieFilePath, encryptionKeyBase64);
-        _cookieSet = await _cookieStore.LoadAsync();
+        _cookieStore = incomingStore;
+        _cookieSet = incomingCookies;
         LoadedAt = _cookieSet != null ? DateTime.UtcNow : null;
         _psidtsRefreshedAt = _cookieSet != null ? DateTime.UtcNow : null;
 
@@ -254,22 +404,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             return;
         }
 
-        // 2. Create authenticated HttpClient (cookies loaded from store)
-        var handler = new GvHttpClientHandler(() =>
-            Task.FromResult(_cookieSet!));
-        _httpClient = new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
-        };
-
-        // 3. Create account client for health checks
-        _accountClient = new GvAccountClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvAccountClient>());
+        // 2/3. Create the authenticated HttpClient + account client from the adopted cookie set.
+        SwapAuthenticatedClients();
 
         // 4. Health check to verify cookies work
-        var healthy = await _accountClient.IsHealthyAsync(ct);
+        var healthy = await ProbeHealthAsync(ct);
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
         if (!healthy)
@@ -318,18 +457,174 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _logger.LogWarning(ex, "GVApi: SIP registration failed — will retry on first call");
         }
 
-        // 7. Start periodic health check timer
-        var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
-        _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
+        // 7. Start the periodic timers (health watchdog + proactive PSIDTS refresh)
+        StartPeriodicTimers();
 
         SetAvailable(true);
         _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
     }
 
+    /// <summary>
+    /// Whether a re-activation may keep the live SIP transport instead of rebuilding it.
+    /// </summary>
+    /// <remarks>
+    /// Transport HEALTH is the only criterion, deliberately. <see cref="GvSipTransport"/> holds a
+    /// <c>Func&lt;Task&lt;SipCredentials&gt;&gt;</c> that it invokes FRESH on every register
+    /// (<c>Sip/GvSipTransport.cs:1021</c>) and caches no credentials; that func closes over
+    /// <see cref="GvSipCredentialProvider"/>, which resolves the HttpClient through
+    /// <see cref="SingleHttpClientFactory"/> — i.e. by reading the <c>_httpClient</c> FIELD lazily,
+    /// by design. A cookie swap therefore propagates to the transport with no rebuild at all, which
+    /// is exactly what shipped recovery rung 2 (<see cref="ReloadCookiesAsync"/>) already relies on.
+    /// <para>
+    /// Adding "…and the credentials are unchanged" to this predicate would be equivalent to
+    /// rebuilding UNCONDITIONALLY: the cron pulls from Chrome every 20 minutes while PSIDTS rotates
+    /// every ~11, so the incoming cookie header differs on very nearly every cycle. That is the
+    /// churn this predicate exists to remove.
+    /// </para>
+    /// <para>
+    /// <c>IsRegistered</c> is <c>_registered AND IsConnected</c>, so it is already the single
+    /// health signal — no separate connectivity check is needed.
+    /// </para>
+    /// <para>
+    /// TO ADOPT THE STRICTER RULE, one line changes: the guard in <see cref="ActivateCoreAsync"/>
+    /// that reads <c>… &amp;&amp; CanReuseTransport</c> becomes
+    /// <c>… &amp;&amp; CanReuseTransport &amp;&amp; CredentialsUnchanged(_cookieSet, incoming)</c>.
+    /// Everything with changed credentials then falls through to the full rebuild (path C) and
+    /// branch B becomes unreachable. Nothing else moves.
+    /// </para>
+    /// </remarks>
+    private bool CanReuseTransport => _sipTransport?.IsRegistered == true;
+
+    /// <summary>
+    /// Whether an incoming cookie set would put exactly the same bytes on the wire as the one
+    /// already loaded. <see cref="GvCookieSet.ToCookieHeader"/> returns <c>RawCookieHeader</c>
+    /// verbatim when set (the normal case on the box) and the rotating PSIDTS values live INSIDE
+    /// that raw header, so the rendered header — not the typed fields — is the correct basis for
+    /// "did the credentials actually change". A null current set counts as changed.
+    /// </summary>
+    private static bool CredentialsUnchanged(GvCookieSet? current, GvCookieSet incoming)
+        => string.Equals(current?.ToCookieHeader(), incoming.ToCookieHeader(), StringComparison.Ordinal);
+
+    /// <summary>
+    /// Resolve the cookie encryption key: prefer the key file (written by CookieRetriever), fall
+    /// back to config. Returns null — having logged why — when neither is available.
+    /// </summary>
+    private async Task<string?> TryResolveEncryptionKeyAsync()
+    {
+        var keyFilePath = _config.CookieKeyFilePath;
+        if (!string.IsNullOrEmpty(keyFilePath) && File.Exists(keyFilePath))
+        {
+            var keyBytes = await File.ReadAllBytesAsync(keyFilePath);
+            _logger.LogDebug("Loaded encryption key from {Path}", keyFilePath);
+            return Convert.ToBase64String(keyBytes);
+        }
+
+        if (!string.IsNullOrEmpty(_config.CookieEncryptionKey))
+            return _config.CookieEncryptionKey;
+
+        _logger.LogError("No cookie encryption key found. Run 'gv-login' first.");
+        return null;
+    }
+
+    /// <summary>
+    /// Rebuild the authenticated <see cref="HttpClient"/> and <see cref="GvAccountClient"/> from the
+    /// CURRENT <c>_cookieSet</c>, publishing the new pair BEFORE disposing the old client.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is the point. A health probe or a data-plane read can be in flight while cookies
+    /// are swapped; disposing first (what this used to do) guarantees that request dies. Constructing
+    /// first, assigning the fields, and disposing last narrows the window to requests ALREADY
+    /// dispatched on the old client. That residual is real but unavoidable without draining, and
+    /// every caller of the affected paths catches and logs the resulting fault.
+    /// </remarks>
+    private void SwapAuthenticatedClients()
+    {
+        var previous = _httpClient;
+
+        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieSet!));
+        var client = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            BaseAddress = AuthenticatedClientBaseAddress
+        };
+
+        _httpClient = client;
+        _accountClient = new GvAccountClient(
+            client, _config.GvApiBaseUrl, _config.GvApiKey,
+            _loggerFactory.CreateLogger<GvAccountClient>());
+
+        previous?.Dispose();
+    }
+
+    /// <summary>
+    /// Public mode-switch teardown. Unconditional BY DESIGN: a genuine switch away from GVApi must
+    /// fully tear down even mid-call. The re-entrancy path uses
+    /// <see cref="TryDeactivateForReactivationAsync"/> instead, which can abort.
+    /// Serialized against <see cref="ActivateAsync"/> by <c>_activationGate</c>; the core body is
+    /// separate so the gate is taken by the public entry point ONLY.
+    /// </summary>
     public async Task DeactivateAsync(CancellationToken ct = default)
+    {
+        await _activationGate.WaitAsync(ct);
+        try
+        {
+            await DeactivateCoreAsync();
+        }
+        finally
+        {
+            _activationGate.Release();
+        }
+    }
+
+    private async Task DeactivateCoreAsync()
     {
         _logger.LogInformation("GVApiAdapter deactivating...");
 
+        await DisposePeriodicTimersAsync();
+        await TearDownGenerationAsync();
+    }
+
+    /// <summary>
+    /// Teardown used ONLY by the <see cref="ActivateAsync"/> re-entrancy path. Identical to
+    /// <see cref="DeactivateAsync"/> except that it re-checks <c>_activeCallId</c> after the timer
+    /// disposals and before anything irreversible, and abandons the teardown if a call appeared.
+    /// Returns false when it abandoned — the caller must then re-arm the timers via
+    /// <see cref="StartPeriodicTimers"/>, since those are the only things it destroyed.
+    /// </summary>
+    /// <remarks>
+    /// Why the re-check exists: the guard at the top of ActivateAsync tests <c>_activeCallId</c>
+    /// once and then commits to a teardown, but <c>Timer.DisposeAsync()</c> does not complete until
+    /// an ALREADY-RUNNING callback finishes — and <c>RunHealthCheckAsync</c> makes a live HTTP call
+    /// with a 30-second client timeout. That window is seconds wide, and
+    /// <c>IncomingCallReceived</c> fires while the phone is still RINGING. Without this second look
+    /// a call that started ringing inside the window would have its transport disposed out from
+    /// under it and be silently dropped.
+    /// </remarks>
+    private async Task<bool> TryDeactivateForReactivationAsync(CancellationToken ct = default)
+    {
+        _logger.LogInformation("GVApiAdapter deactivating...");
+
+        await DisposePeriodicTimersAsync();
+
+        // Second look, at the last point where nothing unrecoverable has happened: only the two
+        // timers are gone, and the caller re-arms them. The residual window between this check and
+        // the transport disposal below is a few instructions wide and is irreducible without taking
+        // a lock — that is accepted deliberately, consistent with the lock-free
+        // Interlocked.Exchange(ref _activeCallId, …) idiom used throughout this file. It was not
+        // missed; do not "fix" it by adding a lock without revisiting that idiom as a whole.
+        if (_activeCallId != null)
+            return false;
+
+        await TearDownGenerationAsync();
+        return true;
+    }
+
+    /// <summary>
+    /// Stops the health watchdog and the proactive PSIDTS refresh timer. Reversible: the only way
+    /// back is <see cref="StartPeriodicTimers"/>, which the abandoned-teardown path calls.
+    /// </summary>
+    private async Task DisposePeriodicTimersAsync()
+    {
         // Stop health check timer
         if (_healthCheckTimer != null)
         {
@@ -337,6 +632,21 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _healthCheckTimer = null;
         }
 
+        // Stop the proactive PSIDTS refresh timer (Task 3 makes this path actually run on the
+        // re-activation the external refresher triggers, so this is what stops it accumulating).
+        if (_cookieRefreshTimer != null)
+        {
+            await _cookieRefreshTimer.DisposeAsync();
+            _cookieRefreshTimer = null;
+        }
+    }
+
+    /// <summary>
+    /// Irreversible half of the teardown: disposes the SIP transport and the HTTP clients and
+    /// clears all per-generation state. Nothing here can be undone by re-arming a timer.
+    /// </summary>
+    private async Task TearDownGenerationAsync()
+    {
         // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
         if (_sipTransport != null)
         {
@@ -346,9 +656,16 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _sipTransport = null;
         }
 
-        // Dispose rotator HttpClient (if we built one)
-        _rotatorHttpClient?.Dispose();
-        _rotatorHttpClient = null;
+        // Dispose the rotator HttpClient if WE built one — and drop the rotator with it, since it
+        // holds that client and would otherwise hand a disposed instance to the next rung-1 attempt
+        // after a re-activation. A rotator INJECTED via the test constructor has no
+        // _rotatorHttpClient and is deliberately preserved.
+        if (_rotatorHttpClient != null)
+        {
+            _rotatorHttpClient.Dispose();
+            _rotatorHttpClient = null;
+            _cookieRotator = null;
+        }
 
         // Dispose HttpClient
         _httpClient?.Dispose();
@@ -361,11 +678,30 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         LoadedAt = null;
         LastValidatedAt = null;
         _psidtsRefreshedAt = null;
+
+        // Data-plane outcome timestamps are per-generation too. Leaving them set would carry a
+        // stale authBlackout:true from the torn-down generation into the freshly re-activated one
+        // and mislead the dashboard until the next real GV call happened to land.
+        _lastApiSuccessAtUtc = null;
+        _lastApiAuthFailureAtUtc = null;
+
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
         _logger.LogInformation("GVApiAdapter deactivated");
     }
+
+    /// <summary>
+    /// Mid-call re-activation path (F6/F7): adopt the refresher's new cookies WITHOUT touching the
+    /// SIP transport, so a live call is not dropped. Delegates to <see cref="ReloadCookiesAsync"/>,
+    /// which already performs exactly the needed sequence against the live <c>_cookieStore</c> —
+    /// load from store → swap <c>_cookieSet</c> → dispose+rebuild <c>_httpClient</c> → rebuild
+    /// <c>_accountClient</c> → health probe → mark available. Reused rather than duplicating
+    /// ActivateAsync's construction block, which in any case cannot run here: the re-entrancy guard
+    /// sits ABOVE encryption-key resolution.
+    /// </summary>
+    private Task<bool> RefreshAuthenticatedClientsAsync(CancellationToken ct = default)
+        => ReloadCookiesAsync(ct);
 
     /// <summary>
     /// Reload cookies from the store without a full deactivate/activate cycle.
@@ -391,23 +727,15 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         LoadedAt = DateTime.UtcNow;
         _psidtsRefreshedAt = DateTime.UtcNow;
 
-        // Re-create authenticated HttpClient with updated cookies
-        _httpClient?.Dispose();
-        var handler = new GvHttpClientHandler(() =>
-            Task.FromResult(_cookieSet!));
-        _httpClient = new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
-        };
-
-        // Re-create account client with new HttpClient
-        _accountClient = new GvAccountClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvAccountClient>());
+        // Re-create the authenticated HttpClient + account client with the updated cookies. This
+        // CONSTRUCTS AND PUBLISHES BEFORE DISPOSING the old client (it used to dispose first), which
+        // matters because this method is shared by recovery rungs 2/3 AND by the re-activation path
+        // that adopts new credentials while a health check may be in flight — see
+        // SwapAuthenticatedClients for the residual.
+        SwapAuthenticatedClients();
 
         // Verify the new cookies work
-        var healthy = await _accountClient.IsHealthyAsync(ct);
+        var healthy = await ProbeHealthAsync(ct);
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
 
@@ -526,19 +854,43 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         => TriggerCookieRecovery(e.Reason);
 
     /// <summary>
-    /// Single-flight entry into the cookie-recovery ladder. Both the transport's AuthenticationFailed
-    /// event and the periodic watchdog funnel through here so only one recovery runs at a time.
+    /// Fire-and-forget entry into the recovery ladder (SIP transport + watchdog). Thin wrapper over
+    /// <see cref="TryRecoverAuthAsync"/> so there is ONE ladder implementation, not two.
     /// </summary>
-    private void TriggerCookieRecovery(string reason)
-    {
-        if (Interlocked.CompareExchange(ref _refreshingCookies, 1, 0) != 0)
-            return;
+    private void TriggerCookieRecovery(string reason) => _ = TryRecoverAuthAsync(reason);
 
-        _ = RecoverFromAuthFailureAsync(reason);
+    /// <summary>
+    /// Awaitable single-flight entry into the cookie-recovery ladder. Returns true when cookies were
+    /// refreshed and re-validated. Concurrent callers share ONE run. Read paths await this and then
+    /// retry once; the SIP path calls it fire-and-forget via <see cref="TriggerCookieRecovery"/>.
+    /// </summary>
+    public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
+    {
+        lock (_recoveryLock)
+        {
+            if (_recoveryTask is { IsCompleted: false })
+                return _recoveryTask;                       // ride the in-flight recovery
+
+            if (DateTime.UtcNow < _recoveryCooldownUntilUtc)
+                return Task.FromResult(false);              // failure cooldown active
+
+            _recoveryTask = RecoverFromAuthFailureAsync(reason);
+            return _recoveryTask;
+        }
     }
 
-    private async Task RecoverFromAuthFailureAsync(string reason)
+    /// <summary>
+    /// True while a recovery ladder run is in flight. The proactive refresh (spec §4.1) and the
+    /// watchdog both consult this so neither races the reactive ladder.
+    /// </summary>
+    private bool IsRecoveryInFlight
     {
+        get { lock (_recoveryLock) { return _recoveryTask is { IsCompleted: false }; } }
+    }
+
+    private async Task<bool> RecoverFromAuthFailureAsync(string reason)
+    {
+        var succeeded = false;
         try
         {
             _logger.LogWarning("GVApi: auth/registration recovery ({Reason})", reason);
@@ -549,16 +901,20 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (_config.EnableCookieRotation && _cookieSet != null && await TryRotateCookiesAsync())
             {
                 _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             // Rung 2: re-read cookies from disk (an out-of-band refresh may have updated them).
             if (await ReloadCookiesAsync())
             {
                 _logger.LogInformation("GVApi: reloaded cookies from disk");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             // Rung 3: pull fresh cookies from the box's logged-in Chrome via CDP and adopt them
@@ -567,22 +923,43 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (await TryCdpRefreshAsync())
             {
                 _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             _logger.LogWarning(
                 "GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead — " +
                 "re-login at voice.google.com so the next CDP refresh can pick up a fresh session.");
+            return false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "GVApi: error during auth/registration recovery");
+            return false;
         }
         finally
         {
-            Interlocked.Exchange(ref _refreshingCookies, 0);
+            // The shared _recoveryTask IS the single-flight guard now, so the only thing left for
+            // finally is arming the failure-only cooldown. A SUCCESSFUL run arms nothing.
+            if (!succeeded)
+            {
+                _recoveryCooldownUntilUtc =
+                    DateTime.UtcNow.AddSeconds(_config.AuthRecoveryFailureCooldownSeconds);
+            }
         }
+    }
+
+    /// <summary>
+    /// A successful rung means we have a live authenticated client again. Without this the
+    /// IsAvailable gate on <see cref="GetAuthenticatedClient"/> keeps the seam returning null until
+    /// the next 30-min health tick — the PR1 review HIGH-2 window (arc tracker, open decision #6) —
+    /// which would silently defeat the read-path retry this work adds.
+    /// </summary>
+    private void MarkAvailableAfterRecovery()
+    {
+        if (!IsAvailable) SetAvailable(true);
     }
 
     /// <summary>
@@ -685,23 +1062,45 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             catch (Exception ex) { _logger.LogWarning(ex, "GVApi: failed to persist rotated cookies"); }
         }
 
-        // Re-create the authenticated HttpClient with the refreshed cookie set.
-        _httpClient?.Dispose();
-        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieSet!));
-        _httpClient = new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
-        };
-        _accountClient = new GvAccountClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvAccountClient>());
+        // Re-create the authenticated HttpClient with the refreshed cookie set. Uses the shared
+        // construct -> publish -> dispose-old helper: this is the PROACTIVE path, so it runs on the
+        // CookieRefreshIntervalMinutes cadence (every 8 min by default) — the most frequent client
+        // swap in the adapter, and therefore the one where disposing before publishing had the
+        // widest chance of pulling the client out from under a concurrent caller.
+        SwapAuthenticatedClients();
 
-        var healthy = await _accountClient.IsHealthyAsync();
+        var healthy = await ProbeHealthAsync();
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
         return healthy;
     }
+
+    /// <summary>
+    /// Test seam: the GV health probe (threadinginfo/get). Defaults to the live GvAccountClient.
+    /// Injected by tests so the recovery ladder can be exercised without talking to Google.
+    /// </summary>
+    internal Func<CancellationToken, Task<bool>>? HealthProbeOverride { get; set; }
+
+    /// <summary>
+    /// Origin the authenticated <see cref="HttpClient"/> is based at. Derived from
+    /// <see cref="GVBridgeConfig.GvApiBaseUrl"/> rather than hard-coded, because
+    /// <see cref="GvSipCredentialProvider"/> posts a RELATIVE uri
+    /// (<c>voice/v1/voiceclient/sipregisterinfo/get</c>) against this BaseAddress — so with a
+    /// hard-coded origin the configured API host silently governed the health probe but NOT the
+    /// SIP credential fetch. With the shipped default this evaluates to exactly
+    /// <c>https://clients6.google.com/</c>, so production behaviour is unchanged; it also lets a
+    /// test point activation at an unroutable address and stay offline. Falls back to the historic
+    /// literal if the configured value is not an absolute uri.
+    /// </summary>
+    private Uri AuthenticatedClientBaseAddress =>
+        Uri.TryCreate(_config.GvApiBaseUrl, UriKind.Absolute, out var configured)
+            ? new Uri(configured.GetLeftPart(UriPartial.Authority) + "/")
+            : new Uri("https://clients6.google.com/");
+
+    private Task<bool> ProbeHealthAsync(CancellationToken ct = default)
+        => HealthProbeOverride is { } probe
+            ? probe(ct)
+            : (_accountClient?.IsHealthyAsync(ct) ?? Task.FromResult(false));
 
     private ICookieRotator BuildDefaultCookieRotator()
     {
@@ -710,18 +1109,84 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         return new GvCookieRotator(_rotatorHttpClient, _loggerFactory.CreateLogger<GvCookieRotator>());
     }
 
+    /// <summary>
+    /// Install the periodic timers: the health watchdog and the proactive PSIDTS refresh. Extracted
+    /// from <see cref="ActivateAsync"/> so the cadence wiring — including the
+    /// <c>CookieRefreshIntervalMinutes: 0</c> kill switch — is unit-testable without a live
+    /// activation (which needs a real cookie file and a network round-trip).
+    /// </summary>
+    private void StartPeriodicTimers()
+    {
+        var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
+        _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
+
+        // Proactive PSIDTS refresh (spec §4.1). Rung 1 ONLY — browser-less RotateCookies. CDP
+        // (rung 3) is heavy and needs the box's Chrome; it stays reserved for reactive recovery.
+        if (_config.CookieRefreshIntervalMinutes > 0)
+        {
+            var refreshMs = _config.CookieRefreshIntervalMinutes * 60 * 1000;
+            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, refreshMs, refreshMs);
+        }
+    }
+
     private void OnHealthCheckTimer(object? state)
     {
         _ = RunHealthCheckAsync();
+    }
+
+    private void OnCookieRefreshTimer(object? state) => _ = RunProactiveCookieRefreshAsync();
+
+    /// <summary>
+    /// Proactive PSIDTS rotation on the CookieRefreshIntervalMinutes cadence. Deliberately narrower
+    /// than the reactive ladder: rung 1 only, and NO re-register (a successful rotation does not
+    /// invalidate a live SIP registration, and re-registering every 8 min would re-create the
+    /// 2026-06-19 REGISTER-storm risk — spec §4.1).
+    /// </summary>
+    private async Task RunProactiveCookieRefreshAsync()
+    {
+        try
+        {
+            if (!IsAvailable || _cookieSet == null || !_config.EnableCookieRotation) return;
+
+            // Never talk to Google during a 603/403 account cooldown.
+            if (_sipTransport?.IsThrottled == true)
+            {
+                _logger.LogDebug("GVApi: proactive PSIDTS refresh skipped — throttle cooldown active");
+                return;
+            }
+
+            // Share the reactive single-flight guard so a tick can never race a recovery.
+            if (IsRecoveryInFlight)
+            {
+                _logger.LogDebug("GVApi: proactive PSIDTS refresh skipped — recovery already in flight");
+                return;
+            }
+
+            if (await TryRotateCookiesAsync())
+                _logger.LogInformation("GVApi: proactive PSIDTS refresh succeeded");
+            else
+                _logger.LogWarning(
+                    "GVApi: proactive PSIDTS refresh did not rotate — reactive 401 recovery remains the backstop");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: proactive PSIDTS refresh error");
+        }
     }
 
     private async Task RunHealthCheckAsync()
     {
         try
         {
-            if (_accountClient == null) return;
+            // Bail only when there is genuinely nothing to probe. The guard is kept (rather than
+            // dropped as redundant) because ProbeHealthAsync would otherwise return false for an
+            // adapter that was never activated — or was concurrently deactivated — and that false
+            // reads as "Google rejected our cookies", flipping availability and firing the recovery
+            // ladder for no reason. It now honours HealthProbeOverride, without which the watchdog
+            // — the whole subject of F7 — is unreachable through its own test seam.
+            if (_accountClient == null && HealthProbeOverride == null) return;
 
-            var healthy = await _accountClient.IsHealthyAsync();
+            var healthy = await ProbeHealthAsync();
             _areCookiesValid = healthy;
             LastValidatedAt = DateTime.UtcNow;
 
@@ -756,7 +1221,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                     "GVApi: watchdog — deferring re-register: throttle cooldown active until {Until:o} ({Reason})",
                     _sipTransport.ThrottledUntil, _sipTransport.ThrottleReason);
             }
-            else if (Volatile.Read(ref _refreshingCookies) == 0)
+            else if (!IsRecoveryInFlight)
             {
                 // Cookies fine but SIP is not registered (e.g., a stuck/declined registration like the
                 // 2026-06-19 incident). Skip if a recovery is already in flight (it will re-register);
@@ -787,7 +1252,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         if (_disposed) return;
         _disposed = true;
         _healthCheckTimer?.Dispose();
+        _cookieRefreshTimer?.Dispose();
         _httpClient?.Dispose();
+        // Same leak class as F6: these were never released here. The transport's DisposeAsync is
+        // fire-and-forget because Dispose() must not block on async work.
+        _rotatorHttpClient?.Dispose();
+        if (_sipTransport is { } transport)
+        {
+            transport.IncomingCallReceived -= HandleSipIncomingCall;
+            transport.AuthenticationFailed -= HandleAuthenticationFailed;
+            _ = transport.DisposeAsync().AsTask();
+        }
         GC.SuppressFinalize(this);
     }
 

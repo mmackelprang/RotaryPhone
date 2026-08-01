@@ -20,7 +20,15 @@ public class GVBridgeConfig
     public string CookieKeyFilePath { get; set; } = "data/gv-key.bin";
     public string CookieEncryptionKey { get; set; } = "";
     public int CookieHealthCheckIntervalMinutes { get; set; } = 30;
-    public int CookieRefreshIntervalMinutes { get; set; } = 5;
+    // Proactive PSIDTS refresh cadence. Google's rotating __Secure-*PSIDTS cookies expire ~11 minutes
+    // after issue (measured 2026-07-31), so this MUST stay below that. 8 min leaves ~3 min of margin
+    // without inflating RotateCookies volume. 0 DISABLES the timer (kill switch, no redeploy needed).
+    // Before 2026-07-31 this value was declared but READ BY NOTHING — see spec F1.
+    public int CookieRefreshIntervalMinutes { get; set; } = 8;
+
+    // After a FAILED cookie-recovery run, suppress further runs for this long. Protects RotateCookies
+    // from being driven at the poll rate during a real Google outage. 0 disables the cooldown.
+    public int AuthRecoveryFailureCooldownSeconds { get; set; } = 60;
 
     // Chrome DevTools Protocol (CDP) for automated cookie extraction
     public int ChromeCdpPort { get; set; } = 9224;

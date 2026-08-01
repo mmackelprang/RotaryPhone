@@ -82,6 +82,35 @@ public class GVBridgeControllerTests
   }
 
   [Fact]
+  public void GetStatus_IncludesAuthBlackoutFields()
+  {
+    var controller = CreateController();
+
+    var result = controller.GetStatus();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    // B2 honest-status fields, appended so the existing contract is untouched.
+    Assert.True(root.TryGetProperty("authBlackout", out var authBlackout));
+    Assert.True(root.TryGetProperty("lastApiSuccessAt", out var lastApiSuccessAt));
+    Assert.True(root.TryGetProperty("lastApiAuthFailureAt", out var lastApiAuthFailureAt));
+
+    // Defaults on an inactive adapter: no call has been made, so no blackout.
+    Assert.False(authBlackout.GetBoolean());
+    Assert.Equal(JsonValueKind.Null, lastApiSuccessAt.ValueKind);
+    Assert.Equal(JsonValueKind.Null, lastApiAuthFailureAt.ValueKind);
+
+    // The original four contract fields are still present.
+    Assert.True(root.TryGetProperty("available", out _));
+    Assert.True(root.TryGetProperty("activeMode", out _));
+    Assert.True(root.TryGetProperty("sipRegistered", out _));
+    Assert.True(root.TryGetProperty("cookiesValid", out _));
+  }
+
+  [Fact]
   public void GetCookies_ReturnsAllSixFields()
   {
     var controller = CreateController();

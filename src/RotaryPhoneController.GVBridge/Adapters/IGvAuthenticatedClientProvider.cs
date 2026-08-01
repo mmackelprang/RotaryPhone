@@ -16,4 +16,19 @@ public interface IGvAuthenticatedClientProvider
 
     /// <summary>The GV public web API key.</summary>
     string ApiKey { get; }
+
+    /// <summary>
+    /// Ask the adapter to refresh GV auth (the rotate → reload → CDP ladder) and report whether it
+    /// worked. Concurrent callers share ONE recovery. READ paths await this and then retry once;
+    /// WRITE paths (sendsms, updateread) may call it WITHOUT awaiting but MUST NOT replay the
+    /// request — ADR §4.2 #4 forbids auto-retry on irreversible writes.
+    /// </summary>
+    Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Report the outcome of a real GV data-plane call so health is derived from what actually
+    /// happened rather than from a periodic probe of a different endpoint (spec §4.3, F5). Called
+    /// on both branches — success and failure — of every instrumented call.
+    /// </summary>
+    void RecordApiOutcome(bool success, bool authFailure);
 }

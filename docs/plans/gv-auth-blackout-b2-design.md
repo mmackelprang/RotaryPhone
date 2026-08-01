@@ -320,6 +320,27 @@ refresher's intent — adopt new cookies into the live adapter — is legitimate
 must stop is leaking the previous generation. `DeactivateAsync` (`GVApiAdapter.cs:329`) already contains
 the correct teardown sequence; the fix is to invoke it rather than duplicate it.
 
+> **⚠️ SUPERSEDED IN BUILD (2026-08-01, owner instruction).** Dispose-then-rebuild shipped only as the
+> **fallback** path. Unconditionally rebuilding meant churning a healthy SIP transport every 20 minutes
+> — the owner's instruction was to remove that churn, not monitor it. The shipped shape is **conditional
+> reuse** keyed on `CanReuseTransport => _sipTransport?.IsRegistered == true`: a **registered** transport
+> is kept across the cookie swap (rebuilding only the `HttpClient`/account client when the credentials
+> actually differ, and deliberately **not** re-registering), and dispose-then-rebuild runs only when the
+> transport is **absent or unregistered**.
+>
+> Reuse is sound because `GvSipTransport` caches no credentials — it holds a `Func<Task<SipCredentials>>`
+> invoked fresh on every register (`Sip/GvSipTransport.cs:1021`), resolving the `HttpClient` lazily by
+> field; recovery rung 2 (`ReloadCookiesAsync`) already depended on exactly this. The external
+> refresher's contract is still preserved (new cookies are adopted on every pass), so this section's
+> stated requirement holds — it is the *mechanism* that changed, not the guarantee.
+>
+> **Two consequences worth carrying forward.** (1) Reuse addresses **F7 more completely** than the
+> teardown did: the teardown re-armed a fresh 30-minute health timer on each 20-minute cron fire, which
+> is the starvation shape F7 describes, whereas the reuse paths leave the original timer on its own
+> anchor — measured live at two consecutive ticks exactly 30 minutes apart spanning six re-activations.
+> (2) The log line `re-activating — tearing down the previous generation first` is therefore **not** the
+> expected signal on a healthy box; see the inverted pass/fail table at plan §"Live UAT" step 3.
+
 ### 4.2 Ask 2 — reactive refresh-and-retry on the first 401 for `api2thread`
 
 **Reuse the shipped ladder; add an awaitable entry point.** The existing core stays exactly as it is; it
@@ -472,8 +493,8 @@ context on the dashboard.
 | **Interface change ripples** — new member on `IGvAuthenticatedClientProvider` | Only `GVApiAdapter` implements it in `src/`; test fakes need one added member. Verified: no other production implementer |
 | **`RotateCookies` shape is UNVERIFIED** | Ladder falls through to rungs 2/3 on no-op; Task 0 measures the live success rate so §4.1 isn't built on sand |
 | **Proactive rotation invalidating a live SIP registration** | Proactive path deliberately does not re-register; UAT step 6 watches for REGISTER churn |
-| **Re-entrancy fix drops an in-flight call** — tearing down `_sipTransport` on re-activation could kill an active call | Skip the transport rebuild when `_activeCallId != null`; refresh cookies/HttpClient only. Covered by a unit test |
-| **Re-entrancy fix regresses the external refresher's contract** — cookie adoption must keep working | Fix is dispose-then-rebuild, not a no-op guard; UAT step 3 explicitly re-runs `refresh-from-browser` and asserts new cookies are adopted |
+| **Re-entrancy fix drops an in-flight call** — tearing down `_sipTransport` on re-activation could kill an active call | Skip the transport rebuild when `_activeCallId != null`; refresh cookies/HttpClient only. Covered by a unit test. **As shipped this risk is further reduced:** conditional reuse means a registered transport is never torn down at all, so the common path has no teardown to race; the teardown path re-checks `_activeCallId` *after* timer disposal and before touching the transport (pre-merge review HIGH-1) |
+| **Re-entrancy fix regresses the external refresher's contract** — cookie adoption must keep working | UAT step 3 explicitly re-runs `refresh-from-browser` and asserts new cookies are adopted. **Verified live 2026-08-01:** `GV adapter re-activated with new cookies` on all 6 re-activations. (The original wording — "fix is dispose-then-rebuild, not a no-op guard" — is superseded: the shipped fix *does* short-circuit when the transport is healthy, but still adopts the cookies on every pass, so the contract is preserved by a different mechanism.) |
 
 ---
 

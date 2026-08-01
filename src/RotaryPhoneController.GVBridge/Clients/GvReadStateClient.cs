@@ -124,6 +124,13 @@ public class GvReadStateClient
                 _logger.LogInformation("updateread applied");
                 return GvUpdateReadResult.Ok();   // 200 = GV accepted the mark (honest)
             }
+            // Signal recovery so the NEXT call is healthy. Deliberately NOT awaited and NEVER
+            // replayed: ADR §4.2 #4 forbids auto-retry on irreversible GV writes (a replayed
+            // updateread could double-write). See spec §4.2.
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized
+                                    or System.Net.HttpStatusCode.Forbidden)
+                _ = _provider?.TryRecoverAuthAsync("api2thread/updateread 401");
+
             _logger.LogWarning("updateread returned {Status}", response.StatusCode);
             return GvUpdateReadResult.Fail(GvUpdateReadOutcome.UpstreamError,
                 $"Google returned {(int)response.StatusCode} {response.StatusCode}");
