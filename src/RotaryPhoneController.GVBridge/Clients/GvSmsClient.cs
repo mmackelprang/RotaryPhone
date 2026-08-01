@@ -174,6 +174,13 @@ public class GvSmsClient
                 return GvSmsSendResult.Ok();   // 200 = QUEUED, not delivered (honest)
             }
 
+            // Signal recovery so the NEXT call is healthy. Deliberately NOT awaited and NEVER
+            // replayed: ADR §4.2 #4 forbids auto-retry on irreversible GV writes (a replayed
+            // sendsms could double-send). See spec §4.2.
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized
+                                    or System.Net.HttpStatusCode.Forbidden)
+                _ = _provider?.TryRecoverAuthAsync("api2thread/sendsms 401");
+
             // Distinguish a bad-number rejection from a generic upstream failure so the controller can
             // return 400 invalid_number (UI: "number doesn't look right") vs 502 upstream_error
             // (§"Error taxonomy"). GV signals a bad recipient with INVALID_ARGUMENT in the body.

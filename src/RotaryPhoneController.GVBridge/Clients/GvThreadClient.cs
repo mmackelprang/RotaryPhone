@@ -93,15 +93,6 @@ public class GvThreadClient
     public async Task<JsonDocument?> ListRawAsync(
         GvThreadFolder folder, int count, string? pageToken, CancellationToken ct = default)
     {
-        // Resolve the live client per call when provider-backed; the test path uses the captured one.
-        var http = _http ?? _provider?.GetAuthenticatedClient();
-        if (http is null)
-        {
-            _logger.LogWarning("api2thread/list skipped — authenticated client unavailable for folder {Folder}",
-                folder);
-            return null;
-        }
-
         // Paging is UNVERIFIED: the capture was a single un-paged request, so we know neither which
         // body position carries a page token nor whether root[2]'s version cursor is one. Rather than
         // guess a position, we ignore the token and say so — silently dropping it would make a caller
@@ -114,30 +105,72 @@ public class GvThreadClient
                 folder);
         }
 
+        var url = $"{_baseUrl}/api2thread/list?alt=protojson&key={_apiKey}";
+        // VERIFIED body: [folder, count, 15, null, null, [null,1,1,1]].
+        // Index 2's constant 15 and the trailing flags array are sent verbatim as captured; their
+        // meanings are unknown, so they are reproduced rather than reinterpreted.
+        var payload = GvProtobuf.BuildArray(
+            folder.ToWireValue(), count, 15, null, null,
+            new object?[] { null, 1, 1, 1 });
+
+        // Attempt 1, then — on 401/403 only, and only when provider-backed — recover and replay ONCE.
+        var (doc, authFailed) = await TrySendAsync(url, payload, folder, ct);
+        if (doc is not null || !authFailed || _provider is null)
+            return doc;
+
+        _logger.LogInformation(
+            "api2thread/list auth-failed for folder {Folder} — recovering cookies and retrying once", folder);
+
+        if (!await _provider.TryRecoverAuthAsync($"api2thread/list 401 ({folder})", ct))
+        {
+            _logger.LogWarning("api2thread/list retry skipped for folder {Folder} — recovery failed", folder);
+            return null;
+        }
+
+        (doc, _) = await TrySendAsync(url, payload, folder, ct);
+        return doc;
+    }
+
+    /// <summary>
+    /// One attempt. Returns (document, authFailed). The client is RE-RESOLVED per attempt: recovery
+    /// rungs 1 and 2 dispose and re-create the adapter's HttpClient, so a captured instance would
+    /// throw ObjectDisposedException on the retry.
+    /// <para>
+    /// Only 401/403 sets authFailed. A 429, a 5xx, or a network fault must NOT trigger recovery —
+    /// throttling is falsified for this defect and replaying into a 429 is exactly the wrong move.
+    /// </para>
+    /// </summary>
+    private async Task<(JsonDocument? Doc, bool AuthFailed)> TrySendAsync(
+        string url, string payload, GvThreadFolder folder, CancellationToken ct)
+    {
+        // Resolve the live client per call when provider-backed; the test path uses the captured one.
+        var http = _http ?? _provider?.GetAuthenticatedClient();
+        if (http is null)
+        {
+            _logger.LogWarning("api2thread/list skipped — authenticated client unavailable for folder {Folder}",
+                folder);
+            return (null, false);
+        }
+
         try
         {
-            var url = $"{_baseUrl}/api2thread/list?alt=protojson&key={_apiKey}";
-            // VERIFIED body: [folder, count, 15, null, null, [null,1,1,1]].
-            // Index 2's constant 15 and the trailing flags array are sent verbatim as captured; their
-            // meanings are unknown, so they are reproduced rather than reinterpreted.
-            var payload = GvProtobuf.BuildArray(
-                folder.ToWireValue(), count, 15, null, null,
-                new object?[] { null, 1, 1, 1 });
             var content = new StringContent(payload, Encoding.UTF8, "application/json+protobuf");
             var response = await http.PostAsync(url, content, ct);
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("api2thread/list returned {Status} for folder {Folder}",
                     response.StatusCode, folder);
-                return null;
+                var authFailed = response.StatusCode is System.Net.HttpStatusCode.Unauthorized
+                                                     or System.Net.HttpStatusCode.Forbidden;
+                return (null, authFailed);
             }
             var raw = await response.Content.ReadAsStringAsync(ct);
-            return JsonDocument.Parse(raw);
+            return (JsonDocument.Parse(raw), false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "api2thread/list failed for folder {Folder}", folder);
-            return null;
+            return (null, false);
         }
     }
 }

@@ -78,6 +78,8 @@ public class GvRecordingFetcherTests
         public HttpClient? GetAuthenticatedClient() => null;
         public string ApiBaseUrl => BaseUrl;
         public string ApiKey => GvRecordingFetcherTests.ApiKey;
+        public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
+            => Task.FromResult(false);
     }
 
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler

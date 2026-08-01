@@ -24,6 +24,8 @@ public class GVBridgeReadClientDiTests
         public HttpClient? GetAuthenticatedClient() => null;
         public string ApiBaseUrl => "https://clients6.google.com/voice/v1/voiceclient";
         public string ApiKey => "test-key";
+        public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
+            => Task.FromResult(false);
     }
 
     private static ServiceProvider BuildProvider()
