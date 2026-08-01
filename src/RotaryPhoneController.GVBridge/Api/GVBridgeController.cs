@@ -52,7 +52,10 @@ public class GVBridgeController : ControllerBase
             Degraded: _adapter.Degraded,
             LastHealthyAt: _adapter.LastHealthyAt,
             ThrottledUntil: _adapter.ThrottledUntil,
-            ThrottleReason: _adapter.ThrottleReason));
+            ThrottleReason: _adapter.ThrottleReason,
+            AuthBlackout: _adapter.AuthBlackout,
+            LastApiSuccessAt: _adapter.LastApiSuccessAt,
+            LastApiAuthFailureAt: _adapter.LastApiAuthFailureAt));
     }
 
     [HttpGet("adapter/mode")]

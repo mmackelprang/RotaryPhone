@@ -244,6 +244,77 @@ public class GVApiAdapterRecoveryTests
         Assert.Empty(channel.Sends);
     }
 
+    // --------------------------------------- Task 5: health derived from the last REAL call
+
+    [Fact]
+    public void AuthBlackout_TrueAfterAuthFailure()
+    {
+        // The 2026-07-31 blackout reported cookiesValid:true while api2thread/list was 401ing,
+        // because the probe had last run up to 30 minutes earlier against a DIFFERENT endpoint.
+        var adapter = CreateAdapter();
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+        Assert.False(adapter.AuthBlackout);
+        Assert.True(adapter.AreCookiesValid);
+
+        adapter.RecordApiOutcome(success: false, authFailure: true);
+
+        Assert.True(adapter.AuthBlackout);
+        Assert.False(adapter.AreCookiesValid);   // cookiesValid goes false on the FIRST real rejection
+        Assert.True(adapter.Degraded);           // degraded follows for free
+        Assert.NotNull(adapter.LastApiAuthFailureAt);
+    }
+
+    [Fact]
+    public void AuthBlackout_ClearsAfterSuccess()
+    {
+        var adapter = CreateAdapter();
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+
+        adapter.RecordApiOutcome(success: false, authFailure: true);
+        Assert.True(adapter.AuthBlackout);
+
+        adapter.RecordApiOutcome(success: true, authFailure: false);
+
+        Assert.False(adapter.AuthBlackout);
+        Assert.True(adapter.AreCookiesValid);
+        Assert.NotNull(adapter.LastApiSuccessAt);
+    }
+
+    [Fact]
+    public void AuthBlackout_NotSetByNonAuthFailure()
+    {
+        // A 429 or a 5xx is not an auth blackout. Throttling is falsified for this defect.
+        var adapter = CreateAdapter();
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+
+        adapter.RecordApiOutcome(success: false, authFailure: false);
+
+        Assert.False(adapter.AuthBlackout);
+        Assert.True(adapter.AreCookiesValid);
+        Assert.Null(adapter.LastApiAuthFailureAt);
+    }
+
+    [Fact]
+    public void Available_StaysTrueDuringBlackout()
+    {
+        // The deliberate deviation from RadioConsole's literal ask (spec §4.3, §8.3), locked in by a
+        // test: IsAvailable gates GetAuthenticatedClient(), so flipping it during a transient
+        // data-plane 401 would make the adapter refuse its OWN recovery retry — turning a ~9-minute
+        // blackout into a hard stop. degraded / authBlackout carry the fact instead.
+        var adapter = CreateAdapter();
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+
+        adapter.RecordApiOutcome(success: false, authFailure: true);
+
+        Assert.True(adapter.IsAvailable);
+        Assert.True(adapter.AuthBlackout);
+        Assert.True(adapter.Degraded);
+    }
+
     // ---------------------------------------------------------------- shared test scaffolding
 
     internal static Task RunProactiveRefresh(GVApiAdapter adapter)

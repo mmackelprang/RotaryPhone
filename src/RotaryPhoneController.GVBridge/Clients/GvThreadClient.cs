@@ -162,9 +162,11 @@ public class GvThreadClient
                     response.StatusCode, folder);
                 var authFailed = response.StatusCode is System.Net.HttpStatusCode.Unauthorized
                                                      or System.Net.HttpStatusCode.Forbidden;
+                _provider?.RecordApiOutcome(success: false, authFailure: authFailed);
                 return (null, authFailed);
             }
             var raw = await response.Content.ReadAsStringAsync(ct);
+            _provider?.RecordApiOutcome(success: true, authFailure: false);
             return (JsonDocument.Parse(raw), false);
         }
         catch (Exception ex)

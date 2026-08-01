@@ -24,4 +24,11 @@ public interface IGvAuthenticatedClientProvider
     /// request — ADR §4.2 #4 forbids auto-retry on irreversible writes.
     /// </summary>
     Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Report the outcome of a real GV data-plane call so health is derived from what actually
+    /// happened rather than from a periodic probe of a different endpoint (spec §4.3, F5). Called
+    /// on both branches — success and failure — of every instrumented call.
+    /// </summary>
+    void RecordApiOutcome(bool success, bool authFailure);
 }

@@ -34,6 +34,24 @@ public class GvThreadClientAuthRetryTests
         Assert.NotNull(doc);
         Assert.Equal(1, provider.RecoverCalls);
         Assert.Equal(2, handler.Attempts);
+
+        // Both attempts reported their real outcome to the adapter's data-plane health (spec §4.3).
+        Assert.Equal(1, provider.AuthFailureOutcomes);
+        Assert.Equal(1, provider.SuccessOutcomes);
+    }
+
+    [Fact]
+    public async Task ListRaw_On429_RecordsFailureButNotAuthFailure()
+    {
+        // Health must not report an auth blackout for a throttle or a server error.
+        var handler = new SequenceHandler(_ => new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        var provider = new FakeProvider(() => new HttpClient(handler));
+        var client = NewProviderClient(provider);
+
+        await client.ListRawAsync(GvThreadFolder.Sms, 20, pageToken: null);
+
+        Assert.Equal(0, provider.AuthFailureOutcomes);
+        Assert.Equal(0, provider.SuccessOutcomes);
     }
 
     [Fact]
@@ -175,10 +193,14 @@ public class GvThreadClientAuthRetryTests
     {
         private int _getClientCalls;
         private int _recoverCalls;
+        private int _successOutcomes;
+        private int _authFailureOutcomes;
 
         public bool RecoverResult { get; set; } = true;
         public int GetClientCalls => Volatile.Read(ref _getClientCalls);
         public int RecoverCalls => Volatile.Read(ref _recoverCalls);
+        public int SuccessOutcomes => Volatile.Read(ref _successOutcomes);
+        public int AuthFailureOutcomes => Volatile.Read(ref _authFailureOutcomes);
 
         public HttpClient? GetAuthenticatedClient()
         {
@@ -193,6 +215,12 @@ public class GvThreadClientAuthRetryTests
         {
             Interlocked.Increment(ref _recoverCalls);
             return Task.FromResult(RecoverResult);
+        }
+
+        public void RecordApiOutcome(bool success, bool authFailure)
+        {
+            if (success) Interlocked.Increment(ref _successOutcomes);
+            else if (authFailure) Interlocked.Increment(ref _authFailureOutcomes);
         }
     }
 }

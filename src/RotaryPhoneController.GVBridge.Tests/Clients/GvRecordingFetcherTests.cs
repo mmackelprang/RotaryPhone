@@ -80,6 +80,7 @@ public class GvRecordingFetcherTests
         public string ApiKey => GvRecordingFetcherTests.ApiKey;
         public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
             => Task.FromResult(false);
+        public void RecordApiOutcome(bool success, bool authFailure) { }
     }
 
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler

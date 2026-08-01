@@ -26,6 +26,7 @@ public class GVBridgeReadClientDiTests
         public string ApiKey => "test-key";
         public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
             => Task.FromResult(false);
+        public void RecordApiOutcome(bool success, bool authFailure) { }
     }
 
     private static ServiceProvider BuildProvider()

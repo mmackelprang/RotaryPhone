@@ -85,9 +85,39 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public DateTime? SipLastConnectedAt => _sipTransport?.LastConnectedAt;
 
     /// <summary>
-    /// Whether the last cookie health check passed (cookies are still accepted by Google).
+    /// Cookies are valid only if the last PROBE passed AND no real data-plane call has since been
+    /// rejected for auth. The probe alone is a 30-minute-stale reading of a DIFFERENT endpoint
+    /// (threadinginfo/get) than the one that fails (api2thread/list) — spec F5.
     /// </summary>
-    public bool AreCookiesValid => _areCookiesValid;
+    public bool AreCookiesValid => _areCookiesValid && !AuthBlackout;
+
+    // Data-plane truth (spec §4.3). A health field derived from a PROBE reports healthy straight
+    // through an outage — the 2026-07-31 blackout reported cookiesValid:true while api2thread/list
+    // was returning 401. These are written by the actual GV calls, not by threadinginfo/get.
+    private DateTime? _lastApiSuccessAtUtc;
+    private DateTime? _lastApiAuthFailureAtUtc;
+
+    /// <summary>UTC of the last 2xx from a real GV data-plane call.</summary>
+    public DateTime? LastApiSuccessAt => _lastApiSuccessAtUtc;
+
+    /// <summary>UTC of the last 401/403 from a real GV data-plane call.</summary>
+    public DateTime? LastApiAuthFailureAt => _lastApiAuthFailureAtUtc;
+
+    /// <summary>
+    /// True when the most recent real GV data-plane call was rejected for auth and nothing has
+    /// succeeded since. This is the field RadioConsole's "Google Voice is reconnecting" banner
+    /// should bind to — NOT <see cref="IsAvailable"/>, which stays true by design (spec §4.3).
+    /// </summary>
+    public bool AuthBlackout =>
+        _lastApiAuthFailureAtUtc is { } fail &&
+        (_lastApiSuccessAtUtc is not { } ok || fail > ok);
+
+    /// <summary>Called by the GV clients after every real data-plane call. Cheap, lock-free.</summary>
+    public void RecordApiOutcome(bool success, bool authFailure)
+    {
+        if (success) _lastApiSuccessAtUtc = DateTime.UtcNow;
+        else if (authFailure) _lastApiAuthFailureAtUtc = DateTime.UtcNow;
+    }
 
     /// <summary>
     /// True when GVApi IS the active/available path but is NOT fully usable — cookies invalid OR
@@ -96,7 +126,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// state is already conveyed by <c>available:false</c>. Surfaced honestly so the dashboard can
     /// see real degradation early (the 2026-06-19 outage was invisible because status lied).
     /// </summary>
-    public bool Degraded => IsAvailable && !(_areCookiesValid && (_sipTransport?.IsRegistered ?? false));
+    /// <remarks>
+    /// Derives from the <see cref="AreCookiesValid"/> PROPERTY (not the raw probe field), so an
+    /// auth blackout on the data plane makes <c>degraded</c> honest for free — spec §4.3.
+    /// </remarks>
+    public bool Degraded => IsAvailable && !(AreCookiesValid && (_sipTransport?.IsRegistered ?? false));
 
     /// <summary>
     /// UTC time the adapter was last fully healthy (cookies valid AND SIP registered), per the
