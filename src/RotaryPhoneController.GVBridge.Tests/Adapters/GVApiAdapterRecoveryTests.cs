@@ -8,6 +8,7 @@ using RotaryPhoneController.GVBridge.Auth;
 using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Sip;
 using RotaryPhoneController.GVBridge.Tests.Sip;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
@@ -251,17 +252,27 @@ public class GVApiAdapterRecoveryTests
     {
         // The 2026-07-31 blackout reported cookiesValid:true while api2thread/list was 401ing,
         // because the probe had last run up to 30 minutes earlier against a DIFFERENT endpoint.
+        //
+        // A REGISTERED transport is attached deliberately. Degraded is
+        // IsAvailable && !(AreCookiesValid && IsRegistered), so with no transport at all it is
+        // already true before RecordApiOutcome runs and asserting it afterwards proves nothing.
+        // With a registered transport the adapter starts provably healthy, and the flip to
+        // degraded is attributable to the auth blackout alone — which is acceptance criterion 3.
         var adapter = CreateAdapter();
+        var (transport, _) = NewRegisteredTransport();
+        SetField(adapter, "_sipTransport", transport);
         SetField(adapter, "_areCookiesValid", true);
         SetAvailable(adapter, true);
         Assert.False(adapter.AuthBlackout);
         Assert.True(adapter.AreCookiesValid);
+        Assert.False(adapter.Degraded);          // provably healthy BEFORE the outcome is recorded
 
         adapter.RecordApiOutcome(success: false, authFailure: true);
 
         Assert.True(adapter.AuthBlackout);
         Assert.False(adapter.AreCookiesValid);   // cookiesValid goes false on the FIRST real rejection
         Assert.True(adapter.Degraded);           // degraded follows for free
+        Assert.True(transport.IsRegistered);     // ...and NOT because SIP dropped
         Assert.NotNull(adapter.LastApiAuthFailureAt);
     }
 
@@ -315,10 +326,173 @@ public class GVApiAdapterRecoveryTests
         Assert.True(adapter.Degraded);
     }
 
+    [Fact]
+    public async Task Deactivate_ClearsDataPlaneOutcomeTimestamps()
+    {
+        // The outcome timestamps are per-generation. Left set, a stale authBlackout:true carries
+        // from a torn-down generation into a freshly re-activated one and misleads the dashboard
+        // until the next real GV call happens to land.
+        var adapter = CreateAdapter();
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+        adapter.RecordApiOutcome(success: false, authFailure: true);
+        Assert.True(adapter.AuthBlackout);
+
+        await adapter.DeactivateAsync();
+
+        Assert.False(adapter.AuthBlackout);
+        Assert.Null(adapter.LastApiAuthFailureAt);
+        Assert.Null(adapter.LastApiSuccessAt);
+    }
+
+    // ------------------------------------------------------- F7: the periodic health watchdog
+    //
+    // RunHealthCheckAsync is the ONLY timed entry into the recovery ladder, and F7 is the headline
+    // finding of this work — but until now nothing exercised it. It is reachable offline because
+    // ProbeHealthAsync routes through HealthProbeOverride; its early-out is
+    // `_accountClient == null && HealthProbeOverride == null`, which no longer short-circuits past
+    // that seam.
+
+    [Fact]
+    public async Task Watchdog_ProbeFails_MarksUnavailableAndRunsRecoveryLadder()
+    {
+        // Google rejected the cookies → availability goes false and the full ladder runs.
+        var rotator = new FakeCookieRotator(_ => Task.FromResult(CookieRotationResult.NotRotated));
+        var adapter = CreateAdapter(rotator);
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);
+        SetField(adapter, "_cookieSet", NewCookies());
+        SetField(adapter, "_areCookiesValid", true);
+        SetAvailable(adapter, true);
+
+        await RunHealthCheck(adapter);
+        await AwaitRecoveryAsync(adapter);
+
+        Assert.False(adapter.IsAvailable);
+        Assert.False(adapter.AreCookiesValid);
+        Assert.NotNull(adapter.LastValidatedAt);
+        Assert.Equal(1, rotator.Calls);          // the ladder really was entered
+        Assert.Null(adapter.LastHealthyAt);
+    }
+
+    [Fact]
+    public async Task Watchdog_ProbeOkAndRegistered_RecordsHealthyAndMarksAvailable()
+    {
+        var adapter = CreateAdapter();
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        var (transport, channel) = NewRegisteredTransport();
+        SetField(adapter, "_sipTransport", transport);
+        Assert.False(adapter.IsAvailable);
+        Assert.Null(adapter.LastHealthyAt);
+
+        await RunHealthCheck(adapter);
+
+        Assert.NotNull(adapter.LastHealthyAt);
+        Assert.True(adapter.IsAvailable);        // recovered from a previous down state
+        Assert.True(adapter.AreCookiesValid);
+        Assert.False(adapter.Degraded);
+        Assert.Empty(channel.Sends);             // already registered — no REGISTER was forced
+    }
+
+    [Fact]
+    public async Task Watchdog_ProbeOkNotRegistered_ForcesReRegister()
+    {
+        // Positive control for the two "does NOT re-register" tests below — without it they could
+        // pass for the wrong reason. This is the 2026-06-19 shape: cookies fine, SIP stuck.
+        var logger = new CapturingLogger<GVApiAdapter>();
+        var adapter = CreateAdapter(logger: logger);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        var (transport, channel) = NewFakeTransport();
+        channel.FailNextSend = true;             // let the forced REGISTER fail fast, not hang
+        SetField(adapter, "_sipTransport", transport);
+        SetAvailable(adapter, true);
+
+        await RunHealthCheck(adapter);
+
+        Assert.Contains(logger.Entries,
+            e => e.Message.Contains("cookies valid but SIP not registered, forcing re-register"));
+        // ForceReRegisterAsync is fire-and-forget, so poll rather than assert instantly.
+        Assert.True(await WaitForAsync(() => channel.ConnectCount == 1));
+    }
+
+    [Fact]
+    public async Task Watchdog_ProbeOkButThrottled_DoesNotForceReRegister()
+    {
+        // The 2026-06-19 storm guard: re-registering inside a 603/403 account cooldown re-arms the
+        // storm every health-check interval. The transport's own gate would suppress the REGISTER,
+        // but the ADAPTER must stand down first — hence the assertion on the deferral log.
+        var logger = new CapturingLogger<GVApiAdapter>();
+        var adapter = CreateAdapter(logger: logger);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        var (transport, channel) = NewFakeTransport();
+        Throttle(transport);
+        SetField(adapter, "_sipTransport", transport);
+        SetAvailable(adapter, true);
+
+        await RunHealthCheck(adapter);
+
+        Assert.Contains(logger.Entries,
+            e => e.Message.Contains("deferring re-register: throttle cooldown active"));
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("forcing re-register"));
+        Assert.Equal(0, channel.ConnectCount);
+        Assert.Empty(channel.Sends);
+        Assert.True(adapter.Degraded);           // and it says so honestly
+    }
+
+    [Fact]
+    public async Task Watchdog_ProbeOkNotRegisteredRecoveryInFlight_DoesNotForceReRegister()
+    {
+        // A ladder run already in flight re-registers on its own once a rung succeeds; a second
+        // forced REGISTER from the watchdog would just double up on Google.
+        var gate = new TaskCompletionSource<CookieRotationResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var logger = new CapturingLogger<GVApiAdapter>();
+        var adapter = CreateAdapter(new FakeCookieRotator(_ => gate.Task), logger: logger);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        SetField(adapter, "_cookieSet", NewCookies());
+        var (transport, channel) = NewFakeTransport();
+        SetField(adapter, "_sipTransport", transport);
+        SetAvailable(adapter, true);
+
+        var recovery = adapter.TryRecoverAuthAsync("reactive");
+        Assert.True(IsRecoveryInFlight(adapter));
+
+        await RunHealthCheck(adapter);
+
+        Assert.DoesNotContain(logger.Entries, e => e.Message.Contains("forcing re-register"));
+        Assert.Equal(0, channel.ConnectCount);
+
+        gate.SetResult(CookieRotationResult.NotRotated);
+        await recovery;
+    }
+
     // ---------------------------------------------------------------- shared test scaffolding
 
     internal static Task RunProactiveRefresh(GVApiAdapter adapter)
         => (Task)Invoke(adapter, "RunProactiveCookieRefreshAsync")!;
+
+    internal static Task RunHealthCheck(GVApiAdapter adapter)
+        => (Task)Invoke(adapter, "RunHealthCheckAsync")!;
+
+    /// <summary>
+    /// Awaits the ladder run the watchdog kicked off fire-and-forget, so assertions about it are
+    /// deterministic rather than a race against a background task.
+    /// </summary>
+    internal static async Task AwaitRecoveryAsync(GVApiAdapter adapter)
+    {
+        if (GetField<Task<bool>>(adapter, "_recoveryTask") is { } task)
+            await task;
+    }
+
+    internal static async Task<bool> WaitForAsync(Func<bool> condition, int timeoutMs = 2000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (condition()) return true;
+            await Task.Delay(10);
+        }
+        return condition();
+    }
 
     internal static (GvSipTransport Transport, FakeSipWebSocketChannel Channel) NewFakeTransport()
     {
@@ -332,6 +506,22 @@ public class GVApiAdapterRecoveryTests
             channelFactory: (_, _) => channel,
             options: null,
             timeProvider: null);
+        return (transport, channel);
+    }
+
+    /// <summary>
+    /// A fake transport that reports <c>IsRegistered == true</c> (which is <c>_registered</c> AND a
+    /// connected channel) without driving a real REGISTER exchange. Needed wherever a test must
+    /// watch <c>Degraded</c> FLIP: with no transport attached, Degraded is already true and the
+    /// post-condition assertion would be vacuous.
+    /// </summary>
+    internal static (GvSipTransport Transport, FakeSipWebSocketChannel Channel) NewRegisteredTransport()
+    {
+        var (transport, channel) = NewFakeTransport();
+        channel.ConnectAsync().GetAwaiter().GetResult();
+        SetField(transport, "_wsChannel", channel);
+        SetField(transport, "_registered", true);
+        Assert.True(transport.IsRegistered);
         return (transport, channel);
     }
 

@@ -283,7 +283,19 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             }
 
             _logger.LogInformation("GVApi: re-activating — tearing down the previous generation first");
-            await DeactivateAsync(ct);
+            if (!await TryDeactivateForReactivationAsync(ct))
+            {
+                // A call started while we were tearing down (the timer disposals inside can block
+                // for SECONDS on an in-flight health probe — see TryDeactivateForReactivationAsync).
+                // Nothing irreversible happened yet: restore the timers we disposed, adopt the new
+                // cookies, and leave the ringing/active call — and its transport — alone.
+                _logger.LogInformation(
+                    "GVApi: re-activation aborted — a call started during teardown; " +
+                    "keeping SIP transport and refreshing cookies only");
+                StartPeriodicTimers();
+                await RefreshAuthenticatedClientsAsync(ct);
+                return;
+            }
         }
 
         // 1. Load encryption key: prefer key file (written by CookieRetriever), fallback to config
@@ -325,7 +337,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
+            BaseAddress = AuthenticatedClientBaseAddress
         };
 
         // 3. Create account client for health checks
@@ -390,10 +402,60 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
     }
 
+    /// <summary>
+    /// Public mode-switch teardown. Unconditional BY DESIGN: a genuine switch away from GVApi must
+    /// fully tear down even mid-call. The re-entrancy path uses
+    /// <see cref="TryDeactivateForReactivationAsync"/> instead, which can abort.
+    /// </summary>
     public async Task DeactivateAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("GVApiAdapter deactivating...");
 
+        await DisposePeriodicTimersAsync();
+        await TearDownGenerationAsync();
+    }
+
+    /// <summary>
+    /// Teardown used ONLY by the <see cref="ActivateAsync"/> re-entrancy path. Identical to
+    /// <see cref="DeactivateAsync"/> except that it re-checks <c>_activeCallId</c> after the timer
+    /// disposals and before anything irreversible, and abandons the teardown if a call appeared.
+    /// Returns false when it abandoned — the caller must then re-arm the timers via
+    /// <see cref="StartPeriodicTimers"/>, since those are the only things it destroyed.
+    /// </summary>
+    /// <remarks>
+    /// Why the re-check exists: the guard at the top of ActivateAsync tests <c>_activeCallId</c>
+    /// once and then commits to a teardown, but <c>Timer.DisposeAsync()</c> does not complete until
+    /// an ALREADY-RUNNING callback finishes — and <c>RunHealthCheckAsync</c> makes a live HTTP call
+    /// with a 30-second client timeout. That window is seconds wide, and
+    /// <c>IncomingCallReceived</c> fires while the phone is still RINGING. Without this second look
+    /// a call that started ringing inside the window would have its transport disposed out from
+    /// under it and be silently dropped.
+    /// </remarks>
+    private async Task<bool> TryDeactivateForReactivationAsync(CancellationToken ct = default)
+    {
+        _logger.LogInformation("GVApiAdapter deactivating...");
+
+        await DisposePeriodicTimersAsync();
+
+        // Second look, at the last point where nothing unrecoverable has happened: only the two
+        // timers are gone, and the caller re-arms them. The residual window between this check and
+        // the transport disposal below is a few instructions wide and is irreducible without taking
+        // a lock — that is accepted deliberately, consistent with the lock-free
+        // Interlocked.Exchange(ref _activeCallId, …) idiom used throughout this file. It was not
+        // missed; do not "fix" it by adding a lock without revisiting that idiom as a whole.
+        if (_activeCallId != null)
+            return false;
+
+        await TearDownGenerationAsync();
+        return true;
+    }
+
+    /// <summary>
+    /// Stops the health watchdog and the proactive PSIDTS refresh timer. Reversible: the only way
+    /// back is <see cref="StartPeriodicTimers"/>, which the abandoned-teardown path calls.
+    /// </summary>
+    private async Task DisposePeriodicTimersAsync()
+    {
         // Stop health check timer
         if (_healthCheckTimer != null)
         {
@@ -408,7 +470,14 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             await _cookieRefreshTimer.DisposeAsync();
             _cookieRefreshTimer = null;
         }
+    }
 
+    /// <summary>
+    /// Irreversible half of the teardown: disposes the SIP transport and the HTTP clients and
+    /// clears all per-generation state. Nothing here can be undone by re-arming a timer.
+    /// </summary>
+    private async Task TearDownGenerationAsync()
+    {
         // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
         if (_sipTransport != null)
         {
@@ -440,6 +509,13 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         LoadedAt = null;
         LastValidatedAt = null;
         _psidtsRefreshedAt = null;
+
+        // Data-plane outcome timestamps are per-generation too. Leaving them set would carry a
+        // stale authBlackout:true from the torn-down generation into the freshly re-activated one
+        // and mislead the dashboard until the next real GV call happened to land.
+        _lastApiSuccessAtUtc = null;
+        _lastApiAuthFailureAtUtc = null;
+
         Interlocked.Exchange(ref _activeCallId, null);
 
         SetAvailable(false);
@@ -489,7 +565,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
+            BaseAddress = AuthenticatedClientBaseAddress
         };
 
         // Re-create account client with new HttpClient
@@ -831,7 +907,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _httpClient = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = new Uri("https://clients6.google.com/")
+            BaseAddress = AuthenticatedClientBaseAddress
         };
         _accountClient = new GvAccountClient(
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
@@ -848,6 +924,22 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// Injected by tests so the recovery ladder can be exercised without talking to Google.
     /// </summary>
     internal Func<CancellationToken, Task<bool>>? HealthProbeOverride { get; set; }
+
+    /// <summary>
+    /// Origin the authenticated <see cref="HttpClient"/> is based at. Derived from
+    /// <see cref="GVBridgeConfig.GvApiBaseUrl"/> rather than hard-coded, because
+    /// <see cref="GvSipCredentialProvider"/> posts a RELATIVE uri
+    /// (<c>voice/v1/voiceclient/sipregisterinfo/get</c>) against this BaseAddress — so with a
+    /// hard-coded origin the configured API host silently governed the health probe but NOT the
+    /// SIP credential fetch. With the shipped default this evaluates to exactly
+    /// <c>https://clients6.google.com/</c>, so production behaviour is unchanged; it also lets a
+    /// test point activation at an unroutable address and stay offline. Falls back to the historic
+    /// literal if the configured value is not an absolute uri.
+    /// </summary>
+    private Uri AuthenticatedClientBaseAddress =>
+        Uri.TryCreate(_config.GvApiBaseUrl, UriKind.Absolute, out var configured)
+            ? new Uri(configured.GetLeftPart(UriPartial.Authority) + "/")
+            : new Uri("https://clients6.google.com/");
 
     private Task<bool> ProbeHealthAsync(CancellationToken ct = default)
         => HealthProbeOverride is { } probe
@@ -930,7 +1022,13 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     {
         try
         {
-            if (_accountClient == null) return;
+            // Bail only when there is genuinely nothing to probe. The guard is kept (rather than
+            // dropped as redundant) because ProbeHealthAsync would otherwise return false for an
+            // adapter that was never activated — or was concurrently deactivated — and that false
+            // reads as "Google rejected our cookies", flipping availability and firing the recovery
+            // ladder for no reason. It now honours HealthProbeOverride, without which the watchdog
+            // — the whole subject of F7 — is unreachable through its own test seam.
+            if (_accountClient == null && HealthProbeOverride == null) return;
 
             var healthy = await ProbeHealthAsync();
             _areCookiesValid = healthy;

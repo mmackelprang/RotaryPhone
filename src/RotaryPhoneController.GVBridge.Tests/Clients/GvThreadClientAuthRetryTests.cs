@@ -112,6 +112,25 @@ public class GvThreadClientAuthRetryTests
     }
 
     [Fact]
+    public async Task ListRaw_On200WithUnparseableBody_RecordsNoOutcome()
+    {
+        // A 200 carrying content that will not parse is NOT a data-plane success — ListRawAsync
+        // returns null for it — and recording one would clear an authBlackout that nothing has
+        // actually resolved. It is not an auth failure either, so it must record NOTHING.
+        var handler = new SequenceHandler(_ => Ok("this is not json"));
+        var provider = new FakeProvider(() => new HttpClient(handler));
+        var client = NewProviderClient(provider);
+
+        var doc = await client.ListRawAsync(GvThreadFolder.Sms, 20, pageToken: null);
+
+        Assert.Null(doc);
+        Assert.Equal(0, provider.SuccessOutcomes);
+        Assert.Equal(0, provider.AuthFailureOutcomes);
+        Assert.Equal(0, provider.RecoverCalls);
+        Assert.Equal(1, handler.Attempts);   // and no replay
+    }
+
+    [Fact]
     public async Task ListRaw_RetryReResolvesClient()
     {
         // Rungs 1 and 2 DISPOSE and re-create the adapter's HttpClient. A retry that reused the

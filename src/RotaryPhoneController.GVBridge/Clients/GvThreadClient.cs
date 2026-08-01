@@ -166,8 +166,15 @@ public class GvThreadClient
                 return (null, authFailed);
             }
             var raw = await response.Content.ReadAsStringAsync(ct);
+
+            // Record the success only once the body has actually parsed. A 200 carrying
+            // unparseable content is NOT a data-plane success — this method returns null for it —
+            // and recording one would clear an authBlackout that nothing has really resolved. It is
+            // not an auth failure either, so it records no outcome at all: the throw below lands in
+            // the catch, which deliberately reports nothing.
+            var doc = JsonDocument.Parse(raw);
             _provider?.RecordApiOutcome(success: true, authFailure: false);
-            return (JsonDocument.Parse(raw), false);
+            return (doc, false);
         }
         catch (Exception ex)
         {
