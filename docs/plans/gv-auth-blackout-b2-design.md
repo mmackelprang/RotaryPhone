@@ -1,7 +1,8 @@
 # Design Spec: B2 — GV auth blackout (PSIDTS staleness → deterministic ~9-min dead window)
 
-**Status:** Draft — awaiting owner review before the plan is executed
-**Date:** 2026-07-31
+**Status:** ✅ **Approved — all five §8 open questions decided by the owner 2026-08-01.** Build-ready; the
+companion plan may be executed as written.
+**Date:** 2026-07-31 (decisions recorded 2026-08-01)
 **Defect:** B2 from `docs/prompts/radioconsole-gv-threadid-decode-and-auth-blackout-request.md` §B2
 **Companion plan:** `docs/plans/gv-auth-blackout-b2-plan.md`
 **Arc:** `docs/plans/gv-voicemail-sms-arc.md` (this repo has **no** `BUILDER_QUEUE.md`; the arc tracker is the queue)
@@ -78,12 +79,18 @@ wall-clock alignment across hours. (Radio Console's *healthy-again* transition t
 but those are their 60-second poller's observations, not the refresh itself, so that drift is a property of
 their sampling and is **not** usable evidence about the scheduler's shape.)
 
-> **This is a hypothesis, not a confirmed finding.** The plan opens with a bounded on-box diagnostic
-> (Task 0) to identify the actual scheduler before anything else is changed, because installing an
-> in-process refresh timer while an unknown external one is still running would double the refresh rate
-> against `RotateCookies`. Task 0 also checks the deployed `${INSTALL_DIR}/ChromeExtension` (referenced at
-> `deploy/setup-gvbridge.sh:26` but **not present in this repo**) for a `chrome.alarms` /
-> `periodInMinutes: 20` scheduler — a third plausible shape.
+> **CONFIRMED 2026-08-01 — this is no longer a hypothesis.** A bounded on-box look located the scheduler:
+> a **box-side cron entry running `/opt/rotary-phone/refresh-gv-cookies.sh` every 20 minutes**. That is
+> the external caller of `POST /api/gvbridge/cookies/refresh-from-browser`, and it accounts for the
+> ~20m05s cadence and its wall-clock exactness. F3 is therefore a confirmed finding, and the "chrome.alarms
+> in the deployed `${INSTALL_DIR}/ChromeExtension`" and "systemd timer" alternatives are ruled out.
+>
+> Task 0 in the plan is **narrowed but not dropped**: its remaining job is to re-confirm the cron is still
+> present at build time and — the part that was never answered — to measure whether `TryRotateCookiesAsync`
+> (rung 1) actually rotates live or silently no-ops, since its request shape is UNVERIFIED (§7).
+>
+> **The cron stays running through B2's UAT** (owner decision 2026-08-01, §8 q2). See §4.1 for what that
+> obliges the in-process refresh to do.
 
 ### F4 — The reactive-401 escalation already exists, but only on the SIP leg
 
@@ -231,10 +238,13 @@ moment — PR #36 is exactly why the SIP leg looked fine while the SMS leg was d
 `GvBridgeStatusDto` in the same append-only style the mark-read and throttle work used. **One status
 abstraction, extended — not a second one.**
 
-**Recommended action (in this PR):** commit the stale plan doc with a `SHIPPED — PR #36 (2026-06-13)` banner
-rather than deleting it, so `docs/plans/` keeps the historical record and no future session re-queues it.
-Its §7 OPEN QUESTIONS 1-3 were all resolved in the shipped code (CDP auto-refresh *is* wired as rung 3;
-`ReconnectOptions` + `TimeProvider` is the test seam) — the banner should say so.
+**Action taken (done — this PR):** the stale plan doc is **committed** at
+`docs/plans/gv-websocket-keepalive-reconnect.md` with a `SHIPPED — PR #36 (ef9f2ba), resolved 2026-06-13`
+banner rather than deleted, so `docs/plans/` keeps the historical record and no future session re-queues
+it. The banner also records that its §7 OPEN QUESTIONS 1-3 were all resolved in the shipped code (CDP
+auto-refresh *is* wired as ladder rung 3; `ReconnectOptions` + `TimeProvider` is the test seam), and
+notes that the original `Status: Ready for Builder` line below the banner is stale text retained for
+fidelity. Owner decision 2026-08-01 (§8 q4) — retain, do not delete.
 
 ---
 
@@ -245,17 +255,27 @@ Three workstreams, matching the three asks. Ordered so each is independently rev
 
 ### 4.1 Ask 1 — make the interval real, and align it to the ~11-minute PSIDTS lifetime
 
-**Diagnose first (Task 0).** Identify the external ~20m05s scheduler before adding an internal one.
-Bounded, read-only, no tailing (see §6). If an external refresh loop exists, **retiring it is an owner
-action on the box, outside this repo** — the plan documents it and the handoff reply flags it, but the PR
-does not reach across the boundary to change it.
+**The external scheduler is identified and stays running.** F3 is confirmed: a box-side cron runs
+`/opt/rotary-phone/refresh-gv-cookies.sh` every 20 minutes. Owner decision 2026-08-01 (§8 q2): **leave it
+in place through B2's UAT.** Retiring it is a separate box-side change with its own rollback story and is
+explicitly **not** part of this work.
+
+> ⚠️ **Do not remove the cron during UAT.** It is deliberately left running. "Helpfully" retiring it
+> mid-UAT would remove the only refresh path that works today and confound every measurement.
+
+**This makes idempotence a hard requirement, not a nicety.** Both refreshers will be live simultaneously,
+so the in-process refresh must be safe to interleave with the cron's `refresh-from-browser` POST at any
+offset: it shares the single-flight guard (below), it must not double-apply a cookie set, and a refresh
+arriving while another is in flight must be a no-op rather than a second rotation. Double refresh is an
+**accepted** cost for the UAT window (see §7).
 
 **Then:** wire `CookieRefreshIntervalMinutes` to a real proactive timer in `GVApiAdapter`, alongside the
 existing health-check timer, that performs a **rung-1-only** refresh (browser-less `RotateCookies` via
 `TryRotateCookiesAsync`). Rungs 2 and 3 stay reserved for reactive recovery — CDP in particular is heavy,
 needs the box's Chrome, and must not run on a routine cadence.
 
-**Interval choice: default 8 minutes** (raised from the currently-inert `5`).
+**Interval: 8 minutes — DECIDED** (owner, 2026-08-01, §8 q1; the spec's proposal accepted as-is, raised
+from the currently-inert `5`). This is settled, not a range to re-open at implementation time.
 
 - Must be comfortably below the observed ~11-minute lifetime; 8 min gives ~3 minutes of margin.
 - 5 min would work but costs 60% more `RotateCookies` calls/day for no added safety, and this codebase has
@@ -276,8 +296,12 @@ needs the box's Chrome, and must not run on a routine cadence.
   does not invalidate a live SIP registration, and re-registering on an 8-minute cadence would re-create
   the 2026-06-19 REGISTER-storm risk.
 
-**Also in this workstream: make `ActivateAsync` re-entrant (F6/F7).** This is a deliberate scope expansion
-beyond the handoff, justified on three grounds:
+**Also in this workstream: make `ActivateAsync` re-entrant (F6/F7). IN SCOPE — DECIDED.** The owner
+confirmed on 2026-08-01 (§8 q5) that this **stays in the B2 implementation PR**, choosing that over this
+spec's own offer to split it into a separate PR landing first. The B2 PR therefore carries **both** the
+`ActivateAsync` re-entrancy leak fix **and** the auth-ladder rework. Acceptance criterion **#6** (one live
+timer and one live `GvSipTransport` after a double refresh) is consequently a **hard merge gate**, not a
+nice-to-have. It is a deliberate scope expansion beyond the handoff, justified on three grounds:
 
 1. **It is the mechanism behind ask 1's symptom.** F7 shows the only timed entry into the recovery ladder
    is starved by the external refresher. "Why doesn't the 5-minute config produce a 5-minute cadence" has
@@ -313,7 +337,8 @@ lock-guarded shared `Task<bool>? _recoveryTask`, so that:
   refresh.
 
 **(b) Expose it on the existing seam.** Add one method to `IGvAuthenticatedClientProvider`
-(`Clients/IGvAuthenticatedClientProvider.cs`), which `GVApiAdapter` already implements and which every GV
+(`Adapters/IGvAuthenticatedClientProvider.cs` — note it lives beside the adapter, **not** in `Clients/`),
+which `GVApiAdapter` already implements and which every GV
 client already holds (DI: `Extensions/GVBridgeServiceExtensions.cs:25-28` registers `GVApiAdapter` as a
 singleton and maps the interface to that same instance):
 
@@ -374,11 +399,14 @@ are preserved — the DTO is extended append-only with defaults, exactly as the 
 did (`Api/GvBridgeDtos.cs:32-39`), so `GetStatus_ReturnsAllFourFields` and
 `GetStatus_IncludesWsConnectedAndLastConnectedAt` keep passing.
 
-**Deliberate deviation from Radio Console's ask, to be stated in the handoff reply.** They asked for
-`available:false` **and** `degraded:true` during a blackout. We will ship **`degraded:true` (plus
-`cookiesValid:false` and the new `authBlackout:true`) but will *not* flip `available:false`.**
+**Deliberate deviation from Radio Console's ask — CONFIRMED by the owner 2026-08-01 (§8 q3).** They asked
+for `available:false` **and** `degraded:true` during a blackout. We ship **`degraded:true` (plus
+`cookiesValid:false` and the new `authBlackout:true`) and deliberately do *not* flip `available:false`**;
+`IsAvailable` stays `true`. The handoff reply **must** ask Radio Console to bind their reconnecting banner
+to `degraded` / `authBlackout`.
 
-Reason: `IsAvailable` is load-bearing *inside* this service — `GetAuthenticatedClient()` returns `null`
+The technical reason is **verified**, not asserted: `IsAvailable` is load-bearing *inside* this service —
+the `IsAvailable` gate in `GetAuthenticatedClient()` returns `null`
 when it is false (`GVApiAdapter.cs:148`), so flipping it during a transient data-plane 401 would make the
 adapter refuse its own recovery retry and convert a 9-minute blackout into a hard stop. `available` means
 "this adapter is the active call path and is wired up"; `degraded` means "it is not currently usable".
@@ -397,8 +425,11 @@ context on the dashboard.
 - **B1 (`%2F` thread-id decoding).** In flight in parallel on `fix/gv-threadid-decode`. Out of scope here.
 - **Radio Console's GV-8** (client-side error state). Theirs makes the failure honest; ours makes it rare.
   Neither subsumes the other. No changes proposed to their side.
-- **Retiring the external ~20-minute scheduler.** Diagnosed here, but it lives in box-side units/scripts
-  outside this repo. Owner action; flagged in the handoff reply.
+- **Retiring the external ~20-minute scheduler.** Identified (F3: cron → `/opt/rotary-phone/refresh-gv-cookies.sh`,
+  every 20 min), but it lives in box-side scripts outside this repo. **Owner decision 2026-08-01 (§8 q2):
+  it stays running through B2's UAT.** Retiring it is a separate box-side change with its own rollback
+  story — **do not remove it as part of this work**, and do not remove it during UAT. Flagged in the
+  handoff reply.
 - **Fixing `GvThreadPoller`'s 401-doesn't-engage-backoff gap** (F4). Real but separable; once §4.2 lands the
   poller's 401s are self-healing, which removes the urgency. Recorded as a follow-up, not built here.
 - **Making `RotateCookies`' request shape verified.** Still best-effort/UNVERIFIED per
@@ -411,8 +442,12 @@ context on the dashboard.
 ## 6. Constraints carried into the plan
 
 - **Box health.** `radio` is an Intel N100 with a documented correlation between journald/SSH churn and
-  audio distortion. Every diagnostic must be a **bounded** `journalctl --since … -n …` read. **Never tail.**
-  No `-f`, no unbounded greps, no long-lived SSH sessions.
+  audio distortion. The rule is: **no follow/streaming output, and every read explicitly bounded.**
+  Concretely — never `-f` / `--follow` / `tail -f`; always constrain `journalctl` with `--since` **and**
+  `-n`; bound file reads (`head -c` / `head -n`) and greps (`--include`, `-m`) *at the command*, not by
+  piping into `head` after the fact; and no long-lived SSH sessions. A bounded, terminating `tail -n N`
+  is not itself the hazard — unbounded and streaming reads are — but prefer `journalctl -r … | head -n N`
+  so "most recent N" needs no tail at all.
 - **B1 confounder.** Until `fix/gv-threadid-decode` lands, any UAT of B2 must use **non-group** threads
   only (e.g. `t.32665`, `t.+18019208129`). Group threads (`g.Group Message.*`) return 200-with-empty for a
   *different* reason and would be scored as false failures.
@@ -430,7 +465,7 @@ context on the dashboard.
 
 | Risk | Mitigation |
 |---|---|
-| **Double refresh** — in-process timer plus a still-running external scheduler doubles `RotateCookies` volume | Task 0 diagnoses before Task 4 installs the timer; `CookieRefreshIntervalMinutes: 0` is a kill switch; handoff reply flags the owner action |
+| **Double refresh** — in-process timer plus the still-running cron doubles `RotateCookies` volume | **ACCEPTED** (owner, 2026-08-01, §8 q2): the cron stays through UAT. Mitigated by making the in-process refresh **idempotent** and single-flighted (§4.1) so the two interleave safely; `CookieRefreshIntervalMinutes: 0` remains a kill switch; UAT step 6 watches call volume. Retiring the cron is a separate box-side change |
 | **Refresh storm on a real Google outage** | Shared-task single-flight + failure-only cooldown (default 60 s) + `IsThrottled` gate |
 | **Retry amplification** — each blackout request now costs 2 upstream calls | Exactly one retry, read paths only, and only on 401/403. Note the handoff's §Notes amplification (mark-read costs 2-3 calls/click) is bounded by `EnableMarkRead`, which is `false` in this repo's `appsettings.json:*` |
 | **`ObjectDisposedException` on retry** — rungs 1/2 dispose `_httpClient` | Retry re-resolves via `GetAuthenticatedClient()`; never reuses the captured instance |
@@ -442,20 +477,80 @@ context on the dashboard.
 
 ---
 
-## 8. Open questions for the owner
+## 8. Owner decisions (all RESOLVED 2026-08-01)
 
-1. **Interval value.** Spec proposes **8 minutes** (§4.1). Accept, or prefer 5 (matches the currently-inert
-   config value and the handoff's framing) or 10 (minimum call volume, thinner margin)?
-2. **External scheduler.** Once Task 0 identifies it, do you want it retired on the box as part of this
-   work's UAT, or left running (accepting double refresh) until a separate box-side change?
-3. **`available:false`.** §4.3 declines Radio Console's literal ask for a stated technical reason and offers
-   `degraded`/`authBlackout` instead. Confirm before the handoff reply goes back to them.
-4. **Stale plan doc.** §3 recommends committing `gv-websocket-keepalive-reconnect.md` with a
-   `SHIPPED — PR #36` banner rather than deleting it. Confirm.
-5. **Scope expansion for F6/F7.** §4.1 pulls the `ActivateAsync` re-entrancy leak into this PR, with
-   reasoning. It is the one item here that was *not* in Radio Console's ask. Accept it in scope, or split
-   it into its own PR that lands **first** (the proactive timer in Task 4 depends on it)? Splitting is
-   defensible — it is an independent correctness bug with its own UAT — but it must not land *after*.
+This section was "Open questions for the owner". **All five are decided.** The original question text is
+kept so the rationale stays legible; each now carries its answer. Nothing here is still open, and nothing
+below should be re-litigated at implementation time.
+
+### 8.1 Interval value — ✅ RESOLVED: **8 minutes**
+
+*Question:* Spec proposes **8 minutes** (§4.1). Accept, or prefer 5 (matches the currently-inert config
+value and the handoff's framing) or 10 (minimum call volume, thinner margin)?
+
+**Decided 2026-08-01: 8 minutes. The spec's proposal is accepted as-is.** `CookieRefreshIntervalMinutes`
+defaults to `8`; ~3 minutes of margin under the observed ~11-minute PSIDTS lifetime, without the 60%
+extra `RotateCookies` volume that 5 would cost. Settled — implement `8`, do not re-open the range.
+
+### 8.2 External scheduler — ✅ RESOLVED: **leave it running**
+
+*Question:* Once Task 0 identifies it, do you want it retired on the box as part of this work's UAT, or
+left running (accepting double refresh) until a separate box-side change?
+
+**Decided 2026-08-01: leave it running.** The box-side cron — `/opt/rotary-phone/refresh-gv-cookies.sh`,
+every 20 minutes, located 2026-08-01 — **stays in place through B2's UAT**. Consequences, all binding:
+
+- **Double refresh is accepted** for the UAT window. It is a known, priced cost, not an oversight (§7).
+- **The in-process refresh MUST be idempotent** (§4.1). Both refreshers run concurrently at arbitrary
+  relative offsets, so interleaving must be safe: shared single-flight, no double-application of a cookie
+  set, and a refresh arriving mid-refresh is a no-op rather than a second rotation.
+- ⚠️ **Retiring the cron is a separate box-side change with its own rollback story.** It is explicitly
+  **not** in this work. **Nobody should "helpfully" remove it during UAT** — it is currently the only
+  refresh path that works on the box, and removing it mid-UAT would confound every measurement and could
+  black out GV entirely if the new in-process path turns out to be inert (rung 1's request shape is still
+  UNVERIFIED — §7). Stated here explicitly because it is exactly the kind of tidy-up a well-meaning
+  session would otherwise make.
+
+### 8.3 `available:false` — ✅ RESOLVED: **deviation confirmed; keep `IsAvailable` true**
+
+*Question:* §4.3 declines Radio Console's literal ask for a stated technical reason and offers
+`degraded`/`authBlackout` instead. Confirm before the handoff reply goes back to them.
+
+**Decided 2026-08-01: the deviation is confirmed.** Ship `degraded:true` + `cookiesValid:false` +
+`authBlackout:true`, and **keep `IsAvailable` true**. The technical reason has been **verified**: the
+`IsAvailable` gate in `GetAuthenticatedClient()` (`GVApiAdapter.cs:148`) returns `null` when it is false,
+so flipping it would make the adapter **refuse its own recovery retry** — turning a ~9-minute blackout
+into a hard stop.
+
+**Binding on the handoff reply:** it must ask Radio Console to bind their reconnecting banner to
+`degraded` / `authBlackout` rather than `available`. That is a one-line change on their side and leaves
+both services' semantics correct. Flag it prominently — it needs their agreement.
+
+### 8.4 Stale plan doc — ✅ RESOLVED: **commit it with a SHIPPED banner; do not delete**
+
+*Question:* §3 recommends committing `gv-websocket-keepalive-reconnect.md` with a `SHIPPED — PR #36`
+banner rather than deleting it. Confirm.
+
+**Decided 2026-08-01: confirmed — commit, don't delete.** Done in **PR #71** (this planning PR), not
+deferred to the implementation PR: `docs/plans/gv-websocket-keepalive-reconnect.md` is committed with a
+`SHIPPED — PR #36 (ef9f2ba), resolved 2026-06-13` banner marking it a historical artifact, recording that
+its §7 OPEN QUESTIONS 1-3 were resolved in the shipped code, and warning that no future session should
+re-queue it. See §3.
+
+### 8.5 F6/F7 scope — ✅ RESOLVED: **STAYS IN SCOPE of the B2 implementation PR**
+
+*Question:* §4.1 pulls the `ActivateAsync` re-entrancy leak into this PR, with reasoning. It is the one
+item here that was *not* in Radio Console's ask. Accept it in scope, or split it into its own PR that
+lands **first** (the proactive timer in Task 4 depends on it)? Splitting is defensible — it is an
+independent correctness bug with its own UAT — but it must not land *after*.
+
+**Decided 2026-08-01: it stays in scope.** The owner chose this **over this spec's own suggestion to split
+it out**. The B2 implementation PR therefore carries **both** the `ActivateAsync` re-entrancy leak fix
+(F6/F7) **and** the auth-ladder rework — one PR, both concerns.
+
+Consequence: **acceptance criterion #6 is a hard gate, not a nice-to-have.** After a double
+`refresh-from-browser`, exactly **one** live health-check timer and **one** live `GvSipTransport` must
+remain. If that cannot be demonstrated, the PR does not merge.
 
 ---
 
@@ -468,8 +563,10 @@ context on the dashboard.
    `api2thread/list` is 401ing — verified by measurement, not by inspection.
 4. A live UAT pass at an **arbitrary** wall-clock time (no 20-minute window awareness) shows 0 502s across
    a 30-minute soak on non-group threads.
-5. `journalctl -u rotary-phone --since '-60min' | grep -c 'api2thread/list returned Unauthorized'` drops
-   from ~40/hour (62 per 90 min observed) to a small number, ideally 0.
-6. Re-running `POST /api/gvbridge/cookies/refresh-from-browser` twice still adopts the new cookies, and
-   leaves exactly **one** live health-check timer and **one** live `GvSipTransport` (F6/F7).
+5. `journalctl -u rotary-phone --since '-60min' -n 5000 --no-pager | grep -c 'api2thread/list returned Unauthorized'`
+   drops from ~40/hour (62 per 90 min observed) to a small number, ideally 0.
+6. **(HARD GATE — §8.5.)** Re-running `POST /api/gvbridge/cookies/refresh-from-browser` twice still adopts
+   the new cookies, and leaves exactly **one** live health-check timer and **one** live `GvSipTransport`
+   (F6/F7). The owner kept the re-entrancy fix in scope specifically so this is provable in the same PR;
+   if it cannot be demonstrated, the PR does not merge.
 7. Existing status-contract tests still pass unchanged.

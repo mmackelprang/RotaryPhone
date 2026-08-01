@@ -1,6 +1,9 @@
 # Plan: B2 — GV auth blackout (refresh cadence + reactive 401 recovery + honest status)
 
-**Status:** Draft — blocked on owner sign-off of the spec's §8 open questions
+**Status:** ✅ **Build-ready — the spec's §8 questions were all decided by the owner 2026-08-01.** No sign-off
+outstanding. Binding decisions: interval **8 min**; the box-side refresh cron **stays running** through UAT
+(so the in-process refresh must be idempotent); `available` stays **true** during a blackout
+(`degraded`/`authBlackout` carry the fact); and the **F6/F7 re-entrancy fix stays in this PR** — see spec §8.
 **Spec:** `docs/plans/gv-auth-blackout-b2-design.md` (read it first — this plan assumes its findings F1-F7)
 **Branch:** `fix/gv-auth-blackout` → PR → `main`
 **Base:** `origin/main` @ `627b928` — all line numbers below are anchored there.
@@ -22,35 +25,64 @@ configured at `src/RotaryPhoneController.GVBridge/RotaryPhoneController.GVBridge
 **No code.** Read-only, bounded, run once by the Builder/Tester before Task 4 is enabled.
 
 > **Box-health rule (non-negotiable).** `radio` is an Intel N100 with a documented correlation between
-> journald/SSH churn and audio distortion. Every command below is **bounded**. **Never `tail`, never
-> `-f`, never `--follow`.** Run them in one short SSH session and disconnect.
+> journald/SSH churn and audio distortion. Two rules, and they are separate:
+>
+> 1. **No follow/streaming output.** Never `-f`, never `--follow`, never `tail -f`. Nothing that stays
+>    attached to a growing file or journal.
+> 2. **Every read is explicitly bounded — at the command, not by the pipe.** `journalctl` gets `--since`
+>    *and* `-n`. File reads get `head -c` / `head -n`. Greps get `--include` and `-m` so they stop early
+>    instead of walking a whole tree and being truncated downstream. A `| head` only truncates the
+>    *output*; the expensive part has already run.
+>
+> A bounded, terminating `tail -n N` is not itself the hazard — but it is avoidable here, so the commands
+> below use `journalctl -r … | head -n N` ("most recent N", newest first) and no `tail` appears at all.
+>
+> Run them in one short SSH session and disconnect.
+
+> **Narrowed 2026-08-01 — the scheduler is already identified.** F3 is confirmed: a **box-side cron entry
+> running `/opt/rotary-phone/refresh-gv-cookies.sh` every 20 minutes**. Step 1 below is now a
+> *re-confirmation* that it is still present at build time, not an open hunt; the systemd-timer and
+> `chrome.alarms` candidates are ruled out and their probes are retained only as cheap negative checks.
+> **The cron stays running through UAT** (owner decision, spec §8.2) — this diagnostic must not remove it.
+> The genuinely open question is step 4: does rung 1 (`TryRotateCookiesAsync`) rotate live, or no-op?
 
 ```bash
-# 1. Who is calling refresh-from-browser? Check all three plausible schedulers.
-systemctl list-timers --all --no-pager | head -40
-systemctl --user list-timers --all --no-pager | head -40
-crontab -l 2>/dev/null; sudo crontab -l 2>/dev/null; ls -la /etc/cron.d/ 2>/dev/null
+# 1. Re-confirm the known cron (expect: */20 → /opt/rotary-phone/refresh-gv-cookies.sh).
+crontab -l 2>/dev/null | head -n 40
+sudo crontab -l 2>/dev/null | head -n 40
+grep -rn --include='*' -m 5 'refresh-gv-cookies\|refresh-from-browser' /etc/cron.d /etc/crontab 2>/dev/null | head -n 20
+
+# 1b. Negative checks on the ruled-out candidates (cheap; expect no GV refresh timer).
+systemctl list-timers --all --no-pager | head -n 40
+systemctl --user list-timers --all --no-pager | head -n 40
 
 # 2. The boundary doc names these box-side units/scripts (not in this repo).
-systemctl --user status gv-bridge-watchdog gv-bridge-restart --no-pager 2>/dev/null | head -40
-ls -la ~/bin/gv-bridge-*.sh 2>/dev/null && cat ~/bin/gv-bridge-*.sh
+#    Bound the script read directly — these are small, but do not read them unbounded.
+systemctl --user status gv-bridge-watchdog gv-bridge-restart --no-pager 2>/dev/null | head -n 40
+ls -la ~/bin/gv-bridge-*.sh /opt/rotary-phone/refresh-gv-cookies.sh 2>/dev/null
+head -c 4000 /opt/rotary-phone/refresh-gv-cookies.sh 2>/dev/null
+for f in ~/bin/gv-bridge-*.sh; do [ -f "$f" ] && { echo "--- $f ---"; head -n 60 "$f"; }; done
 
-# 3. Third candidate: a chrome.alarms scheduler in the deployed extension (absent from this repo).
-grep -rn "alarms\|periodInMinutes\|refresh-from-browser" /opt/rotary-phone/ChromeExtension 2>/dev/null | head -20
+# 3. Ruled-out candidate, kept as a negative check. Bounded AT the grep (-m stops early,
+#    --include limits the walk) rather than relying on `| head` to truncate after the fact.
+grep -rn --include='*.js' --include='*.json' -m 5 \
+  -e 'alarms' -e 'periodInMinutes' -e 'refresh-from-browser' \
+  /opt/rotary-phone/ChromeExtension 2>/dev/null | head -n 20
 
-# 4. Bounded confirmation of the cadence and of RotateCookies' live success rate.
-journalctl -u rotary-phone --since '-90min' --no-pager \
-  | grep -E 'CDP cookie refresh|RotateCookies|adapter re-activated' | tail -40
-journalctl -u rotary-phone --since '-90min' --no-pager \
+# 4. THE OPEN QUESTION: cadence + RotateCookies' live success rate.
+#    `-r` = newest first, so `head` gives the most recent N with no tail.
+journalctl -u rotary-phone --since '-90min' -n 2000 --no-pager -r \
+  | grep -E 'CDP cookie refresh|RotateCookies|adapter re-activated' | head -n 40
+journalctl -u rotary-phone --since '-90min' -n 5000 --no-pager \
   | grep -c 'api2thread/list returned Unauthorized'
 ```
 
-**Record in the PR description:** which scheduler was found, its exact interval, whether
-`TryRotateCookiesAsync` (rung 1) succeeds live or silently no-ops (spec §7 — its request shape is
+**Record in the PR description:** confirmation that the cron is still in place and its exact interval,
+whether `TryRotateCookiesAsync` (rung 1) succeeds live or silently no-ops (spec §7 — its request shape is
 UNVERIFIED), and the pre-fix `Unauthorized` count for the acceptance-criteria before/after.
 
-**If no external scheduler is found**, stop and re-open F3 with the owner before Task 4 — the cadence would
-then have an unexplained in-process source and the design assumption is wrong.
+**If the cron is no longer present**, stop and check with the owner before Task 4 — spec §8.2 assumes it is
+running through UAT, and the double-refresh risk assessment changes if it is gone.
 
 ---
 
@@ -186,7 +218,8 @@ next health tick — which would silently defeat Task 2's retry. On a successful
 
 ### 2a. Widen the seam
 
-**File:** `src/RotaryPhoneController.GVBridge/Clients/IGvAuthenticatedClientProvider.cs`
+**File:** `src/RotaryPhoneController.GVBridge/Adapters/IGvAuthenticatedClientProvider.cs`
+(the interface sits with the adapter, **not** under `Clients/` — an earlier draft of this plan mis-cited it)
 
 ```csharp
     /// <summary>
@@ -570,10 +603,11 @@ Pass them through in `GVBridgeController.GetStatus` (`Api/GVBridgeController.cs:
 
 ## Task 6 — Docs, handoff reply, and the stale plan doc
 
-1. **`docs/plans/gv-websocket-keepalive-reconnect.md`** — commit it with a banner at the top (spec §3):
-   `**Status: SHIPPED — PR #36 (merge ef9f2ba), 2026-06-13. Retained for the historical record; do NOT
-   re-queue.**` Note that its §7 OPEN QUESTIONS 1-3 were all resolved in the shipped code (CDP auto-refresh
-   *is* wired as ladder rung 3; `ReconnectOptions` + `TimeProvider` is the test seam).
+1. ~~**`docs/plans/gv-websocket-keepalive-reconnect.md`** — commit it with a `SHIPPED — PR #36` banner.~~
+   ✅ **DONE — already landed in PR #71** (the planning PR), not this one. The file is committed with a
+   `SHIPPED — PR #36 (ef9f2ba), resolved 2026-06-13` banner recording that its §7 OPEN QUESTIONS 1-3 were
+   all resolved in the shipped code (CDP auto-refresh *is* wired as ladder rung 3; `ReconnectOptions` +
+   `TimeProvider` is the test seam). **Nothing to do here** — do not re-add or re-banner it.
 2. **`docs/KNOWN-ISSUES.md`** — add the B2 entry (symptom, F1-F7 root cause, fix, how to verify).
 3. **`docs/plans/gv-voicemail-sms-arc.md`** — add a phase-log row for this PR; mark **open decision #6**
    (PR1 HIGH-2 auth-recovery window) resolved by Task 1; strike the matching "Deferred to Planner" bullet.
@@ -616,14 +650,19 @@ is a contract break and needs review sign-off.
 ### Live UAT on `radio` (192.168.86.50:5004)
 
 **Preconditions.**
-- Task 0 complete; the external scheduler identified and its disposition decided (spec §8 q2).
+- Task 0 complete. The external scheduler is already identified (cron → `/opt/rotary-phone/refresh-gv-cookies.sh`,
+  every 20 min) and its disposition is decided: **it stays running through this UAT** (spec §8.2).
+  ⚠️ **Do not disable or remove the cron for the soak.** Double refresh is accepted and expected here; the
+  in-process refresh is required to be idempotent precisely so this configuration is safe.
 - Non-group threads only until `fix/gv-threadid-decode` merges (`t.32665`, `t.+18019208129`).
-- **Bounded journalctl only. Never tail.** One short SSH session per step.
+- **Bounded, non-streaming journalctl only** — `--since` *and* `-n`, no `-f`/`--follow`. One short SSH
+  session per step.
 
 **Baseline (before deploy)** — establishes the before/after number:
 
 ```bash
-journalctl -u rotary-phone --since '-60min' --no-pager | grep -c 'api2thread/list returned Unauthorized'
+journalctl -u rotary-phone --since '-60min' -n 5000 --no-pager \
+  | grep -c 'api2thread/list returned Unauthorized'
 curl -s localhost:5004/api/gvbridge/status
 ```
 
@@ -641,13 +680,18 @@ curl -s localhost:5004/api/gvbridge/status
 **After (acceptance criterion 5):**
 
 ```bash
-journalctl -u rotary-phone --since '-60min' --no-pager | grep -c 'api2thread/list returned Unauthorized'
+journalctl -u rotary-phone --since '-60min' -n 5000 --no-pager \
+  | grep -c 'api2thread/list returned Unauthorized'
 ```
 
 Expect a drop from ~40/hour toward 0.
 
 **Cross-service check.** Radio Console's probes stay valid and bounded:
-`journalctl -u radio-web --since '-60min' --no-pager | grep -c 'Failed to get GV SMS thread'`.
+
+```bash
+journalctl -u radio-web --since '-60min' -n 5000 --no-pager \
+  | grep -c 'Failed to get GV SMS thread'
+```
 
 ---
 
@@ -655,8 +699,11 @@ Expect a drop from ~40/hour toward 0.
 
 See spec §7 for the full table. The three that most need reviewer attention:
 
-1. **Double refresh** if the external scheduler is left running alongside the new in-process timer.
-   Gated by Task 0; `CookieRefreshIntervalMinutes: 0` is the kill switch.
+1. **Double refresh** — the box-side cron **is** left running alongside the new in-process timer, by owner
+   decision (spec §8.2). This is **accepted, not mitigated away**: the obligation it creates is that the
+   in-process refresh must be **idempotent** and share the single-flight guard, so the two interleave
+   safely at any relative offset. `CookieRefreshIntervalMinutes: 0` remains the kill switch, and UAT
+   step 6 is where the combined call volume gets checked. Reviewers should read Task 4 with this in mind.
 2. **Task 3 dropping a live call** — mitigated by the `_activeCallId` guard and UAT step 8.
 3. **`RotateCookies` request shape is UNVERIFIED** (`docs/research/gv-protocol-notes.md` §3.2). If Task 0
    shows rung 1 silently no-ops live, the proactive timer in Task 4 is inert and the reactive path in
