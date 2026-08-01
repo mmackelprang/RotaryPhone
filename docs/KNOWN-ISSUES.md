@@ -1,5 +1,108 @@
 # Known Issues
 
+## GV SMS/voicemail 502s in a repeating ~9-minute dead window (RESOLVED 2026-08-01)
+
+**Status:** ✅ Resolved by the B2 auth-blackout PR (`fix/gv-auth-blackout`). **Live on-box soak pending
+at merge time** — see "Verify" below.
+**Symptom (was):** Radio Console saw HTTP 502 from `/api/gvbridge/sms/*` in a clean repeating pattern —
+roughly **9 dead minutes inside every ~20-minute cycle**. Upstream, `journalctl -u rotary-phone` showed
+`api2thread/list returned Unauthorized for folder Sms` **271 times on 2026-07-31**, and zero
+`TooManyRequests`. 11 of 11 of Radio Console's 502s fell inside a dead window.
+**Impact (was):** Every SMS and voicemail read path, roughly 45% of the time. Invisible to
+`/api/gvbridge/status`, which reported `cookiesValid:true`, `degraded:false` straight through the
+outage — so the dashboard said healthy while the feature was dead.
+**Not throttling.** Falsified early: a constant-rate poller showed the same on/off pattern, upstream
+status was always 401 and never 429, and recovery landed on fixed wall-clock boundaries rather than
+after a variable cooldown. This was an **auth-freshness** defect. Google's rotating
+`__Secure-1PSIDTS` / `__Secure-3PSIDTS` cookies are good for about **11 minutes**.
+
+**Root cause — seven findings, and the last two are the interesting ones:**
+
+- **F1.** `CookieRefreshIntervalMinutes` was a **dead config knob** — declared, set in `appsettings.json`,
+  and read by *nothing*. There was no proactive cookie/PSIDTS refresh timer in the service at all.
+- **F2.** The only periodic auth mechanism was a **30-minute probe**, not a refresh — and it probed
+  `threadinginfo/get`, a *different endpoint* from the `api2thread/list` that was failing.
+- **F3.** The ~20-minute cadence came from **outside this process**: a box-side cron running
+  `/opt/rotary-phone/refresh-gv-cookies.sh` every 20 minutes, POSTing
+  `/api/gvbridge/cookies/refresh-from-browser`. A wall clock, which is why recovery was second-exact on
+  20-minute boundaries.
+- **F4.** The reactive-401 escalation **already existed but only on the SIP leg**.
+  `GvThreadClient.ListRawAsync` collapsed *every* non-2xx to `null` with no status discrimination, so
+  the SMS/voicemail data plane reached none of it. This is precisely why SIP recovered while SMS
+  blacked out.
+- **F5.** `_areCookiesValid` was a **cached probe result** — up to 30 minutes stale, of the wrong
+  endpoint. `psidtsAgeSeconds: 781` (13m01s, already past the ~11-minute lifetime) was in the same
+  payload: the endpoint was carrying the evidence of its own staleness and not using it.
+- **F6.** `GVApiAdapter.ActivateAsync` was **not re-entrant**. `CallAdapterRegistry.SwitchModeAsync`
+  skips `DeactivateAsync` when the mode is unchanged, so the cron's refresh re-entered `ActivateAsync`
+  on the *live* adapter every ~20 minutes, each pass leaking an armed 30-minute `Timer`, an
+  `HttpClient`, and a whole `GvSipTransport` (WebSocket + keep-alive timer + Opus codecs) with its
+  event handlers still subscribed — **~72 leaked objects/day**.
+- **F7.** …and therefore **the 30-minute watchdog was starved and effectively never fired.** Each
+  refresh installed a *fresh* 30-minute timer; refreshes arrived every ~20 minutes; the newest timer
+  never reached its due time. Since that watchdog was the **only timed entry into the recovery ladder
+  in the entire service**, the deployed reality was that *the only thing that ever restored auth was
+  the external cron*. There was no in-process recovery cadence — not a slow one, none.
+
+**Fix:**
+- **Proactive refresh is real.** `CookieRefreshIntervalMinutes` now governs an actual timer, defaulting
+  to **8 minutes** (comfortably under the ~11-minute PSIDTS lifetime, without the 60% extra call volume
+  that 5 would cost). Rung-1 only (browser-less `RotateCookies`) — CDP is heavy and stays reserved for
+  reactive recovery. Setting it to **`0` disables the timer** — a kill switch with no redeploy. The
+  proactive path deliberately does **not** re-register SIP (that would re-create the 2026-06-19
+  REGISTER-storm risk).
+- **Reactive refresh-and-retry on the read path.** On `401`/`403` only, `ListRawAsync` runs the shared
+  recovery ladder, **re-resolves** the authenticated client (rungs 1 and 2 dispose and re-create it) and
+  replays **exactly once**. `429`/`5xx`/network faults deliberately do not retry. Write paths
+  (`sendsms`, `updateread`) *signal* recovery but **never replay** — ADR §4.2 #4 forbids auto-retry on
+  irreversible GV writes.
+- **One ladder, two doors.** `RecoverFromAuthFailureAsync` now reports its outcome and is guarded by a
+  shared `Task<bool>` instead of an int flag, so concurrent callers **await the same run** rather than
+  being turned away. SIP keeps its fire-and-forget entry point; the data plane gets an awaitable one.
+  A **failure-only** 60-second cooldown (`AuthRecoveryFailureCooldownSeconds`) stops a real Google
+  outage from driving `RotateCookies` at the poll rate.
+- **`ActivateAsync` is re-entrant.** A re-activation now tears down the previous generation via the
+  existing `DeactivateAsync` before rebuilding — except while a call is active, where it adopts the new
+  cookies and leaves the transport alone rather than dropping the call.
+- **Honest status.** New `authBlackout`, `lastApiSuccessAt`, `lastApiAuthFailureAt` fields, written by
+  the **real** data-plane calls rather than by a probe. `AreCookiesValid` became
+  `probe && !authBlackout`, so `cookiesValid` — and `degraded`, which derives from it — go false the
+  moment a real call is rejected. Field names are append-only; the four contract names are untouched.
+- **`available` deliberately stays `true` during a blackout.** Radio Console asked for `available:false`;
+  we declined for a concrete reason. `GetAuthenticatedClient()` gates on `IsAvailable` and returns
+  `null` when false, so flipping it during a transient 401 would make the adapter **refuse its own
+  recovery retry** — turning a 9-minute blackout into a hard stop. Bind status UIs to `degraded` or
+  `authBlackout` instead.
+
+**Verify:**
+- `journalctl -u rotary-phone --since '-60min' -n 5000 --no-pager | grep -c 'api2thread/list returned Unauthorized'`
+  should drop from ~40/hour toward 0. **Bounded reads only — never `-f`, never `tail -f`** (the box is
+  an N100 shared with Radio Console and journald churn correlates with audible audio distortion there).
+- Poll `GET /api/gvbridge/sms/threads` every 60 s for 30 minutes starting at an **arbitrary** wall-clock
+  time — deliberately *not* aligned to a `CDP cookie refresh` line. Expect **zero 502s**. The retirement
+  of the old "test inside a healthy window" discipline *is* the acceptance criterion.
+- `proactive PSIDTS refresh succeeded` should appear at ~8-minute intervals.
+- `POST /api/gvbridge/cookies/refresh-from-browser` twice should log
+  `re-activating — tearing down the previous generation first` and leave **one** health-check timer and
+  **one** `GvSipTransport` (the F6/F7 gate).
+- If a 502 does occur, `curl -s localhost:5004/api/gvbridge/status` should show `degraded:true`,
+  `cookiesValid:false`, `authBlackout:true` — and `available:true`, **by design**.
+
+**Caveats:**
+- The box-side cron is **deliberately still running**; double refresh is an accepted cost until it is
+  retired as a separate change with its own rollback story. The in-process refresh is single-flighted
+  and idempotent so the two interleave safely. **Do not remove that cron casually** — if the new path
+  turns out inert, it is the only thing keeping GV authenticated.
+- `RotateCookies`' request shape is still **UNVERIFIED** (`docs/research/gv-protocol-notes.md` §3.2). If
+  rung 1 silently no-ops live, the proactive timer is inert and the reactive 401 path carries the whole
+  fix — still a correct outcome, but the cadence claim would not hold.
+
+**See:** [`docs/plans/gv-auth-blackout-b2-design.md`](plans/gv-auth-blackout-b2-design.md) (findings
+F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plans/gv-auth-blackout-b2-plan.md)
+(task breakdown + test plan), [`docs/handoffs/radioconsole-gv-auth-blackout-reply.md`](handoffs/radioconsole-gv-auth-blackout-reply.md)
+(cross-repo reply, including the `available` vs `degraded` ask).
+
+
 ## UI says "Ringing" but the bell never rings — INVITE sent to a stale HT801 address (RESOLVED 2026-07-29)
 
 **Status:** ✅ Resolved by the config-binder fix (PR #67, `fix/ht801-invite-target`) and hardened by the
