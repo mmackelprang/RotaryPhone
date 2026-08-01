@@ -49,8 +49,15 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private ICookieRotator? _cookieRotator;
     private HttpClient? _rotatorHttpClient;
 
-    // Single-flight guard so concurrent AuthenticationFailed events don't stampede the refresh.
-    private int _refreshingCookies;
+    // Single-flight recovery. A second caller arriving mid-recovery AWAITS the in-flight run rather
+    // than being turned away — during a blackout the poller and several RadioConsole requests hit 401
+    // within milliseconds and must all ride one refresh. Guarded by _recoveryLock.
+    private readonly object _recoveryLock = new();
+    private Task<bool>? _recoveryTask;
+
+    // Failure-only cooldown: after a ladder run that FAILED, suppress new runs for this long so a real
+    // Google outage can't drive RotateCookies at the poll rate (the 2026-06-19 storm shape).
+    private DateTime _recoveryCooldownUntilUtc = DateTime.MinValue;
 
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
@@ -269,7 +276,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _loggerFactory.CreateLogger<GvAccountClient>());
 
         // 4. Health check to verify cookies work
-        var healthy = await _accountClient.IsHealthyAsync(ct);
+        var healthy = await ProbeHealthAsync(ct);
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
         if (!healthy)
@@ -407,7 +414,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _loggerFactory.CreateLogger<GvAccountClient>());
 
         // Verify the new cookies work
-        var healthy = await _accountClient.IsHealthyAsync(ct);
+        var healthy = await ProbeHealthAsync(ct);
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
 
@@ -526,19 +533,43 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         => TriggerCookieRecovery(e.Reason);
 
     /// <summary>
-    /// Single-flight entry into the cookie-recovery ladder. Both the transport's AuthenticationFailed
-    /// event and the periodic watchdog funnel through here so only one recovery runs at a time.
+    /// Fire-and-forget entry into the recovery ladder (SIP transport + watchdog). Thin wrapper over
+    /// <see cref="TryRecoverAuthAsync"/> so there is ONE ladder implementation, not two.
     /// </summary>
-    private void TriggerCookieRecovery(string reason)
-    {
-        if (Interlocked.CompareExchange(ref _refreshingCookies, 1, 0) != 0)
-            return;
+    private void TriggerCookieRecovery(string reason) => _ = TryRecoverAuthAsync(reason);
 
-        _ = RecoverFromAuthFailureAsync(reason);
+    /// <summary>
+    /// Awaitable single-flight entry into the cookie-recovery ladder. Returns true when cookies were
+    /// refreshed and re-validated. Concurrent callers share ONE run. Read paths await this and then
+    /// retry once; the SIP path calls it fire-and-forget via <see cref="TriggerCookieRecovery"/>.
+    /// </summary>
+    public Task<bool> TryRecoverAuthAsync(string reason, CancellationToken ct = default)
+    {
+        lock (_recoveryLock)
+        {
+            if (_recoveryTask is { IsCompleted: false })
+                return _recoveryTask;                       // ride the in-flight recovery
+
+            if (DateTime.UtcNow < _recoveryCooldownUntilUtc)
+                return Task.FromResult(false);              // failure cooldown active
+
+            _recoveryTask = RecoverFromAuthFailureAsync(reason);
+            return _recoveryTask;
+        }
     }
 
-    private async Task RecoverFromAuthFailureAsync(string reason)
+    /// <summary>
+    /// True while a recovery ladder run is in flight. The proactive refresh (spec §4.1) and the
+    /// watchdog both consult this so neither races the reactive ladder.
+    /// </summary>
+    private bool IsRecoveryInFlight
     {
+        get { lock (_recoveryLock) { return _recoveryTask is { IsCompleted: false }; } }
+    }
+
+    private async Task<bool> RecoverFromAuthFailureAsync(string reason)
+    {
+        var succeeded = false;
         try
         {
             _logger.LogWarning("GVApi: auth/registration recovery ({Reason})", reason);
@@ -549,16 +580,20 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (_config.EnableCookieRotation && _cookieSet != null && await TryRotateCookiesAsync())
             {
                 _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             // Rung 2: re-read cookies from disk (an out-of-band refresh may have updated them).
             if (await ReloadCookiesAsync())
             {
                 _logger.LogInformation("GVApi: reloaded cookies from disk");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             // Rung 3: pull fresh cookies from the box's logged-in Chrome via CDP and adopt them
@@ -567,22 +602,43 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (await TryCdpRefreshAsync())
             {
                 _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
+                succeeded = true;
+                MarkAvailableAfterRecovery();
                 await ReRegisterUnlessThrottledAsync();
-                return;
+                return true;
             }
 
             _logger.LogWarning(
                 "GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead — " +
                 "re-login at voice.google.com so the next CDP refresh can pick up a fresh session.");
+            return false;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "GVApi: error during auth/registration recovery");
+            return false;
         }
         finally
         {
-            Interlocked.Exchange(ref _refreshingCookies, 0);
+            // The shared _recoveryTask IS the single-flight guard now, so the only thing left for
+            // finally is arming the failure-only cooldown. A SUCCESSFUL run arms nothing.
+            if (!succeeded)
+            {
+                _recoveryCooldownUntilUtc =
+                    DateTime.UtcNow.AddSeconds(_config.AuthRecoveryFailureCooldownSeconds);
+            }
         }
+    }
+
+    /// <summary>
+    /// A successful rung means we have a live authenticated client again. Without this the
+    /// IsAvailable gate on <see cref="GetAuthenticatedClient"/> keeps the seam returning null until
+    /// the next 30-min health tick — the PR1 review HIGH-2 window (arc tracker, open decision #6) —
+    /// which would silently defeat the read-path retry this work adds.
+    /// </summary>
+    private void MarkAvailableAfterRecovery()
+    {
+        if (!IsAvailable) SetAvailable(true);
     }
 
     /// <summary>
@@ -697,11 +753,22 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
             _loggerFactory.CreateLogger<GvAccountClient>());
 
-        var healthy = await _accountClient.IsHealthyAsync();
+        var healthy = await ProbeHealthAsync();
         _areCookiesValid = healthy;
         LastValidatedAt = DateTime.UtcNow;
         return healthy;
     }
+
+    /// <summary>
+    /// Test seam: the GV health probe (threadinginfo/get). Defaults to the live GvAccountClient.
+    /// Injected by tests so the recovery ladder can be exercised without talking to Google.
+    /// </summary>
+    internal Func<CancellationToken, Task<bool>>? HealthProbeOverride { get; set; }
+
+    private Task<bool> ProbeHealthAsync(CancellationToken ct = default)
+        => HealthProbeOverride is { } probe
+            ? probe(ct)
+            : (_accountClient?.IsHealthyAsync(ct) ?? Task.FromResult(false));
 
     private ICookieRotator BuildDefaultCookieRotator()
     {
@@ -721,7 +788,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         {
             if (_accountClient == null) return;
 
-            var healthy = await _accountClient.IsHealthyAsync();
+            var healthy = await ProbeHealthAsync();
             _areCookiesValid = healthy;
             LastValidatedAt = DateTime.UtcNow;
 
@@ -756,7 +823,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                     "GVApi: watchdog — deferring re-register: throttle cooldown active until {Until:o} ({Reason})",
                     _sipTransport.ThrottledUntil, _sipTransport.ThrottleReason);
             }
-            else if (Volatile.Read(ref _refreshingCookies) == 0)
+            else if (!IsRecoveryInFlight)
             {
                 // Cookies fine but SIP is not registered (e.g., a stuck/declined registration like the
                 // 2026-06-19 incident). Skip if a recovery is already in flight (it will re-register);

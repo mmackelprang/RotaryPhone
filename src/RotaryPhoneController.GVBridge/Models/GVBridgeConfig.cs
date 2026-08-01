@@ -22,6 +22,10 @@ public class GVBridgeConfig
     public int CookieHealthCheckIntervalMinutes { get; set; } = 30;
     public int CookieRefreshIntervalMinutes { get; set; } = 5;
 
+    // After a FAILED cookie-recovery run, suppress further runs for this long. Protects RotateCookies
+    // from being driven at the poll rate during a real Google outage. 0 disables the cooldown.
+    public int AuthRecoveryFailureCooldownSeconds { get; set; } = 60;
+
     // Chrome DevTools Protocol (CDP) for automated cookie extraction
     public int ChromeCdpPort { get; set; } = 9224;
 
