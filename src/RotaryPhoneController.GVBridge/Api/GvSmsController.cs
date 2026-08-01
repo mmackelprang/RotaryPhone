@@ -66,8 +66,13 @@ public class GvSmsController : ControllerBase
 
     [HttpGet("threads/{threadId}")]
     public async Task<IActionResult> GetThreadMessages(
-        string threadId, [FromQuery] int count = 50, CancellationToken ct = default)
+        [FromRoute(Name = "threadId")] string rawThreadId,
+        [FromQuery] int count = 50, CancellationToken ct = default)
     {
+        // The route value is the ENCODED id (see DecodeThreadId). Bound under a distinct name so no
+        // line below can accidentally use it — everything downstream takes the decoded `threadId`.
+        var threadId = DecodeThreadId(rawThreadId);
+
         var result = await _smsClient.ListMessagesAsync(threadId, count, ct);
         if (!result.Succeeded)
             return StatusCode(502, new { error = "Failed to fetch SMS messages from Google" });
@@ -80,6 +85,7 @@ public class GvSmsController : ControllerBase
             SentAt: m.SentEpochMs is { } ms
                 ? DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime : DateTime.UnixEpoch,
             IsRead: m.IsRead ?? false)).ToList();
+        WarnIfNoMessages(threadId, messages.Count, "thread fetch");
         return Ok(new SmsThreadMessagesDto(threadId, messages, DateTime.UtcNow));
     }
 
@@ -163,8 +169,15 @@ public class GvSmsController : ControllerBase
 
     [HttpPost("threads/{threadId}/read")]
     public async Task<IActionResult> MarkThreadRead(
-        string threadId, [FromBody] MarkReadRequest request, CancellationToken ct = default)
+        [FromRoute(Name = "threadId")] string rawThreadId,
+        [FromBody] MarkReadRequest request, CancellationToken ct = default)
     {
+        // Same encoded-route-value hazard as GetThreadMessages, and the same fix — decode ONCE here so
+        // the thread lookup, the message enumeration, the updateread write and the broadcast payload
+        // all key on the real id. Undecoded, mark-read on a group thread 404s (the lookup misses) or
+        // silently marks nothing; see DecodeThreadId.
+        var threadId = DecodeThreadId(rawThreadId);
+
         // 0. FEATURE FLAG (ADR §8) — checked FIRST → 409 markread_disabled, NO GV call.
         if (!_config.EnableMarkRead)
         {
@@ -197,6 +210,10 @@ public class GvSmsController : ControllerBase
             return StatusCode(502, new { error = "Failed to fetch SMS messages for mark-read" });
         var messageIds = messagesResult.Messages
             .Where(m => m.MessageId is not null).Select(m => m.MessageId!).ToList();
+        // The thread was found in the list at step 2, so 0 messages here is the strongest form of the
+        // §B1.3 signal: the write below falls back to UpdateReadPayloadBuilder's single thread-level
+        // payload (UNVERIFIED wire form) and we would answer 200 having marked nothing per-message.
+        WarnIfNoMessages(threadId, messageIds.Count, "mark-read");
 
         // 5. Write through to GV (honest — 200 means accepted; partial = failure). No auto-retry (§8).
         var write = _testReadStateClient is not null
@@ -214,6 +231,44 @@ public class GvSmsController : ControllerBase
             IsRead: request.IsRead, ChangedAtUtc: DateTime.UtcNow));
 
         return Ok(dto);
+    }
+
+    /// <summary>
+    /// Decode a thread id that arrived as a ROUTE VALUE.
+    ///
+    /// Kestrel deliberately leaves <c>%2F</c> (and <c>%5C</c>) percent-encoded in path segments so a
+    /// client cannot forge a segment boundary; every OTHER escape — <c>%20</c>, <c>%2B</c>, … — is
+    /// already decoded by the time the action runs. GV group thread ids are
+    /// <c>g.Group Message.&lt;base64&gt;</c> and that alphabet contains <c>/</c>, so a group id reaches
+    /// us as the literal <c>g.Group Message.d5Mri%2FNrDUQgXNXNQehOfw</c>. GvSmsClient then filters the
+    /// folder list with an exact <c>m.ThreadId == threadId</c> compare, matches nothing, and we answer
+    /// 200 with an empty list — every group/MMS conversation permanently unreadable, and mark-read on
+    /// one a silent no-op (RadioConsole handoff §B1, reproduced live 2026-07-31).
+    ///
+    /// IDEMPOTENT for the ids that already work. <c>t.32665</c> and <c>t.+18019208129</c> contain no
+    /// escape sequence and pass through untouched — note <see cref="Uri.UnescapeDataString"/> is NOT
+    /// form decoding, so a literal <c>+</c> stays a <c>+</c> and is never turned into a space, while
+    /// the <c>%2B</c> spelling of the same id decodes to the identical <c>t.+18019208129</c>. The
+    /// <c>'%'</c> fast path keeps the common id free and makes that pass-through explicit.
+    /// </summary>
+    private static string DecodeThreadId(string threadId) =>
+        threadId.Contains('%') ? Uri.UnescapeDataString(threadId) : threadId;
+
+    /// <summary>
+    /// Sanity guard (handoff §B1.3). A thread that fetches and parses successfully but yields ZERO
+    /// messages is suspicious, and it is the one state our honest-status guards cannot see: both
+    /// <c>Succeeded</c> and <c>ShapeIsSane</c> pass because only the per-thread FILTER matched nothing.
+    /// That is the signature of the %2F bug above, of any future id-escaping mismatch, and of a thread
+    /// whose messages fall outside the fetched folder window. ONE Warning line, no exception and no
+    /// stack trace — journald churn on this box correlates with audio distortion, and this fires per
+    /// user action rather than per poll.
+    /// </summary>
+    private void WarnIfNoMessages(string threadId, int messageCount, string operation)
+    {
+        if (messageCount != 0) return;
+        _logger.LogWarning(
+            "SMS thread {ThreadId} resolved to 0 messages on {Operation} — id-escaping mismatch, or the "
+            + "thread's messages fall outside the fetched folder window", threadId, operation);
     }
 
     // Map a parsed thread node to the public SmsThreadDto (same projection GetThreads uses inline).
