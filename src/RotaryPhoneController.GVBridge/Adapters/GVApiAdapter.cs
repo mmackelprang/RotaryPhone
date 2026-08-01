@@ -228,6 +228,29 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     {
         _logger.LogInformation("GVApiAdapter activating...");
 
+        // RE-ENTRANCY (F6/F7). CallAdapterRegistry.SwitchModeAsync skips DeactivateAsync when the mode
+        // is unchanged, so the external cookie refresher re-enters here on the LIVE adapter every
+        // ~20 min. Without this teardown each pass leaks an armed 30-min Timer, an HttpClient, and a
+        // whole GvSipTransport (WebSocket + keep-alive timer + Opus codecs) with its event handlers
+        // still subscribed — ~72/day on the box. Worse, each pass re-arms a fresh 30-min health timer
+        // that never reaches its due time, which is why the watchdog — the ONLY timed entry into the
+        // recovery ladder — never fires in production.
+        if (_sipTransport != null || _healthCheckTimer != null)
+        {
+            if (_activeCallId != null)
+            {
+                // A call is up. Adopt the new cookies but do NOT tear down the transport — that
+                // would drop the live call.
+                _logger.LogInformation(
+                    "GVApi: re-activating during an active call — refreshing cookies only, keeping SIP transport");
+                await RefreshAuthenticatedClientsAsync(ct);
+                return;
+            }
+
+            _logger.LogInformation("GVApi: re-activating — tearing down the previous generation first");
+            await DeactivateAsync(ct);
+        }
+
         // 1. Load encryption key: prefer key file (written by CookieRetriever), fallback to config
         string encryptionKeyBase64;
         var keyFilePath = _config.CookieKeyFilePath;
@@ -353,9 +376,16 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _sipTransport = null;
         }
 
-        // Dispose rotator HttpClient (if we built one)
-        _rotatorHttpClient?.Dispose();
-        _rotatorHttpClient = null;
+        // Dispose the rotator HttpClient if WE built one — and drop the rotator with it, since it
+        // holds that client and would otherwise hand a disposed instance to the next rung-1 attempt
+        // after a re-activation. A rotator INJECTED via the test constructor has no
+        // _rotatorHttpClient and is deliberately preserved.
+        if (_rotatorHttpClient != null)
+        {
+            _rotatorHttpClient.Dispose();
+            _rotatorHttpClient = null;
+            _cookieRotator = null;
+        }
 
         // Dispose HttpClient
         _httpClient?.Dispose();
@@ -373,6 +403,18 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         SetAvailable(false);
         _logger.LogInformation("GVApiAdapter deactivated");
     }
+
+    /// <summary>
+    /// Mid-call re-activation path (F6/F7): adopt the refresher's new cookies WITHOUT touching the
+    /// SIP transport, so a live call is not dropped. Delegates to <see cref="ReloadCookiesAsync"/>,
+    /// which already performs exactly the needed sequence against the live <c>_cookieStore</c> —
+    /// load from store → swap <c>_cookieSet</c> → dispose+rebuild <c>_httpClient</c> → rebuild
+    /// <c>_accountClient</c> → health probe → mark available. Reused rather than duplicating
+    /// ActivateAsync's construction block, which in any case cannot run here: the re-entrancy guard
+    /// sits ABOVE encryption-key resolution.
+    /// </summary>
+    private Task<bool> RefreshAuthenticatedClientsAsync(CancellationToken ct = default)
+        => ReloadCookiesAsync(ct);
 
     /// <summary>
     /// Reload cookies from the store without a full deactivate/activate cycle.
@@ -855,6 +897,15 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _disposed = true;
         _healthCheckTimer?.Dispose();
         _httpClient?.Dispose();
+        // Same leak class as F6: these were never released here. The transport's DisposeAsync is
+        // fire-and-forget because Dispose() must not block on async work.
+        _rotatorHttpClient?.Dispose();
+        if (_sipTransport is { } transport)
+        {
+            transport.IncomingCallReceived -= HandleSipIncomingCall;
+            transport.AuthenticationFailed -= HandleAuthenticationFailed;
+            _ = transport.DisposeAsync().AsTask();
+        }
         GC.SuppressFinalize(this);
     }
 
