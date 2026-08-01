@@ -228,19 +228,7 @@ public class GVApiAdapterTests
                NullLoggerFactory.Instance, cookieRotator: null);
 
     private static (GvSipTransport Transport, FakeSipWebSocketChannel Channel) NewFakeTransport()
-    {
-        var channel = new FakeSipWebSocketChannel();
-        var transport = new GvSipTransport(
-            NullLogger<GvSipTransport>.Instance,
-            () => Task.FromResult(new SipCredentials(
-                SipUsername: "sip-token", BearerToken: "crypto-key",
-                PhoneNumber: "+15551234567", ExpirySeconds: 3600)),
-            loggerFactory: null,
-            channelFactory: (_, _) => channel,
-            options: null,
-            timeProvider: null);
-        return (transport, channel);
-    }
+        => GVApiAdapterRecoveryTests.NewFakeTransport();
 
     private static async Task<GvCookieStore> NewStoreWithCookies(string sapisid)
     {

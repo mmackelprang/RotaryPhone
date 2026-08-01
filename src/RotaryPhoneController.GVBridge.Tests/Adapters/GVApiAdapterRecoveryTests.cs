@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Reflection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -5,7 +6,8 @@ using Microsoft.Extensions.Options;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Auth;
 using RotaryPhoneController.GVBridge.Models;
-using RotaryPhoneController.GVBridge.Tests.Support;
+using RotaryPhoneController.GVBridge.Sip;
+using RotaryPhoneController.GVBridge.Tests.Sip;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
@@ -139,7 +141,139 @@ public class GVApiAdapterRecoveryTests
         gate.SetResult(CookieRotationResult.NotRotated);
     }
 
+    // ------------------------------------------------- Task 4: real proactive PSIDTS refresh
+
+    [Fact]
+    public void Config_CookieRefreshIntervalMinutes_IsRead()
+    {
+        // Regression guard for F1: this knob was declared and read by NOTHING. Binding it must now
+        // produce a real timer — and the spec's decided default is 8 minutes.
+        Assert.Equal(8, new GVBridgeConfig().CookieRefreshIntervalMinutes);
+
+        var adapter = CreateAdapter(config: NewConfig(refreshIntervalMinutes: 8));
+        Invoke(adapter, "StartPeriodicTimers");
+
+        Assert.NotNull(GetField<Timer>(adapter, "_cookieRefreshTimer"));
+        Assert.NotNull(GetField<Timer>(adapter, "_healthCheckTimer"));
+    }
+
+    [Fact]
+    public void ProactiveRefresh_IntervalZero_InstallsNoTimer()
+    {
+        // Kill switch: restores today's behaviour without a redeploy.
+        var adapter = CreateAdapter(config: NewConfig(refreshIntervalMinutes: 0));
+        Invoke(adapter, "StartPeriodicTimers");
+
+        Assert.Null(GetField<Timer>(adapter, "_cookieRefreshTimer"));
+        Assert.NotNull(GetField<Timer>(adapter, "_healthCheckTimer"));   // watchdog is unaffected
+    }
+
+    [Fact]
+    public async Task ProactiveRefresh_SkipsWhenThrottled()
+    {
+        // A 603/403 account cooldown means STOP TALKING TO GOOGLE.
+        var rotator = new FakeCookieRotator(_ => Task.FromResult(new CookieRotationResult(true, "p1", "p3")));
+        var adapter = CreateAdapter(rotator);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        SetField(adapter, "_cookieSet", NewCookies());
+        SetAvailable(adapter, true);
+        var (transport, _) = NewFakeTransport();
+        Throttle(transport);
+        SetField(adapter, "_sipTransport", transport);
+
+        await RunProactiveRefresh(adapter);
+
+        Assert.Equal(0, rotator.Calls);
+    }
+
+    [Fact]
+    public async Task ProactiveRefresh_SkipsWhenRecoveryInFlight()
+    {
+        // The proactive tick shares the reactive single-flight guard, so it can never race a recovery.
+        var gate = new TaskCompletionSource<CookieRotationResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var rotator = new FakeCookieRotator(_ => gate.Task);
+        var adapter = CreateAdapter(rotator);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        SetField(adapter, "_cookieSet", NewCookies());
+        SetAvailable(adapter, true);
+
+        var recovery = adapter.TryRecoverAuthAsync("reactive");
+        Assert.Equal(1, rotator.Calls);
+        Assert.True(IsRecoveryInFlight(adapter));
+
+        await RunProactiveRefresh(adapter);
+
+        Assert.Equal(1, rotator.Calls);   // the tick stood down
+
+        gate.SetResult(CookieRotationResult.NotRotated);
+        await recovery;
+    }
+
+    [Fact]
+    public async Task ProactiveRefresh_SkipsWhenRotationDisabled()
+    {
+        var rotator = new FakeCookieRotator(_ => Task.FromResult(new CookieRotationResult(true, "p1", "p3")));
+        var adapter = CreateAdapter(rotator, NewConfig(enableCookieRotation: false));
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        SetField(adapter, "_cookieSet", NewCookies());
+        SetAvailable(adapter, true);
+
+        await RunProactiveRefresh(adapter);
+
+        Assert.Equal(0, rotator.Calls);
+    }
+
+    [Fact]
+    public async Task ProactiveRefresh_DoesNotReRegister()
+    {
+        // A successful PSIDTS rotation does NOT invalidate a live SIP registration. Re-registering
+        // every 8 minutes would re-create the 2026-06-19 REGISTER-storm risk (spec §4.1).
+        var rotator = new FakeCookieRotator(_ => Task.FromResult(new CookieRotationResult(true, "p1", "p3")));
+        var adapter = CreateAdapter(rotator);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        SetField(adapter, "_cookieSet", NewCookies());
+        SetAvailable(adapter, true);
+        var (transport, channel) = NewFakeTransport();
+        SetField(adapter, "_sipTransport", transport);
+
+        await RunProactiveRefresh(adapter);
+
+        Assert.Equal(1, rotator.Calls);        // it DID rotate
+        Assert.Equal(0, channel.ConnectCount); // and did NOT re-register
+        Assert.Empty(channel.Sends);
+    }
+
     // ---------------------------------------------------------------- shared test scaffolding
+
+    internal static Task RunProactiveRefresh(GVApiAdapter adapter)
+        => (Task)Invoke(adapter, "RunProactiveCookieRefreshAsync")!;
+
+    internal static (GvSipTransport Transport, FakeSipWebSocketChannel Channel) NewFakeTransport()
+    {
+        var channel = new FakeSipWebSocketChannel();
+        var transport = new GvSipTransport(
+            NullLogger<GvSipTransport>.Instance,
+            () => Task.FromResult(new SipCredentials(
+                SipUsername: "sip-token", BearerToken: "crypto-key",
+                PhoneNumber: "+15551234567", ExpirySeconds: 3600)),
+            loggerFactory: null,
+            channelFactory: (_, _) => channel,
+            options: null,
+            timeProvider: null);
+        return (transport, channel);
+    }
+
+    /// <summary>Puts the transport into a 603/403 cooldown without driving a real REGISTER exchange.</summary>
+    internal static void Throttle(GvSipTransport transport)
+    {
+        SetField(transport, "_throttledUntilTimestamp",
+            Stopwatch.GetTimestamp() + Stopwatch.Frequency * 3600);
+        SetField(transport, "_throttledUntilUtc", DateTime.UtcNow.AddHours(1));
+        SetField(transport, "_throttleReason", "test cooldown");
+        Assert.True(transport.IsThrottled);
+    }
+
 
     internal static GVBridgeConfig NewConfig(int cooldownSeconds = 60, int refreshIntervalMinutes = 8,
         bool enableCookieRotation = true) => new()

@@ -34,6 +34,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private GvAccountClient? _accountClient;
     private GvSipTransport? _sipTransport;
     private Timer? _healthCheckTimer;
+    private Timer? _cookieRefreshTimer;
 
     private string? _activeCallId;
     private bool _disposed;
@@ -348,9 +349,8 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _logger.LogWarning(ex, "GVApi: SIP registration failed — will retry on first call");
         }
 
-        // 7. Start periodic health check timer
-        var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
-        _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
+        // 7. Start the periodic timers (health watchdog + proactive PSIDTS refresh)
+        StartPeriodicTimers();
 
         SetAvailable(true);
         _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
@@ -365,6 +365,14 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         {
             await _healthCheckTimer.DisposeAsync();
             _healthCheckTimer = null;
+        }
+
+        // Stop the proactive PSIDTS refresh timer (Task 3 makes this path actually run on the
+        // re-activation the external refresher triggers, so this is what stops it accumulating).
+        if (_cookieRefreshTimer != null)
+        {
+            await _cookieRefreshTimer.DisposeAsync();
+            _cookieRefreshTimer = null;
         }
 
         // Disconnect and dispose SIP transport (releases WebSocket + Opus codecs)
@@ -819,9 +827,69 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         return new GvCookieRotator(_rotatorHttpClient, _loggerFactory.CreateLogger<GvCookieRotator>());
     }
 
+    /// <summary>
+    /// Install the periodic timers: the health watchdog and the proactive PSIDTS refresh. Extracted
+    /// from <see cref="ActivateAsync"/> so the cadence wiring — including the
+    /// <c>CookieRefreshIntervalMinutes: 0</c> kill switch — is unit-testable without a live
+    /// activation (which needs a real cookie file and a network round-trip).
+    /// </summary>
+    private void StartPeriodicTimers()
+    {
+        var intervalMs = _config.CookieHealthCheckIntervalMinutes * 60 * 1000;
+        _healthCheckTimer = new Timer(OnHealthCheckTimer, null, intervalMs, intervalMs);
+
+        // Proactive PSIDTS refresh (spec §4.1). Rung 1 ONLY — browser-less RotateCookies. CDP
+        // (rung 3) is heavy and needs the box's Chrome; it stays reserved for reactive recovery.
+        if (_config.CookieRefreshIntervalMinutes > 0)
+        {
+            var refreshMs = _config.CookieRefreshIntervalMinutes * 60 * 1000;
+            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, refreshMs, refreshMs);
+        }
+    }
+
     private void OnHealthCheckTimer(object? state)
     {
         _ = RunHealthCheckAsync();
+    }
+
+    private void OnCookieRefreshTimer(object? state) => _ = RunProactiveCookieRefreshAsync();
+
+    /// <summary>
+    /// Proactive PSIDTS rotation on the CookieRefreshIntervalMinutes cadence. Deliberately narrower
+    /// than the reactive ladder: rung 1 only, and NO re-register (a successful rotation does not
+    /// invalidate a live SIP registration, and re-registering every 8 min would re-create the
+    /// 2026-06-19 REGISTER-storm risk — spec §4.1).
+    /// </summary>
+    private async Task RunProactiveCookieRefreshAsync()
+    {
+        try
+        {
+            if (!IsAvailable || _cookieSet == null || !_config.EnableCookieRotation) return;
+
+            // Never talk to Google during a 603/403 account cooldown.
+            if (_sipTransport?.IsThrottled == true)
+            {
+                _logger.LogDebug("GVApi: proactive PSIDTS refresh skipped — throttle cooldown active");
+                return;
+            }
+
+            // Share the reactive single-flight guard so a tick can never race a recovery.
+            if (IsRecoveryInFlight)
+            {
+                _logger.LogDebug("GVApi: proactive PSIDTS refresh skipped — recovery already in flight");
+                return;
+            }
+
+            if (await TryRotateCookiesAsync())
+                _logger.LogInformation("GVApi: proactive PSIDTS refresh succeeded");
+            else
+                _logger.LogWarning(
+                    "GVApi: proactive PSIDTS refresh did not rotate — reactive 401 recovery remains the backstop");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GVApi: proactive PSIDTS refresh error");
+        }
     }
 
     private async Task RunHealthCheckAsync()
@@ -896,6 +964,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         if (_disposed) return;
         _disposed = true;
         _healthCheckTimer?.Dispose();
+        _cookieRefreshTimer?.Dispose();
         _httpClient?.Dispose();
         // Same leak class as F6: these were never released here. The transport's DisposeAsync is
         // fire-and-forget because Dispose() must not block on async work.
