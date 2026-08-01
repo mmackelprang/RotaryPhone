@@ -387,7 +387,155 @@ public class GVApiAdapterTests
             $"two activations took {sw.Elapsed} — did this reach the network?");
     }
 
+    // --- conditional SIP-transport reuse (design §4.1) ---
+    //
+    // The box-side cron POSTs refresh-from-browser every 20 minutes, so a HEALTHY, registered SIP
+    // transport used to be closed and rebuilt on every cycle — a brief unregistered window each
+    // time. The re-entrancy decision now happens AFTER the incoming cookie set is loaded and has
+    // three outcomes: A (healthy + unchanged credentials) reuses everything; B (healthy + changed
+    // credentials) adopts the credentials and keeps the transport AND the timers; C (absent or
+    // unregistered transport) is the unchanged full teardown + rebuild, covered by
+    // ActivateAsync_TwoFullActivations_LeaveExactlyOneTransportAndOneOfEachTimer above.
+
+    [Fact]
+    public async Task ActivateAsync_HealthyTransportUnchangedCredentials_ReusesEverything()
+    {
+        // PATH A. Nothing changed and nothing is broken → rebuild NOTHING. In particular the timers
+        // must not be re-armed: a fresh 30-minute health timer installed on every 20-minute cron
+        // fire never reaches its due time, which is F7 — the starvation bug this PR exists to fix.
+        var (config, store) = await NewCookieFileConfig("SAPISID-SAME");
+        var logger = new CapturingLogger<GVApiAdapter>();
+        using var adapter = CreateAdapter(config, logger);
+
+        var (transport, channel) = GVApiAdapterRecoveryTests.NewRegisteredTransport();
+        var connectsBefore = channel.ConnectCount;
+        var health = new Timer(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
+        var refresh = new Timer(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
+        var httpClient = new HttpClient();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_sipTransport", transport);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_healthCheckTimer", health);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieRefreshTimer", refresh);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_httpClient", httpClient);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        // The SAME credentials the store holds — ToCookieHeader() renders identically.
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-SAME"));
+
+        var probes = 0;
+        adapter.HealthProbeOverride = _ => { Interlocked.Increment(ref probes); return Task.FromResult(true); };
+
+        await adapter.ActivateAsync();
+
+        // The transport instance itself survived, still registered, never disposed.
+        Assert.Same(transport, GVApiAdapterRecoveryTests.GetField<GvSipTransport>(adapter, "_sipTransport"));
+        Assert.False(GVApiAdapterRecoveryTests.GetField<bool>(transport, "_disposed"));
+        Assert.True(transport.IsRegistered);
+
+        // No reconnect and no re-register — not one byte went to Google.
+        Assert.Equal(connectsBefore, channel.ConnectCount);
+        Assert.Empty(channel.Sends);
+        Assert.Equal(0, probes);
+
+        // Nothing else was rebuilt either: same HttpClient, same timer INSTANCES (F7).
+        Assert.Same(httpClient, GVApiAdapterRecoveryTests.GetField<HttpClient>(adapter, "_httpClient"));
+        Assert.Same(health, GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_healthCheckTimer"));
+        Assert.Same(refresh, GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_cookieRefreshTimer"));
+
+        Assert.True(adapter.IsAvailable);
+        Assert.Contains(logger.Entries, e => e.Message.Contains("re-activation is a no-op"));
+        Assert.DoesNotContain(logger.Entries,
+            e => e.Message.Contains("tearing down the previous generation first"));
+
+        // Checked last: probing liveness disarms them, which is fine at end of test.
+        Assert.False(TimerIsDead(health));
+        Assert.False(TimerIsDead(refresh));
+    }
+
+    [Fact]
+    public async Task ActivateAsync_HealthyTransportChangedCredentials_KeepsTransportAndAdoptsCookies()
+    {
+        // PATH B. PSIDTS rotates every ~11 min and the cron pulls from Chrome every 20, so the
+        // incoming header differs on very nearly every cycle — this is the COMMON case. The
+        // credentials must be adopted, but the transport resolves _httpClient lazily through
+        // SingleHttpClientFactory and caches nothing, so the swap reaches it with no rebuild: keep
+        // the transport, keep the timers, and do NOT re-register (spec §4.1's storm guard).
+        var (config, store) = await NewCookieFileConfig("SAPISID-NEW");
+        var logger = new CapturingLogger<GVApiAdapter>();
+        using var adapter = CreateAdapter(config, logger);
+
+        var (transport, channel) = GVApiAdapterRecoveryTests.NewRegisteredTransport();
+        var connectsBefore = channel.ConnectCount;
+        var health = new Timer(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
+        var refresh = new Timer(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
+        var httpClient = new HttpClient();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_sipTransport", transport);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_healthCheckTimer", health);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieRefreshTimer", refresh);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_httpClient", httpClient);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-OLD"));
+
+        var probes = 0;
+        adapter.HealthProbeOverride = _ => { Interlocked.Increment(ref probes); return Task.FromResult(true); };
+
+        await adapter.ActivateAsync();
+
+        // Same transport instance, still registered, never disposed...
+        Assert.Same(transport, GVApiAdapterRecoveryTests.GetField<GvSipTransport>(adapter, "_sipTransport"));
+        Assert.False(GVApiAdapterRecoveryTests.GetField<bool>(transport, "_disposed"));
+        Assert.True(transport.IsRegistered);
+
+        // ...and NOT re-registered: a PSIDTS rotation does not invalidate a live registration.
+        Assert.Equal(connectsBefore, channel.ConnectCount);
+        Assert.Empty(channel.Sends);
+
+        // The new credentials WERE adopted, on a rebuilt HttpClient, and re-validated once.
+        Assert.Equal("SAPISID-NEW", adapter.CurrentCookieSet!.Sapisid);
+        var swapped = GVApiAdapterRecoveryTests.GetField<HttpClient>(adapter, "_httpClient");
+        Assert.NotNull(swapped);
+        Assert.NotSame(httpClient, swapped);
+        Assert.Equal(1, probes);
+        Assert.True(adapter.IsAvailable);
+        Assert.NotNull(adapter.LoadedAt);
+
+        // The timers were NOT re-armed (F7) — same instances, still live.
+        Assert.Same(health, GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_healthCheckTimer"));
+        Assert.Same(refresh, GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_cookieRefreshTimer"));
+
+        Assert.Contains(logger.Entries, e => e.Message.Contains("adopting new credentials"));
+        Assert.DoesNotContain(logger.Entries,
+            e => e.Message.Contains("tearing down the previous generation first"));
+
+        Assert.False(TimerIsDead(health));
+        Assert.False(TimerIsDead(refresh));
+    }
+
     // --- helpers ---
+
+    /// <summary>
+    /// A real encrypted cookie file plus the config that reads it, so ActivateAsync gets all the way
+    /// through key resolution and the cookie load. <c>GvApiBaseUrl</c> points at an unroutable
+    /// loopback port so any path that unexpectedly rebuilds and re-registers fails instantly with
+    /// connection-refused rather than reaching the network.
+    /// </summary>
+    private static async Task<(GVBridgeConfig Config, GvCookieStore Store)> NewCookieFileConfig(string sapisid)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "gv-b2-tests",
+            Guid.NewGuid().ToString("n") + ".enc");
+        var key = Convert.ToBase64String(new byte[32]);
+        var store = new GvCookieStore(path, key);
+        await store.SaveAsync(GVApiAdapterRecoveryTests.NewCookies(sapisid));
+
+        return (new GVBridgeConfig
+        {
+            GvApiBaseUrl = "http://127.0.0.1:1/voice/v1/voiceclient",
+            GvApiKey = "test",
+            CookieFilePath = path,
+            CookieKeyFilePath = "",
+            CookieEncryptionKey = key,
+        }, store);
+    }
 
     /// <summary>
     /// A config with NO usable encryption key, so ActivateAsync runs the re-entrancy teardown at the
