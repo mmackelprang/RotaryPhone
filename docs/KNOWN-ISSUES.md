@@ -2,7 +2,7 @@
 
 ## GV SMS/voicemail 502s in a repeating ~9-minute dead window (RESOLVED 2026-08-01)
 
-**Status:** ✅ Resolved by the B2 auth-blackout PR (`fix/gv-auth-blackout`). **Live on-box soak pending
+**Status:** ✅ Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`). **Live on-box soak pending
 at merge time** — see "Verify" below.
 **Symptom (was):** Radio Console saw HTTP 502 from `/api/gvbridge/sms/*` in a clean repeating pattern —
 roughly **9 dead minutes inside every ~20-minute cycle**. Upstream, `journalctl -u rotary-phone` showed
