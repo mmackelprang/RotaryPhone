@@ -1062,17 +1062,12 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             catch (Exception ex) { _logger.LogWarning(ex, "GVApi: failed to persist rotated cookies"); }
         }
 
-        // Re-create the authenticated HttpClient with the refreshed cookie set.
-        _httpClient?.Dispose();
-        var handler = new GvHttpClientHandler(() => Task.FromResult(_cookieSet!));
-        _httpClient = new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(30),
-            BaseAddress = AuthenticatedClientBaseAddress
-        };
-        _accountClient = new GvAccountClient(
-            _httpClient, _config.GvApiBaseUrl, _config.GvApiKey,
-            _loggerFactory.CreateLogger<GvAccountClient>());
+        // Re-create the authenticated HttpClient with the refreshed cookie set. Uses the shared
+        // construct -> publish -> dispose-old helper: this is the PROACTIVE path, so it runs on the
+        // CookieRefreshIntervalMinutes cadence (every 8 min by default) — the most frequent client
+        // swap in the adapter, and therefore the one where disposing before publishing had the
+        // widest chance of pulling the client out from under a concurrent caller.
+        SwapAuthenticatedClients();
 
         var healthy = await ProbeHealthAsync();
         _areCookiesValid = healthy;
