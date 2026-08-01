@@ -1,5 +1,84 @@
 # Known Issues
 
+## 🔴 ACTIVE OUTAGE — the box's Chrome Google Voice session is signed out (2026-08-01 19:36 EDT)
+
+**Status:** 🔴 **OPEN — needs a human.** Nothing in the service can fix this; it needs an **owner re-login
+at `voice.google.com` in the box's Chrome**. Discovered while deploying the canonical post-merge B2 build.
+
+**Impact is wider than SMS/voicemail.** SIP registration resolves its credentials through the same
+authenticated GV client, so a dead GV session takes the **whole phone** down, not just the data plane:
+
+```
+available:false  sipRegistered:false  wsConnected:false  cookiesValid:false
+/api/gvbridge/sms/threads → 502
+```
+
+**How to confirm it (the obvious check lies).** The Chrome tab title read `Voice - (99+) Voicemail` and the
+URL read `https://voice.google.com/u/0/voicemail` — both **stale cached renders** from before the session
+died. The reliable test is to force a navigation and see where it lands:
+
+```
+https://voice.google.com/u/0/voicemail  →  redirects to  →  https://workspace.google.com/products/voice/
+```
+
+That redirect to the signed-out marketing page **is** the signed-out signal. A `RotateCookiesPage` tab was
+also parked in the browser. Service-side, the tell is all three recovery rungs failing at once, which the
+service already reports in plain language:
+
+```
+[WRN] RotateCookies returned 401 — falling back
+[WRN] ReloadCookiesAsync: new cookies failed health check
+[WRN] GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead —
+      re-login at voice.google.com so the next CDP refresh can pick up a fresh session.
+```
+
+### The mechanism that turned a healthy service into a full outage in 5 seconds
+
+**A `refresh-from-browser` against a signed-out Chrome overwrites a *working* cookie set with a dead one,
+and the working set is then unrecoverable.** Captured exactly, from the restart log:
+
+```
+19:36:49 [INF] Listed 149 recent SMS messages          <- WORKING, cookies loaded from disk
+19:36:49 [INF] Listed 50 voicemails from 50 raw threads
+19:36:51 [INF] Cookies saved to data/gv-cookies.enc    <- 20 dead cookies overwrite the good set
+19:36:51 [WRN] GV health check failed: Unauthorized
+19:36:51 [INF] CDP cookie refresh: 20 cookies extracted and activated
+```
+
+The only copies of the good set were the old process's memory (gone on restart) and
+`data/gv-cookies.enc` (overwritten two seconds later). Both pre-existing on-box backups
+(`/opt/rotary-phone.bak.prefix-uat-20260801-160513/data/gv-cookies.enc`, 16:00) were tried and are **also
+dead**, so the whole Chrome-derived lineage is invalid — this was a genuine account-session death, not a
+local corruption.
+
+### Why B2 makes this *more* consequential, not less — and what it means for the cron
+
+Pre-B2, the app's cookies and Chrome's jar were kept in lockstep by the 20-minute cron, so pulling from
+Chrome was near-harmless. **B2's in-process 8-minute refresh keeps the app's lineage alive independently**,
+so the two lineages now **diverge** — the app can hold fresh, working credentials while Chrome's jar rots.
+Once that is true, `refresh-from-browser` is no longer a harmless idempotent top-up: it is a **downgrade
+path**, and the box-side cron fires it **every 20 minutes**.
+
+> **This escalates finding M1 (retire the cron) from "redundant" to "standing hazard."** The cron's
+> original justification — keep GV authenticated until the in-process refresh is proven — is not merely
+> expired; the cron is now the mechanism most likely to *destroy* working credentials. Retiring it should
+> be prioritized accordingly. It remains a box-side change needing its own rollback story.
+
+**Proposed hardening (not implemented — needs its own change):**
+
+- **Validate before adopting.** Health-check a newly extracted cookie set **before** persisting it and
+  swapping it in. Today the order is adopt → persist → discover it fails.
+- **Keep a last-known-good set and roll back** when the new set fails its health check, instead of leaving
+  the adapter holding credentials already proven bad.
+- **Never let an unvalidated refresh overwrite a validated set** — that single rule would have contained
+  this outage to a logged warning.
+
+**Recovery procedure:** re-login at `voice.google.com` in the box's Chrome (profile on `radio`, CDP port
+9224), confirm the URL stays on `voice.google.com` rather than redirecting, then
+`curl -X POST localhost:5004/api/gvbridge/cookies/refresh-from-browser` and restart `rotary-phone`.
+Verify `sipRegistered:true` and `/api/gvbridge/sms/threads` → 200.
+
+
 ## ⚠️ OPEN — Deploying clobbers the box's `appsettings.Production.json`, including BT adapter config
 
 **Status:** 🔴 **OPEN** — recurs on **every** deploy that falls back to the tar path. Found during PR #72
@@ -204,6 +283,11 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   gracefully (warns, returns `NotRotated`, backstop intact, no 502s resulted), so this is not urgent.
   **This is a box-side change and needs its own rollback story** — retire the cron (or raise its interval),
   then re-measure the 429 rate. (Finding **M1**, PR #72 UAT.)
+  > 🔴 **ESCALATED the same day — see the ACTIVE OUTAGE entry at the top of this file.** The cron is not
+  > merely redundant now. Because B2's in-process refresh keeps the app's cookie lineage alive
+  > **independently of Chrome's jar**, the two diverge — and a `refresh-from-browser` against a stale or
+  > signed-out Chrome **overwrites working credentials with dead ones**. The cron fires exactly that path
+  > every 20 minutes. Treat retiring it as **hazard removal**, not a tidy-up.
 - **Path A (`re-activation is a no-op`) is dead code in production.** It fired **0** times in 6
   re-activations — every cron fire carries changed credentials, exactly as predicted. Correct and
   unit-tested, but never exercised on the box. Worth knowing before anyone relies on it. (Finding **L1**.)
