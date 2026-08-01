@@ -1,9 +1,56 @@
 # Known Issues
 
+## ⚠️ OPEN — Deploying clobbers the box's `appsettings.Production.json`, including BT adapter config
+
+**Status:** 🔴 **OPEN** — recurs on **every** deploy that falls back to the tar path. Found during PR #72
+UAT (finding **L3**); the tester caught it and restored the file by hand.
+**Why this is the most dangerous item on the list:** the clobbered values include
+**`BluetoothAdapter: hci1`** and `UseActualBluetoothHfp`. **This crosses the Radio Console audio boundary**
+(`docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`) — a silent BT-config change on this side can break the
+*other* service's audio, and nothing in the deploy surfaces that it happened. It will happen again on the
+next deploy unless the tooling is fixed.
+
+**Mechanism:**
+
+1. The publish output **contains** `appsettings.Production.json` — the SDK's default `Content` glob picks
+   up `appsettings*.json`, and nothing in `RotaryPhoneController.Server.csproj` excludes it. So the repo's
+   *template* ships in the artifact alongside the binaries.
+2. `deploy/Deploy-ToLinux.ps1` has two sync paths. The **rsync** path is safe — it passes
+   `--exclude 'appsettings.Production.json'` (`:89`). The **tar-pipe fallback** (`:126-129`) is not: it
+   relies on a backup/restore *around* the extract
+   (`cp -f … /tmp/rp-prod.bak` … `tar -xzf - --unlink-first …` … `mv -f /tmp/rp-prod.bak …`).
+3. Reproducing that tar-pipe **on Linux**, `--unlink-first` errors on directories, so `tar` exits **2**.
+   With `set -e -o pipefail` the chain aborts **before** the restore `mv` runs — leaving the box on the
+   repo's template config. The backup survives in `/tmp/rp-prod.bak`, but nothing puts it back.
+
+The box's copy is **authoritative** (see `docs/HT801-ADDRESS.md`) and carries values the repo template
+does not: `EnableMarkRead`, the GV number (`GvPhoneNumber: +1XXXXXXXXXX` — redacted; this repo is public),
+and the HT801 address, in addition to the BT keys above.
+
+**Proposed fix (not done in PR #72 — deploy tooling, needs its own change + rollback story):**
+
+- **Primary:** add `--exclude=./appsettings.Production.json` to the `tar -C … -czf -` invocation in
+  `deploy/Deploy-ToLinux.ps1`, matching what the rsync path already does. Then the file is never in the
+  stream and the fragile backup/restore dance stops being load-bearing.
+- **Belt and braces:** drop it from the publish output entirely — in
+  `src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj`, exclude
+  `appsettings.Production.json` from `Content` (or set `CopyToPublishDirectory=Never`), so no artifact
+  can carry a config that only the box should own.
+- **Either way:** make the restore unconditional (run it in a `trap`/`||` rather than after a `set -e`
+  command that can abort), and have the deploy **print** the post-deploy `BluetoothAdapter` value so a
+  clobber is loud instead of silent.
+
+**Until it is fixed — mandatory manual step on every deploy:** back up
+`/opt/rotary-phone/appsettings.Production.json` **before** the sync and verify it **after**, explicitly
+confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
+
+
 ## GV SMS/voicemail 502s in a repeating ~9-minute dead window (RESOLVED 2026-08-01)
 
-**Status:** ✅ Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`). **Live on-box soak pending
-at merge time** — see "Verify" below.
+**Status:** ✅ Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`), merged 2026-08-01.
+**Live on-box soak PASSED** — 932 HTTP requests over ~88 minutes, **zero 502s, zero non-200s**, against a
+pre-fix baseline of 15/49 (31%) 502s for the same shape. 6 of 7 acceptance criteria verified by
+measurement, 1 partial, 0 failed. See "Verified live" and "Open verification items" below.
 **Symptom (was):** Radio Console saw HTTP 502 from `/api/gvbridge/sms/*` in a clean repeating pattern —
 roughly **9 dead minutes inside every ~20-minute cycle**. Upstream, `journalctl -u rotary-phone` showed
 `api2thread/list returned Unauthorized for folder Sms` **271 times on 2026-07-31**, and zero
@@ -61,9 +108,23 @@ after a variable cooldown. This was an **auth-freshness** defect. Google's rotat
   being turned away. SIP keeps its fire-and-forget entry point; the data plane gets an awaitable one.
   A **failure-only** 60-second cooldown (`AuthRecoveryFailureCooldownSeconds`) stops a real Google
   outage from driving `RotateCookies` at the poll rate.
-- **`ActivateAsync` is re-entrant.** A re-activation now tears down the previous generation via the
-  existing `DeactivateAsync` before rebuilding — except while a call is active, where it adopts the new
-  cookies and leaves the transport alone rather than dropping the call.
+- **`ActivateAsync` is re-entrant, and a healthy SIP transport is reused rather than rebuilt.** The
+  decision is one predicate, `CanReuseTransport => _sipTransport?.IsRegistered == true`, evaluated after
+  the incoming cookie set is loaded:
+  - **registered + unchanged credentials** → total no-op; transport, `HttpClient` and both timers untouched.
+  - **registered + changed credentials** (the common case — the cron pulls every 20 min while PSIDTS
+    rotates every ~11, so the header differs on nearly every fire) → cookies adopted and clients rebuilt,
+    **transport and timers kept**, deliberately **no re-register** (re-registering on a cadence re-creates
+    the 2026-06-19 REGISTER-storm risk).
+  - **absent or unregistered transport** → the full teardown via the existing `DeactivateAsync`, then
+    rebuild — with an `_activeCallId` guard re-checked after timer disposal so a call that starts mid-
+    teardown is never dropped.
+
+  This is safe because `GvSipTransport` caches no credentials: it holds a `Func<Task<SipCredentials>>`
+  invoked fresh on every register (`Sip/GvSipTransport.cs:1021`) that resolves the `HttpClient` lazily by
+  field — recovery rung 2 already relied on it. **Reuse fixes F7 harder than a teardown would:** an
+  unconditional teardown re-arms a fresh 30-minute health timer on every 20-minute cron fire, which is
+  precisely the starvation shape F7 describes.
 - **Honest status.** New `authBlackout`, `lastApiSuccessAt`, `lastApiAuthFailureAt` fields, written by
   the **real** data-plane calls rather than by a probe. `AreCookiesValid` became
   `probe && !authBlackout`, so `cookiesValid` — and `degraded`, which derives from it — go false the
@@ -82,20 +143,74 @@ after a variable cooldown. This was an **auth-freshness** defect. Google's rotat
   time — deliberately *not* aligned to a `CDP cookie refresh` line. Expect **zero 502s**. The retirement
   of the old "test inside a healthy window" discipline *is* the acceptance criterion.
 - `proactive PSIDTS refresh succeeded` should appear at ~8-minute intervals.
-- `POST /api/gvbridge/cookies/refresh-from-browser` twice should log
-  `re-activating — tearing down the previous generation first` and leave **one** health-check timer and
-  **one** `GvSipTransport` (the F6/F7 gate).
+- `POST /api/gvbridge/cookies/refresh-from-browser` twice should leave **one** health-check timer and
+  **one** `GvSipTransport` (the F6/F7 gate). **⚠️ The log line to expect is inverted from the original
+  plan text.** With SIP registered, expect
+  `re-activation adopting new credentials — SIP transport is healthy, keeping it` (or
+  `re-activation is a no-op …`), and `sipRegistered` must stay **true** across both refreshes with
+  `lastConnectedAt` holding a single distinct value.
+  `re-activating — tearing down the previous generation first` is correct **only** when the transport is
+  absent or unregistered; seeing it while SIP is registered is a **failure**. Scoring this by the
+  pre-amendment text turns a passing run into a false failure — see finding M2 on PR #72.
 - If a 502 does occur, `curl -s localhost:5004/api/gvbridge/status` should show `degraded:true`,
   `cookiesValid:false`, `authBlackout:true` — and `available:true`, **by design**.
 
-**Caveats:**
-- The box-side cron is **deliberately still running**; double refresh is an accepted cost until it is
-  retired as a separate change with its own rollback story. The in-process refresh is single-flighted
-  and idempotent so the two interleave safely. **Do not remove that cron casually** — if the new path
-  turns out inert, it is the only thing keeping GV authenticated.
-- `RotateCookies`' request shape is still **UNVERIFIED** (`docs/research/gv-protocol-notes.md` §3.2). If
-  rung 1 silently no-ops live, the proactive timer is inert and the reactive 401 path carries the whole
-  fix — still a correct outcome, but the cadence claim would not hold.
+**Verified live (on-box UAT, 2026-08-01 16:05–17:36 EDT, PR head `b5b8444`):**
+
+| # | Acceptance criterion | Result |
+|---|---|---|
+| 1 | `CookieRefreshIntervalMinutes` governs a real cadence; `0` disables it | ✅ 7 ticks exactly 8m00s apart; `0` produced zero proactive lines in 25 min while reactive recovery still worked |
+| 2 | One shared recovery, exactly one replay, caller gets 200 | ✅ full ladder captured live at 17:32:53 — rung 1 401 → rung 2 fail → rung 3 CDP → replay 200 |
+| 3 | Honest status during a 401; `available` stays true | ⚠️ **PARTIAL** — see Open verification items |
+| 4 | Window-blind 30-min soak, 0 × 502 | ✅ 932 requests, **0** non-200 |
+| 5 | `api2thread/list returned Unauthorized` drops toward 0 | ✅ **33/hr → 0/hr** |
+| 6 | F6/F7 leak gate: one health timer, one `GvSipTransport` | ✅ stronger than asked — one transport across **6** re-activations, and the health timer ticked twice exactly 30 min apart on its original anchor (**F7 fixed, measured**) |
+| 7 | Existing status-contract tests pass unchanged | ✅ |
+
+`RotateCookies` (rung 1) is **not inert** — it rotated for real 5 times — but its usefulness splits by
+cookie freshness: it works **proactively** (fresh cookies), and returns 401 **reactively** (already-stale
+PSIDTS), where CDP carries the recovery. The design's layering is validated by evidence rather than
+assumption. This resolves the "UNVERIFIED request shape" caveat previously carried here.
+
+**Open verification items (not defects — merged knowingly):**
+
+- ⛔ **Inbound call ringing was never tested for this change.** The tester had no way to originate a call
+  to the GV number, so test-plan step 8 did not run. This matters because **Task 3 touches `_sipTransport`
+  teardown**, and because conditional reuse makes teardown *rare*, any ringing regression would be
+  **intermittent and hard to trace** — it would only surface on the path where the transport was absent or
+  unregistered (restart, dropped WebSocket). Proxies were good throughout (`sipRegistered`/`wsConnected`
+  true across 411 samples, one transport surviving six re-activations, and a server-side WebSocket close at
+  17:07 that auto-recovered within the same second), but an actual ring is unverified. **Action: ring the
+  phone once and confirm two-way audio.**
+- ⚠️ **AC-3 is partial: `authBlackout:true` was never observed live.** Zero `authBlackout:true` samples
+  across 411 status polls — not because the flag is broken, but because **recovery is faster than any
+  practical sampling rate**: the one live blackout lasted **920 ms** (`lastApiAuthFailureAt 21:32:53.529`
+  → `lastApiSuccessAt 21:32:54.449`) against a 4-second sampling floor. What *is* verified live:
+  `available` never went false, and `lastApiAuthFailureAt` latched from a genuine data-plane 401. What
+  remains **unit-test-only**: the derived `authBlackout` / `cookiesValid:false` / `degraded:true` trio
+  during a *sustained* blackout.
+  **⚠️ Radio Console must be told: `authBlackout` may be true for well under a second.** A reconnecting
+  banner bound naively to it will effectively never appear. Bind to it only with a minimum-display or
+  debounce window, or drive the UI from a sustained-failure signal instead. This is in the handoff reply.
+
+**Follow-ups (do NOT do these in the B2 PR):**
+
+- **Retire the box-side cron — its justification has expired.** Resolved decision 2 kept
+  `*/20 * * * * /opt/rotary-phone/refresh-gv-cookies.sh` running "until the in-process refresh is proven."
+  **It is now proven:** 33/hr → 0 `Unauthorized`, 932 requests with zero 502s, and a measured 8-minute
+  proactive cadence. Meanwhile the accepted double-refresh cost (spec §8.2) has **materialized as
+  measurable 429s on 29% of proactive ticks** (2 of 7) — the 8-minute timer, the 20-minute cron and
+  reactive recovery together exceed what `accounts.google.com/RotateCookies` will serve. It degrades
+  gracefully (warns, returns `NotRotated`, backstop intact, no 502s resulted), so this is not urgent.
+  **This is a box-side change and needs its own rollback story** — retire the cron (or raise its interval),
+  then re-measure the 429 rate. (Finding **M1**, PR #72 UAT.)
+- **Path A (`re-activation is a no-op`) is dead code in production.** It fired **0** times in 6
+  re-activations — every cron fire carries changed credentials, exactly as predicted. Correct and
+  unit-tested, but never exercised on the box. Worth knowing before anyone relies on it. (Finding **L1**.)
+- **`psidtsAgeSeconds` resets on activation regardless of the cookies' true issue time**
+  (`_psidtsRefreshedAt = DateTime.UtcNow` on load) — it read `6` right after a restart whose on-disk PSIDTS
+  was ~7 minutes old. Pre-existing, not introduced by B2, but B2's re-activation path hits it more often,
+  so the field is a **less trustworthy staleness signal** than the pre-fix traces implied. (Finding **L2**.)
 
 **See:** [`docs/plans/gv-auth-blackout-b2-design.md`](plans/gv-auth-blackout-b2-design.md) (findings
 F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plans/gv-auth-blackout-b2-plan.md)

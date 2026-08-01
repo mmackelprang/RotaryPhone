@@ -140,6 +140,45 @@ The semantics we're settling on:
 of one of them merely convenient. **This needs your agreement** — if it's a problem on your side, say
 so before you build against it and we'll talk.
 
+### ⚠️ But do not bind the banner *naively* — post-fix, `authBlackout` may be true for under a second
+
+This is the one piece of advice above that the live UAT changed, and you need it before you build.
+
+Measured on the box 2026-08-01, over a 90-minute soak: **zero** `authBlackout:true` samples across
+**411** status polls. Not because the flag is broken — we caught the mechanism working end-to-end — but
+because **recovery is now faster than any practical polling rate**. The one genuine blackout in that
+window lasted **920 ms**:
+
+```
+lastApiAuthFailureAt : 21:32:53.529   <- real api2thread/list 401
+lastApiSuccessAt     : 21:32:54.449   <- recovered + replayed, caller got 200
+```
+
+At your recommended 10-second `/api/gvbridge/status` cadence, a banner bound directly to the boolean
+will **effectively never appear** — and on the rare occasion it does, it will flash for a single poll and
+vanish, which is arguably worse than not showing at all.
+
+**What we suggest instead:**
+
+- Treat `authBlackout:true` as an **event**, not a state. Latch it and hold the banner for a minimum
+  display window (a few seconds) so it's readable when it does fire.
+- Better: drive the UI from **`lastApiAuthFailureAt` / `lastApiSuccessAt`**. They're timestamps, so they
+  survive *between* polls where the boolean does not — `lastApiAuthFailureAt > lastApiSuccessAt` tells
+  you "right now it's bad", and the gap between them tells you "and it has been bad for N seconds",
+  which is what a banner actually wants to know.
+- Or gate on sustained failure on your side (N consecutive failed reads), which also covers the non-auth
+  failure modes your GV-8 was built for.
+
+Concretely: a **sustained** blackout is now the abnormal case. If you ever *do* see `authBlackout` stay
+true across several consecutive polls, that is a genuinely different and more serious condition than the
+one this PR fixed — Google is refusing all three recovery rungs — and we'd want to hear about it.
+
+**Honesty note on our side:** we verified the *recording* mechanism live (`lastApiAuthFailureAt` latched
+from a real data-plane 401, `available` never went false across all 411 samples). We did **not** manage
+to observe the derived trio — `authBlackout:true` + `cookiesValid:false` + `degraded:true` — during a
+*sustained* blackout on the box, because no blackout lasted long enough to sample. That combination
+remains proven by unit test only. We scored that acceptance criterion **PARTIAL** rather than green.
+
 `psidtsAgeSeconds` stays exactly as it is and is deliberately **not** promoted into the health
 derivation. It's an age heuristic; the whole lesson of this defect is that a real call outcome outranks
 any inference. Keep it on the dashboard as context, don't gate on it.
@@ -158,19 +197,34 @@ Being explicit, because the difference matters:
   concurrent callers share one recovery, that the failure cooldown arms, that write paths signal but
   never replay, that the new status fields report correctly, that `available` stays true during a
   blackout, and that a double re-activation leaves exactly one timer and one SIP transport.
-- **Pending live UAT on the box:** the headline number — a 30-minute soak started at an *arbitrary*
-  wall-clock time with **zero** 502s. Until that passes, treat the fix as landed-but-unproven.
-- **Still UNVERIFIED upstream:** the exact request shape of Google's browser-less `RotateCookies` call,
-  which is what the proactive 8-minute refresh uses. If it turns out to silently no-op live, the
-  proactive cadence is inert and the **reactive** 401 path carries the whole fix on its own. That is
-  still a correct outcome for you — your 502s go away either way — but we'd rather say so plainly than
-  claim a cadence fix that isn't working.
+- ✅ **Verified live on the box (2026-08-01 UAT — this section is now settled).** The headline number
+  landed: **932 HTTP requests across ~88 minutes, zero 502s, zero non-200s**, against a pre-fix baseline
+  of **15 of 49 (31%)** 502s for the same request shape. Upstream,
+  `api2thread/list returned Unauthorized` went **33/hr → 0/hr**. On your side, `radio-web`'s
+  `Failed to get GV SMS thread` count over 90 minutes was **0**. The soak was started at an arbitrary
+  wall-clock time, deliberately unaligned to any refresh boundary — the window-awareness discipline is
+  retired, and that retirement *is* the proof.
+- ✅ **`RotateCookies` is NOT inert** — the risk flagged below resolved in our favour, with a nuance
+  worth knowing. It rotates for real when the cookies are still fresh (which is how the proactive
+  8-minute refresh uses it — 5 confirmed rotations), and returns 401 when PSIDTS has *already* gone
+  stale, where the ladder falls through to CDP and recovers anyway. So the proactive cadence is real
+  **and** the reactive path works; the design's layering is validated by evidence rather than assumption.
+- ⚠️ **One thing we are still drawing 429s on.** With our 8-minute in-process refresh, the box-side
+  20-minute cron, and reactive recovery all hitting `accounts.google.com/RotateCookies`, **2 of 7**
+  proactive ticks (29%) came back 429. It degrades gracefully — warns, no-ops, backstop intact, and it
+  produced **zero** 502s — so it doesn't affect you today. We're retiring the now-redundant cron as a
+  follow-up, which should take that back down.
+- ⛔ **Not verified: inbound call ringing.** Our tester had no way to originate a call to the GV number,
+  and this change touches SIP transport teardown. `sipRegistered`/`wsConnected` stayed true throughout
+  and a single transport survived six re-activations, so the proxies are good — but if you notice the
+  phone failing to ring after this deploy, tell us immediately rather than assuming it's unrelated.
 
 ## Meanwhile
 
-Until the soak passes, the pre-fix advice still holds as a fallback: if you see a cluster of 502s,
-check `/api/gvbridge/status` and look at `authBlackout` first. If `authBlackout` is `true`, it's this
-defect and the recovery is already in flight. If it's `false` and you're still getting 502s, it's
-something else and we want to hear about it.
+The pre-fix advice still holds as a fallback: if you see a cluster of 502s, check
+`/api/gvbridge/status`. Prefer `lastApiAuthFailureAt` vs `lastApiSuccessAt` over the instantaneous
+`authBlackout` boolean (see the caveat above — post-fix the boolean is rarely observable). If the last
+auth failure is more recent than the last success, it's this defect and recovery is already in flight.
+If auth looks healthy and you're still getting 502s, it's something else and we want to hear about it.
 
 B1 is done and merged separately — group/MMS thread ids with `%2F` in them now work.
