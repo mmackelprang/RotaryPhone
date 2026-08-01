@@ -315,15 +315,28 @@ public class GVApiAdapterRecoveryTests
         // test: IsAvailable gates GetAuthenticatedClient(), so flipping it during a transient
         // data-plane 401 would make the adapter refuse its OWN recovery retry — turning a ~9-minute
         // blackout into a hard stop. degraded / authBlackout carry the fact instead.
+        // A REGISTERED transport is attached for the same reason as in
+        // AuthBlackout_TrueAfterAuthFailure: without one, Degraded is already true before
+        // RecordApiOutcome runs, so asserting it afterwards would prove nothing. The point of
+        // THIS test is the contrast — degraded flips, available does NOT.
         var adapter = CreateAdapter();
+        var (transport, _) = NewRegisteredTransport();
+        SetField(adapter, "_sipTransport", transport);
         SetField(adapter, "_areCookiesValid", true);
         SetAvailable(adapter, true);
+        Assert.True(adapter.IsAvailable);
+        Assert.False(adapter.Degraded);          // provably healthy BEFORE the outcome is recorded
 
         adapter.RecordApiOutcome(success: false, authFailure: true);
 
-        Assert.True(adapter.IsAvailable);
+        Assert.True(adapter.IsAvailable);        // THE DEVIATION: available stays true, by design
         Assert.True(adapter.AuthBlackout);
-        Assert.True(adapter.Degraded);
+        Assert.True(adapter.Degraded);           // degraded is what carries the fact instead
+
+        // The reason available must stay true: the seam that hands out the authenticated client
+        // gates on it, so flipping it would make the adapter refuse its own recovery retry.
+        SetField(adapter, "_httpClient", new HttpClient());
+        Assert.NotNull(((IGvAuthenticatedClientProvider)adapter).GetAuthenticatedClient());
     }
 
     [Fact]
