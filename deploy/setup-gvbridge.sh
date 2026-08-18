@@ -81,6 +81,22 @@ install_script() {
     install -m 755 "$src" "$dest"
 }
 
+# Write a file and give it an exact mode in one step.
+#
+# Why not `cat > f` followed by `chmod`: this box runs umask 0002, so `cat >`
+# creates the file group-writable (664), and only the chmod that follows takes
+# that away. GNOME silently refuses to launch a group-writable .desktop file —
+# that is precisely why the shortcut this script used to write did nothing when
+# clicked. Writing through a temp file and `install -m` never lets the
+# group-writable version exist at the destination path at all.
+write_mode() {
+    local dest="$1" mode="$2" tmp
+    tmp="$(mktemp)"
+    cat > "$tmp"
+    install -m "$mode" "$tmp" "$dest"
+    rm -f "$tmp"
+}
+
 # --- Step 1: Verify Google Chrome ---
 # Chrome, not Chromium: the profile at ${PROFILE_DIR} was created by Chrome and
 # holds the live Google session. This script deliberately does NOT install a
@@ -130,7 +146,7 @@ log "Installed the nightly restart timer (left DISABLED — enable if needed)."
 
 # --- Step 5: Autostart entry ---
 log "Creating autostart entry..."
-cat > "${AUTOSTART_DIR}/gv-bridge-chrome.desktop" << EOF
+write_mode "${AUTOSTART_DIR}/gv-bridge-chrome.desktop" 644 << EOF
 [Desktop Entry]
 Name=GV Bridge Chrome
 Comment=Runs gv-bridge-ensure.sh at login to bring up the Google Voice bridge browser
@@ -140,13 +156,11 @@ Type=Application
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=15
 EOF
-chmod 644 "${AUTOSTART_DIR}/gv-bridge-chrome.desktop"
 
 # --- Step 6: Desktop shortcut ---
-# Mode 755, NOT 775: GNOME refuses to launch a group-writable .desktop file,
-# which is why the previously shipped shortcut was unlaunchable on this box.
+# Mode 755, NOT 775 — see write_mode above for why the distinction matters.
 log "Creating desktop shortcut..."
-cat > "${DESKTOP_DIR}/GV-Bridge.desktop" << EOF
+write_mode "${DESKTOP_DIR}/GV-Bridge.desktop" 755 << EOF
 [Desktop Entry]
 Name=GV Bridge
 Comment=Start the Google Voice bridge browser if it is not already running
@@ -156,7 +170,6 @@ Terminal=false
 Type=Application
 Categories=Utility;
 EOF
-chmod 755 "${DESKTOP_DIR}/GV-Bridge.desktop"
 
 if [ -d "${EXTENSION_DIR}" ]; then
     log "Extension source present at ${EXTENSION_DIR} (passed to Chrome, but inert — see below)."
