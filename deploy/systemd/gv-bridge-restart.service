@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart Google Voice bridge Chrome to reclaim leaked memory
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/gv-bridge-restart.sh

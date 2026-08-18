@@ -1,0 +1,6 @@
+# Shell scripts and systemd units are consumed only on the Linux radio box.
+# A CRLF in a shebang line yields "bad interpreter: /usr/bin/env bash^M", and
+# systemd unit parsing is equally unforgiving, so pin them to LF no matter what
+# platform the checkout happens on.
+*.sh text eol=lf
+deploy/systemd/* text eol=lf

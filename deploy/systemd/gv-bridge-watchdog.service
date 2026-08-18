@@ -1,0 +1,6 @@
+[Unit]
+Description=GV bridge Chrome crash watchdog (relaunch if down)
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/gv-bridge-ensure.sh
