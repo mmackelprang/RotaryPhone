@@ -29,6 +29,29 @@ ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
 mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
 
+# Serialize against the other launcher. The watchdog fires every 2 minutes and
+# the nightly recycle kills-then-relaunches, so without this the recycle's
+# `pkill -9` can land on a Chrome the watchdog started a moment earlier and
+# leave a half-initialised profile behind. Both scripts take the same lock.
+#
+# Failing to take it is not an error here: whoever holds it is already bringing
+# the bridge up or recycling it, which is exactly the outcome this script wants.
+LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
+
+# Unlike ensure.sh, this one waits rather than giving up: a skipped nightly
+# recycle is a silent no-op, and the watchdog only ever holds the lock for as
+# long as one launch takes.
+HELD_LOCK=0
+if command -v flock >/dev/null 2>&1 && : >>"${LOCK}" 2>/dev/null; then
+  exec 9>>"${LOCK}"
+  if flock -w 60 9; then
+    HELD_LOCK=1
+  else
+    echo "$(ts) restart: could not take ${LOCK} within 60s - skipping this run" >> "${LOG}"
+    exit 1
+  fi
+fi
+
 if pgrep -f "${MARKER}" >/dev/null 2>&1; then
   pkill -f "${MARKER}"
   sleep 3
@@ -45,5 +68,12 @@ fi
 # ensure.sh clears the stale Singleton* locks the kill above leaves behind, then
 # relaunches. It no-ops if the kill did not actually take, which is the right
 # outcome: a bridge that is still up beats one that is down.
+#
+# Hand the lock over rather than nesting: ensure.sh takes the same one, and its
+# flock -n would fail against a descriptor this shell still holds.
+[ "${HELD_LOCK}" -eq 1 ] && flock -u 9
 "${ENSURE}"
-echo "$(ts) restart: relaunched via ensure" >> "${LOG}"
+# Deliberately does NOT claim "relaunched" — ensure.sh no-ops when the bridge is
+# already up, and it writes its own line when it does launch. Claiming a relaunch
+# here would put an event in the log that may not have happened.
+echo "$(ts) restart: handed off to ensure" >> "${LOG}"

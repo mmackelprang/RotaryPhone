@@ -32,6 +32,25 @@ MARKER="user-data-dir=${PROFILE}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
+# Serialize against the other launcher. The watchdog fires every 2 minutes and
+# the nightly recycle kills-then-relaunches, so without this the recycle's
+# `pkill -9` can land on a Chrome the watchdog started a moment earlier and
+# leave a half-initialised profile behind. Both scripts take the same lock.
+#
+# Failing to take it is not an error here: whoever holds it is already bringing
+# the bridge up or recycling it, which is exactly the outcome this script wants.
+LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
+
+# Only lock if the lock is actually obtainable. If flock is missing or the file
+# cannot be opened, carry on WITHOUT it: an unserialized launch risks a rare
+# double-start, but treating an unopenable lock as "someone else has it" would
+# mean never launching the bridge at all, which is far worse.
+if command -v flock >/dev/null 2>&1 && : >>"${LOCK}" 2>/dev/null; then
+  exec 9>>"${LOCK}"
+  flock -n 9 || exit 0
+fi
+
+# Checked under the lock, so the answer cannot go stale between here and launch.
 if pgrep -f "${MARKER}" >/dev/null 2>&1; then
   exit 0
 fi
