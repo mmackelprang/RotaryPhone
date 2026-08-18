@@ -166,14 +166,28 @@ if (Test-Path $extensionDir) {
   ssh $SshTarget "if [ -d ~/snap/chromium/common/gv-bridge-profile/Extension ]; then cp -r ${TargetPath}/ChromeExtension/* ~/snap/chromium/common/gv-bridge-profile/Extension/ && echo '  Extension updated in snap profile'; fi"
 }
 
-# Copy deploy scripts (setup-gvbridge.sh, etc.)
+# Copy deploy shell scripts (setup-gvbridge.sh, gv-bridge-ensure.sh, gv-bridge-restart.sh)
+# and the systemd unit files setup-gvbridge.sh installs from deploy/systemd.
 $deployScripts = Join-Path $RepoRoot "deploy"
-$setupScript = Join-Path $deployScripts "setup-gvbridge.sh"
-if (Test-Path $setupScript) {
+$shellScripts = @(Get-ChildItem -Path $deployScripts -Filter "*.sh" -File -ErrorAction SilentlyContinue)
+if ($shellScripts.Count -gt 0) {
   Write-Host "  Copying deploy scripts..." -ForegroundColor Yellow
-  ssh $SshTarget "mkdir -p ${TargetPath}/deploy"
-  scp ($setupScript -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
-  ssh $SshTarget "chmod +x ${TargetPath}/deploy/*.sh 2>/dev/null"
+  ssh $SshTarget "mkdir -p ${TargetPath}/deploy/systemd"
+  foreach ($script in $shellScripts) {
+    scp ($script.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
+  }
+  # setup-gvbridge.sh reads these from ${TargetPath}/deploy/systemd and installs
+  # them into ~/.config/systemd/user, so they have to ship alongside it.
+  $systemdDir = Join-Path $deployScripts "systemd"
+  if (Test-Path $systemdDir) {
+    foreach ($unit in @(Get-ChildItem -Path $systemdDir -File)) {
+      scp ($unit.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/systemd/"
+    }
+  }
+  # Explicit modes rather than chmod +x: NTFS carries no permission bits, so the
+  # mode on arrival is whatever the umask made it. 755 keeps the scripts runnable
+  # without making them group-writable.
+  ssh $SshTarget "chmod 755 ${TargetPath}/deploy/*.sh 2>/dev/null; chmod 644 ${TargetPath}/deploy/systemd/* 2>/dev/null"
 }
 
 # Ensure binary is executable
