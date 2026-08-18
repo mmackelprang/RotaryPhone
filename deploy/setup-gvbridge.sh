@@ -67,18 +67,26 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[GVBridge]${NC} $1"; }
 warn() { echo -e "${YELLOW}[GVBridge]${NC} $1"; }
 
-# Never clobber a working hand-edited copy without leaving a way back.
-install_script() {
+# Never clobber a working hand-edited copy without leaving a way back. This
+# applies to every file the script installs — scripts, units and .desktop entries
+# alike — because an operator who hand-tunes, say, the watchdog interval should
+# not lose it silently to the next provision.
+backup_if_changed() {
     local src="$1" dest="$2"
-    if [ ! -f "$src" ]; then
-        warn "Missing ${src} — deploy the RotaryPhone project first, then re-run."
-        exit 1
-    fi
     if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
         cp -p "$dest" "${dest}.bak-${STAMP}"
         log "Backed up existing $(basename "$dest") -> $(basename "$dest").bak-${STAMP}"
     fi
-    install -m 755 "$src" "$dest"
+}
+
+install_file() {
+    local src="$1" dest="$2" mode="$3"
+    if [ ! -f "$src" ]; then
+        warn "Missing ${src} — deploy the RotaryPhone project first, then re-run."
+        exit 1
+    fi
+    backup_if_changed "$src" "$dest"
+    install -m "$mode" "$src" "$dest"
 }
 
 # Write a file and give it an exact mode in one step.
@@ -93,6 +101,7 @@ write_mode() {
     local dest="$1" mode="$2" tmp
     tmp="$(mktemp)"
     cat > "$tmp"
+    backup_if_changed "$tmp" "$dest"
     install -m "$mode" "$tmp" "$dest"
     rm -f "$tmp"
 }
@@ -119,18 +128,14 @@ mkdir -p "${DATA_DIR}" 2>/dev/null || true
 
 # --- Step 3: Install the launch scripts ---
 log "Installing launch scripts into ${BIN_DIR}..."
-install_script "${DEPLOY_DIR}/gv-bridge-ensure.sh"  "${BIN_DIR}/gv-bridge-ensure.sh"
-install_script "${DEPLOY_DIR}/gv-bridge-restart.sh" "${BIN_DIR}/gv-bridge-restart.sh"
+install_file "${DEPLOY_DIR}/gv-bridge-ensure.sh"  "${BIN_DIR}/gv-bridge-ensure.sh"  755
+install_file "${DEPLOY_DIR}/gv-bridge-restart.sh" "${BIN_DIR}/gv-bridge-restart.sh" 755
 
 # --- Step 4: Install systemd user units ---
 log "Installing systemd user units..."
 for unit in gv-bridge-watchdog.service gv-bridge-watchdog.timer \
             gv-bridge-restart.service gv-bridge-restart.timer; do
-    if [ ! -f "${DEPLOY_DIR}/systemd/${unit}" ]; then
-        warn "Missing ${DEPLOY_DIR}/systemd/${unit} — deploy the project first."
-        exit 1
-    fi
-    install -m 644 "${DEPLOY_DIR}/systemd/${unit}" "${SYSTEMD_USER_DIR}/${unit}"
+    install_file "${DEPLOY_DIR}/systemd/${unit}" "${SYSTEMD_USER_DIR}/${unit}" 644
 done
 systemctl --user daemon-reload
 

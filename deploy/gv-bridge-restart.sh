@@ -13,9 +13,13 @@
 # silently broken cookie refresh until someone noticed empty SMS lists. One
 # launch line, one place to fix.
 #
-# Killing by profile marker is safe from self-inflicted kills: this script's own
-# command line is its path, which does not contain the marker, and neither does
-# ensure.sh's.
+# Killing by profile marker is safe from self-inflicted kills, but the reason is
+# the lock, not the command lines. It is true that neither script's own argv
+# contains the marker (each is just a path), but ensure.sh's CHILD does:
+# `systemd-run ... --user-data-dir=$PROFILE ...` carries the marker while the
+# launch is in flight, and an unsynchronized pkill here could kill it. Holding the
+# lock across the kill is what makes that impossible, because ensure.sh cannot be
+# mid-launch while this script holds it.
 # =============================================================================
 set -u
 

@@ -286,9 +286,11 @@ nothing depends on it. Do not write code that assumes the extension is loaded.
 
 ### GV doesn't ring in the browser
 
-1. Verify notification permission is "Allow" (lock icon → Site settings)
-2. In GV Settings → Calls → Incoming calls → "Web" must be ON
-3. The Chromium window does NOT need to be visible — it works off-screen
+This is no longer a meaningful symptom, and chasing it will waste your time.
+Incoming calls are signalled over SIP; the browser is not in the ring path at all,
+so whether Google Voice rings *in the browser* has no bearing on whether the
+rotary phone rings. See [Phone doesn't ring](#phone-doesnt-ring) for the
+troubleshooting that actually applies.
 
 ### After reboot
 
