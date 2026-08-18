@@ -166,14 +166,42 @@ if (Test-Path $extensionDir) {
   ssh $SshTarget "if [ -d ~/snap/chromium/common/gv-bridge-profile/Extension ]; then cp -r ${TargetPath}/ChromeExtension/* ~/snap/chromium/common/gv-bridge-profile/Extension/ && echo '  Extension updated in snap profile'; fi"
 }
 
-# Copy deploy scripts (setup-gvbridge.sh, etc.)
+# Copy deploy shell scripts (setup-gvbridge.sh, gv-bridge-ensure.sh, gv-bridge-restart.sh)
+# and the systemd unit files setup-gvbridge.sh installs from deploy/systemd.
+#
+# Every scp is exit-code checked and throws, for the same reason the binary sync
+# above is: $ErrorActionPreference = "Stop" does NOT turn a non-zero exit from a
+# native executable into a terminating error, so an unchecked scp would let a
+# half-shipped deploy print "Deploy Complete". That is the silent-stale-deploy bug,
+# and it would land here as a stale or missing gv-bridge-ensure.sh on the box.
 $deployScripts = Join-Path $RepoRoot "deploy"
-$setupScript = Join-Path $deployScripts "setup-gvbridge.sh"
-if (Test-Path $setupScript) {
+$systemdDir = Join-Path $deployScripts "systemd"
+$shellScripts = @(Get-ChildItem -Path $deployScripts -Filter "*.sh" -File -ErrorAction SilentlyContinue)
+$unitFiles = @(if (Test-Path $systemdDir) { Get-ChildItem -Path $systemdDir -File })
+
+if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   Write-Host "  Copying deploy scripts..." -ForegroundColor Yellow
-  ssh $SshTarget "mkdir -p ${TargetPath}/deploy"
-  scp ($setupScript -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
-  ssh $SshTarget "chmod +x ${TargetPath}/deploy/*.sh 2>/dev/null"
+  ssh $SshTarget "mkdir -p ${TargetPath}/deploy/systemd"
+  if ($LASTEXITCODE -ne 0) { throw "failed to create ${TargetPath}/deploy on ${SshTarget} (exit $LASTEXITCODE)" }
+
+  foreach ($script in $shellScripts) {
+    scp ($script.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
+    if ($LASTEXITCODE -ne 0) { throw "failed to copy $($script.Name) (exit $LASTEXITCODE) -- aborting before the box is left with a stale copy" }
+  }
+
+  # setup-gvbridge.sh reads these from ${TargetPath}/deploy/systemd and installs
+  # them into ~/.config/systemd/user, so they have to ship alongside it. Shipped
+  # independently of the .sh files so a future reorg of one cannot silently stop
+  # shipping the other.
+  foreach ($unit in $unitFiles) {
+    scp ($unit.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/systemd/"
+    if ($LASTEXITCODE -ne 0) { throw "failed to copy systemd unit $($unit.Name) (exit $LASTEXITCODE)" }
+  }
+
+  # Explicit modes rather than chmod +x: NTFS carries no permission bits, so the
+  # mode on arrival is whatever the umask made it. 755 keeps the scripts runnable
+  # without making them group-writable.
+  ssh $SshTarget "chmod 755 ${TargetPath}/deploy/*.sh 2>/dev/null; chmod 644 ${TargetPath}/deploy/systemd/* 2>/dev/null"
 }
 
 # Ensure binary is executable

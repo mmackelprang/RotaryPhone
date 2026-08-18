@@ -1,21 +1,38 @@
 # GV Bridge — Setup Guide
 
-**Last updated:** March 23, 2026
+**Last updated:** August 18, 2026
 
 This guide covers setting up the GV Bridge system on a fresh Ubuntu box. The GV Bridge enables incoming Google Voice calls to ring a physical rotary phone connected via a Grandstream HT801 ATA.
 
 ## Architecture
 
+Two independent paths share the box. They are worth keeping apart in your head, because
+only one of them still involves the browser.
+
+**Calls — no browser involvement:**
+
 ```
 Google Voice call
-  → Chromium browser (voice.google.com + extension)
-  → Content script detects incoming call via button polling
-  → Service worker relays event via HTTP POST
-  → .NET RotaryPhoneController server receives event
-  → CallManager sends SIP INVITE to HT801
-  → HT801 rings the rotary phone
-  → User picks up → 200 OK → call connected
+  -> SIP over WebSocket to the .NET RotaryPhoneController server
+  -> CallManager sends SIP INVITE to HT801
+  -> HT801 rings the rotary phone
+  -> User picks up -> 200 OK -> call connected
+  -> Audio flows both ways over DTLS-SRTP (SIPSorcery)
 ```
+
+**SMS and voicemail — the browser holds the session, nothing more:**
+
+```
+gv-bridge-ensure.sh
+  -> Google Chrome, dedicated profile, CDP on :9224
+  -> holds ONE authenticated voice.google.com session
+  -> cron (*/20) POSTs /api/gvbridge/cookies/refresh-from-browser
+  -> the API reads that session's cookies over CDP
+  -> the API calls Google's HTTP API directly for SMS + voicemail
+```
+
+The Chrome extension is **superseded** and is not loaded — see
+[The extension is no longer in the path](#the-extension-is-no-longer-in-the-path).
 
 ## Prerequisites
 
@@ -23,7 +40,7 @@ Google Voice call
 |---|---|---|
 | Ubuntu | 24.04+ | Tested on Ubuntu 24.04 (x64) |
 | .NET SDK | 10.0 | For building from source |
-| Chromium | 146+ | Installed via snap (`sudo snap install chromium`) |
+| Google Chrome | 137+ | `google-chrome` on PATH. Chromium is no longer used. |
 | Grandstream HT801 | Firmware 1.0.5+ | Factory reset recommended before setup |
 | Google Voice account | — | With a phone number |
 
@@ -61,85 +78,80 @@ ssh mmack@radio "bash /opt/rotary-phone/deploy/setup-gvbridge.sh"
 
 ### What the setup script does
 
-1. Installs Chromium snap if not present
-2. Copies the Chrome extension to a snap-accessible path
-3. Creates a systemd user service (`gv-bridge-chrome.service`)
-4. Installs Chromium notification/autoplay policies
-5. Creates a desktop shortcut for manually starting the browser
-6. Creates an autostart entry as backup
+1. Verifies Google Chrome is installed (it will not install a browser for you)
+2. Installs `gv-bridge-ensure.sh` and `gv-bridge-restart.sh` into `~/bin`
+3. Installs the watchdog and nightly-restart systemd **user** units
+4. Enables the 2-minute watchdog timer, which brings the bridge up if it is down
+5. Installs the login autostart entry
+6. Creates a desktop shortcut that runs the ensure script
+
+No `sudo` is required for any of it. Pass `--with-legacy-extension-service` to also
+provision the superseded snap-Chromium configuration; it is installed but never enabled.
 
 ### What starts automatically on boot
 
-| Service | Type | Starts |
-|---------|------|--------|
-| `rotary-phone.service` | System (systemd) | On boot |
-| `gv-bridge-chrome.service` | User (systemd --user) | On user login |
+| Unit | Type | Starts | Enabled by setup |
+|---|---|---|---|
+| `rotary-phone.service` | System (systemd) | On boot | yes |
+| `gv-bridge-watchdog.timer` | User (`systemctl --user`) | 2 min after boot, then every 2 min | **yes** |
+| `gv-bridge-restart.timer` | User (`systemctl --user`) | Nightly 04:00 | no — installed, left disabled |
+| `~/.config/autostart/gv-bridge-chrome.desktop` | GNOME autostart | 15 s after login | yes |
+
+The watchdog is what actually keeps the bridge alive. `gv-bridge-ensure.sh` is idempotent
+by contract: it looks for a process carrying this profile's `--user-data-dir` and exits 0
+without touching anything if it finds one, so running it every 2 minutes costs nothing.
 
 ## First-Time Setup (one-time steps)
 
-After deploying, these steps need to be done once on the radio box's display:
+After deploying and running the setup script:
 
-### 1. Start the GV Bridge browser
+### 1. Bring the bridge up
 
 ```bash
-systemctl --user start gv-bridge-chrome
+~/bin/gv-bridge-ensure.sh
 ```
 
-Or click the **"GV Bridge"** desktop shortcut.
+Or wait up to 2 minutes for the watchdog, or click the **"GV Bridge"** desktop shortcut.
 
-### 2. Make the window visible
+### 2. Log into Google Voice
 
-The browser starts off-screen by default. Temporarily make it visible:
+The window is placed by the Wayland compositor — `--window-position` is a no-op there, so
+raise the window from the GNOME overview rather than editing coordinates. Sign in with the
+Google account that owns the Voice number.
+
+### 3. Confirm CDP is answering
+
+This is what everything else depends on:
 
 ```bash
-# Edit the service file
-nano ~/.config/systemd/user/gv-bridge-chrome.service
-# Change: --window-position=10000,10000  →  --window-position=50,50
-systemctl --user daemon-reload
-systemctl --user restart gv-bridge-chrome
+curl -s http://localhost:9224/json/version
 ```
 
-### 3. Log into Google Voice
-
-Navigate to `voice.google.com` in the Chromium window and sign in with your Google account.
-
-### 4. Grant notification permission
-
-Click the **lock icon** in the Chromium address bar → **Site settings** → **Notifications** → **Allow**
-
-This is required for Google Voice to show incoming call UI in the browser.
-
-### 5. Verify GV settings
-
-In Google Voice settings (gear icon) → **Calls** → **Incoming calls** → **My devices**:
-- Ensure **"Web"** toggle is **ON**
-
-### 6. Move window back off-screen
+### 4. Confirm cookie extraction works end to end
 
 ```bash
-# Edit the service file
-nano ~/.config/systemd/user/gv-bridge-chrome.service
-# Change: --window-position=50,50  →  --window-position=10000,10000
-systemctl --user daemon-reload
-systemctl --user restart gv-bridge-chrome
+curl -s -X POST http://localhost:5004/api/gvbridge/cookies/refresh-from-browser \
+  -H 'Content-Type: application/json' -d '{}'
+# Expected: {"refreshed":true,"cookieCount":<n>}
 ```
 
-### 7. Switch to GVBrowser mode
+Anything else here means SMS and voicemail lists will come back empty and the API will log
+"authenticated client unavailable".
+
+### 5. Verify
 
 ```bash
-curl -X PUT http://localhost:5004/api/gvbridge/adapter/mode \
-  -H 'Content-Type: application/json' -d '{"mode":"GVBrowser"}'
-```
-
-### 8. Verify everything
-
-```bash
-# Check extension connected
 curl -s http://localhost:5004/api/gvbridge/status
-# Expected: {"extensionConnected":true,"extensionVersion":"1.0.0","activeMode":"GVBrowser"}
-
-# Check HT801 registered
 curl -s http://localhost:5004/api/diagnostics/status | python3 -m json.tool
+curl -s http://localhost:5004/api/diagnostics/audio-bridge
+```
+
+### Optional: enable the nightly recycle
+
+Off by default. Enable it if renderer heap growth becomes a problem:
+
+```bash
+systemctl --user enable --now gv-bridge-restart.timer
 ```
 
 ## Configuration
@@ -176,11 +188,20 @@ The GVBridge section (update IPs for your network):
 | Path | Purpose |
 |------|---------|
 | `/opt/rotary-phone/` | Main application |
-| `/opt/rotary-phone/ChromeExtension/` | Extension source (deployed copy) |
-| `~/snap/chromium/common/gv-bridge-profile/Extension/` | Extension (snap-accessible copy) |
-| `~/.config/systemd/user/gv-bridge-chrome.service` | Chromium systemd service |
-| `/etc/chromium/policies/managed/gv-bridge.json` | Chromium notification policies |
-| `~/Desktop/GV-Bridge.desktop` | Desktop shortcut |
+| `~/bin/gv-bridge-ensure.sh` | Launch-if-down. Idempotent; the watchdog runs it every 2 min |
+| `~/bin/gv-bridge-restart.sh` | Nightly recycle — kills, then delegates relaunch to ensure |
+| `~/.config/systemd/user/gv-bridge-watchdog.{service,timer}` | 2-minute liveness check |
+| `~/.config/systemd/user/gv-bridge-restart.{service,timer}` | Nightly 04:00 recycle |
+| `~/.config/autostart/gv-bridge-chrome.desktop` | Runs the ensure script at login |
+| `~/Desktop/GV-Bridge.desktop` | Desktop shortcut (mode 755 — see note below) |
+| `~/.config/gv-bridge-chrome/` | Chrome profile holding the authenticated GV session |
+| `~/.local/state/gv-bridge-restart.log` | Launch / restart log |
+| `/opt/rotary-phone/refresh-gv-cookies.sh` | Cron `*/20` — refreshes cookies, mutes the tab |
+| `/opt/rotary-phone/ChromeExtension/` | Extension source. Passed to Chrome but **not loaded** |
+
+**.desktop files must be mode 755, never 775.** GNOME silently refuses to launch a
+group-writable `.desktop` file, which is exactly why the previously shipped
+`GV-Bridge.desktop` did nothing when clicked.
 
 ## Diagnostics
 
@@ -217,8 +238,12 @@ curl http://localhost:5004/api/diagnostics/timeline
 # RotaryPhone server
 journalctl -u rotary-phone -f
 
-# GV Bridge Chromium
-journalctl --user -u gv-bridge-chrome -f
+# GV bridge watchdog (launch / relaunch events)
+journalctl --user -u gv-bridge-watchdog.service --since '-1h'
+tail -f ~/.local/state/gv-bridge-restart.log
+
+# Timer state
+systemctl --user list-timers 'gv-bridge-*'
 ```
 
 ## Troubleshooting
@@ -229,17 +254,43 @@ journalctl --user -u gv-bridge-chrome -f
 2. **Send test INVITE**: `curl -X POST http://localhost:5004/api/diagnostics/test-ring` and check the SIP log for 100/180/200 responses
 3. **If INVITE times out**: The HT801 may need a factory reset (hidden state blocks incoming SIP). After reset, reconfigure SIP Server, User ID, and registration.
 
-### Extension not connected
+### SMS or voicemail lists are empty
 
-1. Check Chromium is running: `systemctl --user status gv-bridge-chrome`
-2. Check the page loaded: `curl -s http://localhost:9224/json` (CDP port)
-3. Restart: `systemctl --user restart gv-bridge-chrome`
+Almost always the CDP link to the bridge, not the API.
+
+1. Is the bridge running? `pgrep -af 'user-data-dir=/home/mmack/.config/gv-bridge-chrome'`
+2. Is CDP answering? `curl -s http://localhost:9224/json/version`
+3. Does a manual refresh succeed?
+   `curl -s -X POST http://localhost:5004/api/gvbridge/cookies/refresh-from-browser -H 'Content-Type: application/json' -d '{}'`
+4. Has the session expired? Raise the bridge window and check it is still signed in.
+5. Watchdog history: `tail ~/.local/state/gv-bridge-restart.log`
+
+If the browser is up but CDP is silent, it was launched **without**
+`--remote-debugging-port=9224 --remote-allow-origins=*`. Kill it and re-run
+`~/bin/gv-bridge-ensure.sh`, which always supplies both.
+
+### The extension is no longer in the path
+
+Chrome has ignored `--load-extension` since v137. This box runs Chrome 151, and the live
+profile's `Preferences` lists only Chrome's five built-in extensions — the GV Bridge
+extension is absent (verified 2026-08-18).
+
+Calls work regardless. A live test call under exactly that configuration reported
+`inboundFramesSent: 345`, `outboundFramesReceived: 341`, `bidirectionalAudio: true` and
+zero errors, because audio runs on the SIPSorcery DTLS-SRTP path
+(`docs/superpowers/specs/2026-03-27-gv-api-migration-design.md`) rather than the
+extension's tabCapture relay, and answer/hangup go over SIP rather than DOM clicking.
+
+The flag is still passed so the command line matches the process the box runs today, but
+nothing depends on it. Do not write code that assumes the extension is loaded.
 
 ### GV doesn't ring in the browser
 
-1. Verify notification permission is "Allow" (lock icon → Site settings)
-2. In GV Settings → Calls → Incoming calls → "Web" must be ON
-3. The Chromium window does NOT need to be visible — it works off-screen
+This is no longer a meaningful symptom, and chasing it will waste your time.
+Incoming calls are signalled over SIP; the browser is not in the ring path at all,
+so whether Google Voice rings *in the browser* has no bearing on whether the
+rotary phone rings. See [Phone doesn't ring](#phone-doesnt-ring) for the
+troubleshooting that actually applies.
 
 ### After reboot
 
@@ -249,19 +300,21 @@ Both services auto-start, but you may need to:
 
 ## Current Status & Known Limitations
 
-### Working (verified 2026-03-24)
-- **Full incoming call flow**: GV call → extension detects → SIP INVITE → HT801 → phone rings → user answers (200 OK) → InCall → user hangs up (BYE) → Idle
+### Working (call flow verified 2026-03-24; audio + cookie bridge verified 2026-08-18)
+- **Full incoming call flow**: GV call → SIP INVITE → HT801 → phone rings → user answers (200 OK) → InCall → user hangs up (BYE) → Idle
 - **Call state machine**: SIP events are authoritative (not browser extension events). 60-second ringing timeout prevents stuck state.
-- **Incoming call detection**: Content script polls for Answer/Decline/Mute/EndCall buttons every 500ms
+- **Incoming call detection**: signalled over SIP, not by the browser. The extension's
+  500 ms DOM button poll is no longer in the path — the extension is not loaded (see
+  Troubleshooting), yet the 2026-08-18 live call rang and connected normally.
 - **SIP diagnostics**: Real-time message log, INVITE timeout detection, HT801 health, call timeline
+- **Bidirectional call audio**: DTLS-SRTP via SIPSorcery. Live call 2026-08-18 reported `inboundFramesSent: 345`, `outboundFramesReceived: 341`, `bidirectionalAudio: true`, zero errors. This closes the June 13 investigation that recorded `inboundFramesSent: 0`.
+- **SMS + voicemail**: read from Google's HTTP API using cookies scraped from the bridge browser over CDP. Live check 2026-08-18 listed 149 SMS messages and 50 voicemails.
 - **Diagnostics web UI** at `/diagnostics` and REST API
 
 ### Not yet working
-- **Audio bridge**: GVAudioBridgeService is built but not yet tested with live calls (WebSocket PCM ↔ RTP G.711)
 - **BYE handling**: HT801's BYE after a test-ring gets 481 response, leaving the device stuck. Workaround: reboot HT801 after using test-ring.
 - **Auto mode on boot**: Adapter defaults to BluetoothHfp; needs manual switch to GVBrowser after each service restart
 - **Outgoing calls**: Rotary dial → GV not yet implemented
-- **Audio playback to GV caller**: tabCapture capture works, but playback direction (phone mic → GV) is Phase 2
 
 ### HT801 Quirks
 - **Factory reset required** if incoming SIP stops working. Only configure 3 settings: SIP Server, SIP User ID, SIP Registration. Changing other settings (Register Expiration, NOTIFY Auth, etc.) can silently break incoming SIP.

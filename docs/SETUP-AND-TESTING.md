@@ -122,17 +122,24 @@ ssh radio "bash /opt/rotary-phone/deploy/setup-gvbridge.sh"
 ```
 
 This automatically:
-- Creates data directories
-- Creates a separate Chrome profile for the GV Bridge
-- Installs a systemd user service (`gv-bridge-chrome.service`) that runs Chrome with `--load-extension` (no manual extension loading needed)
-- Sets up autostart so Chrome launches GV on boot
-- The GV Chrome runs with `--window-position=10000,10000` so it's off-screen behind the kiosk
+- Creates data directories and a separate Chrome profile for the GV Bridge
+- Installs `gv-bridge-ensure.sh` (launch-if-down) and `gv-bridge-restart.sh` into `~/bin`
+- Installs the systemd **user** units and enables the 2-minute liveness watchdog, which
+  brings the bridge up and keeps it up
+- Sets up autostart so the bridge launches at login
+- Creates a desktop shortcut that runs the ensure script
+
+Full detail, including the CDP checks that prove the bridge is usable, is in
+[SETUP-GVBridge.md](SETUP-GVBridge.md).
+
+Note: `--window-position` is a **no-op under Wayland**, so the window is not off-screen —
+the compositor places it, and stacking order is what keeps it behind the kiosk.
 
 ### First-time Google Voice login (only manual step)
 
 ```bash
-# Start the GV Chrome instance
-ssh radio "systemctl --user start gv-bridge-chrome"
+# Start the GV Chrome instance (idempotent - no-ops if it is already up)
+ssh radio "~/bin/gv-bridge-ensure.sh"
 
 # Find and bring the Chrome window to front to log in
 ssh radio "wmctrl -a Chrome"  # or Alt+Tab on the radio box
@@ -244,12 +251,13 @@ curl -X PUT http://radio:5004/api/gvbridge/adapter/mode \
 
 1. From another phone, call your Google Voice number
 2. **Expected:**
-   - The GV web UI shows the incoming call dialog
-   - The Chrome extension detects it via MutationObserver
-   - `incomingCall` message sent via WebSocket to GVBridgeService
+   - The incoming call is signalled over SIP, not by the browser. The Chrome
+     extension is **not loaded** (Chrome has ignored `--load-extension` since v137;
+     this box runs Chrome 151), so its MutationObserver is not in the path.
    - GVBrowserAdapter fires `OnIncomingCall`
    - CallManager sends SIP INVITE to HT801
    - Rotary phone rings
+   - Audio flows both ways over DTLS-SRTP
 3. Lift the rotary phone handset
 4. **Expected:** Call is answered in the GV web UI
 5. Replace handset — call ends
