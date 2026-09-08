@@ -177,13 +177,23 @@ public class GVBridgeController : ControllerBase
         var cookieSet = extraction.Cookies!;
         var success = await _cookieManager.SetCookiesAsync(cookieSet);
         if (!success)
-            return StatusCode(500, new { error = "Cookies extracted successfully but failed to save/activate. Check server logs." });
+            return StatusCode(502, new
+            {
+                error = "Cookies were extracted from Chrome but Google rejected them — the browser "
+                      + "session is stale. Existing credentials were kept and nothing was overwritten. "
+                      + "Re-login at voice.google.com."
+            });
 
         var sapisidPrefix = cookieSet.Sapisid.Length > 8
             ? cookieSet.Sapisid[..8]
             : cookieSet.Sapisid;
 
-        _logger.LogInformation("CDP cookie refresh: {Count} cookies extracted and activated", extraction.CookieCount);
+        // "extracted and activated" used to be logged for cookies Google had already rejected — the exact
+        // INF line that ran every 20 minutes for two days while the bridge was dead. It now means what it
+        // says: this set passed a live probe before it was persisted.
+        _logger.LogInformation(
+            "CDP cookie refresh: {Count} cookies extracted, validated against Google, and activated",
+            extraction.CookieCount);
 
         return Ok(new RefreshFromBrowserResponse(
             Refreshed: true,

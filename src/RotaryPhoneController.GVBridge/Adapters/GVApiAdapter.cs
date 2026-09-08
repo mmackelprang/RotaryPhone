@@ -792,6 +792,42 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         return healthy;
     }
 
+    /// <summary>
+    /// Adopt an externally-supplied cookie set — the CDP refresh-from-browser endpoint, or a hand-pasted
+    /// set — prove it against Google, and persist it ONLY if it works. Returns false, leaving both the
+    /// in-memory and the on-disk set untouched, when the candidate is rejected.
+    /// </summary>
+    /// <remarks>
+    /// Returns false when the adapter has never activated: there is then no validated set to protect and
+    /// no store to write to, so the caller must use its own cold-start path.
+    /// </remarks>
+    public async Task<bool> TryAdoptAndPersistCookiesAsync(
+        GvCookieSet candidate, string source, CancellationToken ct = default)
+    {
+        if (_cookieStore == null || _cookieSet == null)
+            return false;
+
+        if (!await TryValidateCandidateAsync(candidate, ct))
+        {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Stale;
+            _logger.LogError(
+                "GVApi: REJECTED a cookie set from {Source} — Google refused it. The working on-disk set "
+                + "was NOT overwritten. If the source is the box's Chrome, that session is dead: ACTION: "
+                + "re-login at voice.google.com.", source);
+            return false;
+        }
+
+        var validated = candidate.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+        _cookieSet = validated;
+        await _cookieStore.SaveAsync(validated);
+        _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
+        if (!IsAvailable) SetAvailable(true);
+
+        _logger.LogInformation(
+            "GVApi: adopted and persisted a cookie set from {Source} after it passed a live probe", source);
+        return true;
+    }
+
     public async Task<string> PlaceCallAsync(string e164Number, CancellationToken ct = default)
     {
         if (!IsAvailable)
