@@ -1034,9 +1034,40 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 return true;
             }
 
-            _logger.LogWarning(
-                "GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead — " +
-                "re-login at voice.google.com so the next CDP refresh can pick up a fresh session.");
+            // Which rung failed determines what the operator should DO, and the actions differ. The old
+            // single message asserted "your Chrome login may be dead" for EVERY exhausted ladder,
+            // including runs in which Chrome was never consulted at all. On 2026-09-08 it happened to be
+            // right and was still unearned — the owner confirmed the browser page was authenticated
+            // while the message claimed otherwise. State only what was actually tested.
+            switch (_lastBrowserRefreshOutcome)
+            {
+                case BrowserRefreshOutcome.Stale:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and the BROWSER SESSION IS STALE — Chrome "
+                        + "handed us cookies and Google rejected them. This is TESTED, not inferred. "
+                        + "ACTION: re-login at voice.google.com in the box's Chrome. Stored credentials "
+                        + "were left intact.");
+                    break;
+
+                case BrowserRefreshOutcome.Unreachable:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and CHROME WAS UNREACHABLE on CDP port "
+                        + "{Port} — our own rotation chain lapsed and the browser fallback could not be "
+                        + "tried, so the Google login was never tested. ACTION: confirm Chrome is running "
+                        + "(pgrep -f \"user-data-dir=$HOME/.config/gv-bridge-chrome\") BEFORE touching the "
+                        + "Google login; the session may be perfectly fine.",
+                        _config.ChromeCdpPort);
+                    break;
+
+                default:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and the browser was NEVER CONSULTED (no "
+                        + "CDP extractor wired, or no cookie store). Our rotation chain lapsed and nothing "
+                        + "tested the Google login. ACTION: check the service's CDP wiring and that Chrome "
+                        + "is up on port {Port}; do NOT assume the login is dead.",
+                        _config.ChromeCdpPort);
+                    break;
+            }
             return false;
         }
         catch (Exception ex)

@@ -1,6 +1,8 @@
+using Microsoft.Extensions.Logging;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Auth;
 using RotaryPhoneController.GVBridge.Services;
+using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
@@ -422,5 +424,102 @@ public class GVApiAdapterCookieLineageTests
         Assert.False(adapter.BrowserSessionStale);
 
         File.Delete(path);
+    }
+
+    // ------------- §Task 7: the exhausted-ladder message must only assert what was TESTED
+
+    /// <summary>
+    /// A ladder wired to fail every rung, so the final operator message is the only thing under test.
+    /// The cookie store points at a path that does not exist, which is what makes rung 2 fail.
+    /// </summary>
+    private static (GVApiAdapter Adapter, CapturingLogger<GVApiAdapter> Log) NewExhaustedLadder(
+        ICdpCookieExtractor? extractor, bool wireCookieStore = true)
+    {
+        var log = new CapturingLogger<GVApiAdapter>();
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+            rotator: new GVApiAdapterRecoveryTests.FakeCookieRotator(
+                _ => Task.FromResult(CookieRotationResult.NotRotated)),   // rung 1 fails
+            logger: log);
+
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", GVApiAdapterRecoveryTests.NewCookies());
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+
+        if (wireCookieStore)
+        {
+            var missing = Path.Combine(
+                Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".missing.enc");
+            GVApiAdapterRecoveryTests.SetField(
+                adapter, "_cookieStore", new GvCookieStore(missing, Convert.ToBase64String(new byte[32])));
+        }
+
+        if (extractor != null) adapter.SetCookieExtractor(extractor);
+        return (adapter, log);
+    }
+
+    [Fact]
+    public async Task ExhaustedLadder_StaleBrowserSession_SaysSoAndClaimsItWasTested()
+    {
+        // Chrome answered and Google refused what it handed over. Asserting the login is dead is EARNED
+        // here, and only here.
+        var (adapter, log) = NewExhaustedLadder(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);
+
+        Assert.False(await adapter.TryRecoverAuthAsync("test"));
+
+        var errors = log.AtLevel(LogLevel.Error);
+        Assert.Contains(errors, e => e.Message.Contains("BROWSER SESSION IS STALE"));
+        Assert.Contains(errors, e => e.Message.Contains("TESTED, not inferred"));
+        Assert.Contains(errors, e => e.Message.Contains("re-login at voice.google.com"));
+    }
+
+    [Fact]
+    public async Task ExhaustedLadder_ChromeUnreachable_DoesNotAccuseTheGoogleLogin()
+    {
+        // ⚠ THE POINT OF TASK 7. The old single message told the operator their Google login was
+        // probably dead even on runs where Chrome was never successfully consulted. On 2026-09-08 the
+        // owner confirmed the browser page WAS authenticated while the message claimed otherwise. An
+        // untested assertion sends the operator to re-login when the real fault is a dead Chrome.
+        var (adapter, log) = NewExhaustedLadder(new FakeCdpExtractor(
+            CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "connection refused")));
+
+        Assert.False(await adapter.TryRecoverAuthAsync("test"));
+
+        var errors = log.AtLevel(LogLevel.Error);
+        Assert.Contains(errors, e => e.Message.Contains("CHROME WAS UNREACHABLE"));
+        Assert.Contains(errors, e => e.Message.Contains("never tested"));
+        Assert.Contains(errors, e => e.Message.Contains("the session may be perfectly fine"));
+
+        // ...and it must NOT assert the login is dead.
+        Assert.DoesNotContain(errors, e => e.Message.Contains("BROWSER SESSION IS STALE"));
+    }
+
+    [Fact]
+    public async Task ExhaustedLadder_BrowserNeverConsulted_SaysTheLoginWasNotTested()
+    {
+        // No extractor and no store: rung 3 never ran at all. Nothing whatsoever tested the login.
+        var (adapter, log) = NewExhaustedLadder(extractor: null, wireCookieStore: false);
+
+        Assert.False(await adapter.TryRecoverAuthAsync("test"));
+
+        var errors = log.AtLevel(LogLevel.Error);
+        Assert.Contains(errors, e => e.Message.Contains("NEVER CONSULTED"));
+        Assert.Contains(errors, e => e.Message.Contains("do NOT assume the login is dead"));
+    }
+
+    [Fact]
+    public async Task ExhaustedLadder_LogsAtError_NotWarning()
+    {
+        // An exhausted recovery ladder means the phone is about to be down. That is not a warning, and
+        // on an appliance whose journald is watched by eye the level is what gets it noticed.
+        var (adapter, log) = NewExhaustedLadder(new FakeCdpExtractor(
+            CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "connection refused")));
+
+        await adapter.TryRecoverAuthAsync("test");
+
+        Assert.Contains(log.AtLevel(LogLevel.Error),
+            e => e.Message.Contains("all cookie-recovery rungs failed"));
+        Assert.DoesNotContain(log.AtLevel(LogLevel.Warning),
+            e => e.Message.Contains("all cookie-recovery rungs failed"));
     }
 }
