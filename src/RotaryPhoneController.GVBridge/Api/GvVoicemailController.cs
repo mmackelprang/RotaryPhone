@@ -60,7 +60,13 @@ public class GvVoicemailController : ControllerBase
     [HttpGet("{id}/audio")]
     public async Task<IActionResult> GetAudio(string id, CancellationToken ct = default)
     {
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        // Do not mask an auth/transport failure as "has no recording" — the same rule GetList states
+        // above its own guard. RadioConsole maps 404 from this route to "retrying will not help"
+        // (GvMediaUnavailableException.IsPermanent), so a 404 here tells a guest a recording that
+        // exists is permanently gone. 404 must mean "we looked and it is not there".
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node?.MediaId is null)
             return NotFound(new { error = $"Voicemail {id} has no recording" });
 
