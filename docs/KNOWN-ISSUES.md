@@ -124,6 +124,68 @@ and the HT801 address, in addition to the BT keys above.
 confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
 
 
+## Voicemail routes 404 a recording that exists, during a GV auth blackout (RESOLVED 2026-09-08)
+
+**Status:** ✅ Resolved by the XR-6 PR (`fix/gv-voicemail-blackout-404`).
+**Symptom (was):** During an auth blackout, `GET /api/gvbridge/voicemail/{id}/audio` answered
+**`404 "Voicemail {id} has no recording"`** for a recording that exists and plays fine minutes later.
+`GET /api/gvbridge/voicemail/{id}` and `POST /api/gvbridge/voicemail/{id}/read` had the same defect.
+**Impact (was):** Radio Console's `GvMediaUnavailableException.IsPermanent` maps `NotFound` to
+*"retrying will not help"*, so a guest was told a voicemail was **permanently gone** when it would
+play shortly. A transient condition was reported as a terminal one.
+
+**Root cause — a dropped flag, one layer above the `XR-2` gap.** `GvVoicemailClient` already returns
+`GvVoicemailListResult.Empty(succeeded: false)` when an authenticated list fails, so the information
+was present and correct. `FindNodeAsync` — the private list-and-filter helper the per-id routes share
+— returned only `GvVoicemailNode?` and **threw the `Succeeded` flag away**. A failed list therefore
+produced an empty item set, `FirstOrDefault` yielded `null`, and every caller read that `null` as
+*"not found"* rather than *"not read"*.
+
+`GetList` never had this bug: it guards its own list result and returns 502, under a comment stating
+exactly why — *"Do not mask an auth/transport failure as 'no voicemails' — RadioConsole cannot tell
+the difference from an empty 200."* The defect was that its sibling helper did not carry the same
+flag to the routes that needed it.
+
+**This is the same shape as the `XR-2`/`ShapeIsSane` gap one layer up.** `Succeeded` validates the
+*fetch*; `ShapeIsSane` validates the *shape*; neither validates the *selection*. A filter matching
+zero rows is not an error state in either vocabulary. The remedy is the same in kind both times:
+carry the flag that already knows the difference to the place that decides the status code.
+
+**Fix.** `FindNodeAsync` now returns `(bool Succeeded, GvVoicemailNode? Node)`, which makes the
+compiler enumerate every call site so none can be missed. **All four were reviewed and they do not
+all want the same treatment:**
+
+| Call site | Now | Rationale |
+|---|---|---|
+| `GetItem` | **502** on `!Succeeded` | Same defect, same remedy |
+| `GetAudio` | **502** on `!Succeeded` | The reported bug |
+| `MarkRead` step 2 (pre-write lookup) | **502** on `!Succeeded` | Same defect; 404s before any write is attempted |
+| `MarkRead` step 5 (post-write re-read) | **deliberately still 200** | ⚠️ The write to Google **already succeeded**. A 502 here would tell Radio Console a real state change did not happen, and they would reconcile away a change that is real — a worse lie than a marginally stale DTO. The `with { IsRead = … }` already carries the applied truth. **This is the one call site where `!Succeeded` must NOT become a 502**; it has a pinning test and an in-source comment so it is not "fixed" later. |
+
+**Resulting contract:** `502` = *"we could not look."* `404` = *"we looked and it is not there."*
+
+**Tests.** Each route is covered by a **pair** — one proving a failed list becomes 502, its twin
+proving a successful list that lacks the id is **still 404**. The pair is load-bearing: a fix that
+turned every miss into a 502 would pass the failure half alone and silently break the 404 semantics
+Radio Console depends on.
+
+**Severity note.** Radio Console's original report put this at *"~45% of the time / ~9 minutes in
+every 20"*. That figure predates PR #72, which added recover-and-retry on 401/403 at the shared read
+path, and **should not be repeated** — the blackout window is now far narrower, so this was a rare
+lie rather than a frequent one by the time it was fixed. It was still a real correctness bug.
+
+**Still open, deliberately out of scope:** the surviving 404 on `GetAudio` conflates *"no such
+voicemail"* with *"found, but no media"*. Splitting them would change a response body Radio Console
+matches on, so it was raised with them for a decision rather than changed unilaterally. See
+`docs/handoffs/radioconsole-gv-voicemail-blackout-404-reply.md`.
+
+**Provenance.** Found by Radio Console by reading our source, filed as their punch-list `XR-6` on
+2026-09-03, and **never sent to us** through the boundary doc's inbound lane — so it sat unknown on
+our side while five already-fixed items stayed open on theirs. See the reply above for the delivery
+gap that caused it.
+
+---
+
 ## GV SMS/voicemail 502s in a repeating ~9-minute dead window (RESOLVED 2026-08-01)
 
 **Status:** ✅ Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`), merged 2026-08-01.
