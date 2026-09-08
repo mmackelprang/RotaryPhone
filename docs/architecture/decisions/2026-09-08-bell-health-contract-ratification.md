@@ -19,6 +19,25 @@
 > `775f19f`, `494e85a`, `915fcf9` — every one of them an ancestor of `main`. It is **running in
 > production right now** (§2). `XR-5` is a **record correction on their side, not a build on ours.**
 
+> **Implementation note — 2026-09-08, Builder.** Both build items are now **merged**: §4.4 (converge REST
+> onto the probe cache) and §9.2 (persist `BellFailureTracker`). §9.2 was **not** authorized by §4.4 —
+> that paragraph says §4.4 is "the only build item this ADR authorizes" — it is the **owner's decision
+> on §9.2**, taken the same day, and it is recorded here so the reversal of plan **D5** has a decision
+> record rather than only a code comment. The owner chose to make the delivered reply's §5 claim
+> ("survives a service restart") true rather than retract it. Mechanism: a JSON file at
+> `data/bell-failure-state.json` with an atomic temp-plus-rename write, following the
+> `HT801ConfigService` precedent; `data/` is excluded from the deploy (`deploy/Deploy-ToLinux.ps1:90`),
+> which is what makes "survives a deploy" a fact.
+>
+> **One measured correction to §4.4.** The cold-start window is **not** "up to 30 s". The monitor loop
+> calls `StartHt801ProbeIfDue()` on its **first** iteration and `_ht801NextProbeUtc` starts at
+> `DateTime.MinValue`, so the first probe fires at start-up. Measured on a dev box with no HT801
+> present: **~3.4 s**, of which 3 s was the ICMP timeout — on the appliance, where the ping answers in
+> ~3 ms, it is milliseconds. There is one genuinely unbounded case the ADR did not anticipate: if no
+> address resolves at all, `ProbeHt801Async` returns without touching the cache and the fields stay
+> null for the process lifetime. That makes §9.1's notification to RadioConsole easier than expected —
+> the `Unknown` pill at boot is a blink, not half a minute.
+
 ---
 
 ## 1. Context
@@ -315,9 +334,25 @@ where a ~5 s window remains and their §7f handling (record the sticky note, no 
 
 1. **The §4.4 convergence has a visible cold-start change on RadioConsole's screen** (`Unknown` pill at
    boot instead of a fast `true`). It needs no code from them, but they should get to weigh it.
+   **→ STILL OPEN as a notification.** §4.4 has shipped, so the change is live; the measured window is
+   milliseconds on the appliance rather than the 30 s assumed above (see the implementation note at the
+   top), which makes this smaller than it looked. **One item the ADR did not flag and they must be told
+   about: `ht801IpAddress` is now nullable over REST.** It previously always carried a string, because
+   the configured value defaults to `""`. Their §7m rule already covers null `Ht801Reachable`; it does
+   not obviously cover a null address.
 2. **§7.4 — `acknowledged` does not survive a service restart**, contradicting the delivered reply and
    leaving their Q4 concern open. Persisting the tracker is a small change but a **behavioural promise**
    to another team; the owner should decide whether to persist it or to correct the promise.
+   **→ DECIDED and SHIPPED: persist.** See the implementation note at the top. Verified end-to-end
+   against a running server, not only in tests: a real bell failure was driven through the detection
+   path, acknowledged, the process `pkill`ed, and the note came back with `acknowledged: true` and every
+   field byte-identical.
+   **⚠ A THIRD instance of the same failure class was found while testing this and is still open.** The
+   delivered reply §5 also promises that acking an *already-acked or absent* failure returns
+   `200 {"acknowledged": true}`, and invites clients to "retry freely on a flaky network". The code
+   returns `{"acknowledged": false}` — confirmed live in both cases. It is pre-existing and untouched by
+   this work, but changing a response body RadioConsole consumes needs the owner, so it was deliberately
+   not fixed here.
 3. **§5 — unifying `CallStateChanged`** is a coordinated cross-repo breaking deploy. Not schedulable
    from this side alone.
 
