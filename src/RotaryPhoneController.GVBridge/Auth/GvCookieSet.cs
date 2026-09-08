@@ -101,6 +101,65 @@ public sealed class GvCookieSet
         => CopyWith(RawCookieHeader, PsidtsMintedAtUtc, validatedAtUtc);
 
     /// <summary>
+    /// Return this set carrying <paramref name="mintedAtUtc"/> as its PSIDTS mint time.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Only legitimate for CARRYING FORWARD a mint time already known for THESE PSIDTS values — see
+    /// <see cref="CarriesTheSamePsidtsAs"/>. A mint is stamped by <see cref="WithRefreshedPsidts"/> and
+    /// nowhere else, because a successful <c>RotateCookies</c> IS the mint; inventing one here for
+    /// values we did not mint would recreate the dishonesty this whole lineage exists to remove.
+    /// </remarks>
+    internal GvCookieSet WithPsidtsMintedAt(DateTime? mintedAtUtc)
+        => CopyWith(RawCookieHeader, mintedAtUtc, BrowserSessionValidatedAtUtc);
+
+    /// <summary>
+    /// The rotating freshness cookie values this set would actually put on the wire.
+    /// </summary>
+    /// <remarks>
+    /// Read from the RENDERED header, not from the typed fields: the PSIDTS values live only inside
+    /// <see cref="RawCookieHeader"/> (<see cref="Secure1Psid"/> is the long-lived PSID, a different
+    /// cookie). A set with no raw header has no PSIDTS at all, and both values are null.
+    /// </remarks>
+    internal (string? Psidts1, string? Psidts3) RotatingPsidts()
+    {
+        var header = ToCookieHeader();
+        return (ReadCookie(header, "__Secure-1PSIDTS"), ReadCookie(header, "__Secure-3PSIDTS"));
+    }
+
+    /// <summary>
+    /// Whether <paramref name="other"/> carries exactly the same rotating PSIDTS as this set — i.e. it
+    /// is the SAME credential, however it reached us, and a mint time known for one is true of the other.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A set carrying NO PSIDTS never matches, even against another that carries none. There is then
+    /// no rotating credential for a mint time to describe, and "unknown" is the honest answer — which
+    /// <see cref="GVApiAdapter.ComputeFirstRefreshDelayMs"/> deliberately treats as "refresh at the
+    /// floor" rather than as "brand new".
+    /// </remarks>
+    internal bool CarriesTheSamePsidtsAs(GvCookieSet other)
+    {
+        var (mine1, mine3) = RotatingPsidts();
+        if (mine1 is null && mine3 is null) return false;
+
+        var (theirs1, theirs3) = other.RotatingPsidts();
+        return string.Equals(mine1, theirs1, StringComparison.Ordinal)
+            && string.Equals(mine3, theirs3, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Read the value of <paramref name="name"/> out of a "name=value; name2=value2" cookie header, or
+    /// null if absent. Token-boundary matched, the same way <see cref="SpliceCookie"/> writes, so
+    /// "__Secure-1PSIDTS" does not collide with "__Secure-1PSID".
+    /// </summary>
+    internal static string? ReadCookie(string header, string name)
+    {
+        if (string.IsNullOrEmpty(header)) return null;
+
+        var match = Regex.Match(header, $@"(?:^|;\s*){Regex.Escape(name)}=([^;]*)");
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>
     /// The ONLY place this type is copied. Every property must appear here exactly once.
     /// </summary>
     /// <remarks>

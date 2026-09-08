@@ -874,6 +874,9 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         // may swap the cookie set — or write one to disk — until we have finished deciding.
         using var gate = await LockCookieMutationsAsync(ct);
 
+        // Captured BEFORE the validation, which publishes the candidate into _cookieSet.
+        var previous = _cookieSet;
+
         if (!await TryValidateCandidateAsync(candidate, ct))
         {
             _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Stale;
@@ -884,7 +887,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             return false;
         }
 
-        var validated = candidate.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+        var validated = StampAdoptedCandidate(candidate, previous, source);
         _cookieSet = validated;
         await _cookieStore.SaveAsync(validated);
         _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
@@ -893,6 +896,45 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _logger.LogInformation(
             "GVApi: adopted and persisted a cookie set from {Source} after it passed a live probe", source);
         return true;
+    }
+
+    /// <summary>
+    /// Stamp a candidate that has just passed a live probe, ready to be adopted and persisted: record
+    /// the browser-session validation, and CARRY FORWARD the mint time of the set we already hold when
+    /// the candidate puts the very same rotating PSIDTS on the wire.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ WITHOUT THE CARRY-FORWARD, EVERY SUCCESSFUL CRON FIRE WIPES <c>psidtsMintedAtUtc</c> — the
+    /// headline diagnostic of this whole change. A CDP-extracted set has <c>PsidtsMintedAtUtc == null</c>
+    /// (Chrome's jar carries no readable issue time), and <c>WithBrowserSessionValidatedAt</c> faithfully
+    /// preserves that null. So the 20-minute cron erased the mint time from memory AND disk,
+    /// <see cref="TryRotateCookiesAsync"/> re-stamped it 8 minutes later, and the next cron erased it
+    /// again — a consumer would watch the new field flap to null on a perfectly healthy box, and every
+    /// restart landing in that window would pay an extra RotateCookies at the 5 s floor. The plan
+    /// approved that extra rotation as costing one per activation ONCE; as built it recurred for ever.
+    /// <para>
+    /// The carry-forward is only ever applied when the PSIDTS values are IDENTICAL, so the timestamp
+    /// still describes the exact credential it is attached to — this is recovering a known fact about
+    /// unchanged values, not inventing one. If the candidate's PSIDTS genuinely differs, Chrome minted
+    /// it at a time we cannot read and <c>null</c> is the honest answer; it is kept.
+    /// </para>
+    /// </remarks>
+    private GvCookieSet StampAdoptedCandidate(GvCookieSet candidate, GvCookieSet? previous, string source)
+    {
+        var stamped = candidate.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+
+        // A candidate that already knows its own mint time is never overwritten.
+        if (stamped.PsidtsMintedAtUtc is not null) return stamped;
+
+        if (previous?.PsidtsMintedAtUtc is { } inherited && previous.CarriesTheSamePsidtsAs(candidate))
+        {
+            _logger.LogDebug(
+                "GVApi: carrying the PSIDTS mint time {Minted:o} forward onto the set from {Source} — its "
+                + "rotating cookies are byte-identical, so it is the same credential.", inherited, source);
+            return stamped.WithPsidtsMintedAt(inherited);
+        }
+
+        return stamped;
     }
 
     /// <summary>
@@ -1314,6 +1356,9 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             // holding the gate across it would block rotations for the extraction's duration too.
             using var gate = await LockCookieMutationsAsync();
 
+            // Captured BEFORE the validation, which publishes the candidate into _cookieSet.
+            var previous = _cookieSet;
+
             // VALIDATE BEFORE PERSISTING. A signed-out Chrome hands back a full, well-formed, completely
             // dead cookie set; persisting that first destroys the last known-good copy on disk.
             if (!await TryValidateCandidateAsync(result.Cookies))
@@ -1332,7 +1377,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             // Proven. Stamp the browser-session validation and persist — in that order.
             // No SwapAuthenticatedClients needed: GvHttpClientHandler resolves _cookieSet through a
             // closure on every request, and the stamp changes no wire-visible cookie.
-            var validated = result.Cookies.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+            var validated = StampAdoptedCandidate(result.Cookies, previous, "cdp");
             _cookieSet = validated;
             await _cookieStore.SaveAsync(validated);
 

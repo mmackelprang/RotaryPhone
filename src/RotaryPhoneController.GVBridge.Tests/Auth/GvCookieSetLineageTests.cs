@@ -65,6 +65,82 @@ public class GvCookieSetLineageTests
         Assert.Equal("SAPISID=s", stamped.RawCookieHeader);
     }
 
+    // ------------- reading the rotating PSIDTS back off the wire, for the mint-time carry-forward
+
+    private static GvCookieSet WithHeader(string raw) => new()
+    {
+        Sapisid = "s", Sid = "sid", Hsid = "h", Ssid = "ss", Apisid = "a", RawCookieHeader = raw,
+    };
+
+    [Theory]
+    // The collision that matters: __Secure-1PSID is a DIFFERENT, long-lived cookie, and it is a strict
+    // prefix of __Secure-1PSIDTS. Reading either must never return the other, in either order.
+    [InlineData("__Secure-1PSID=long; __Secure-1PSIDTS=short", "__Secure-1PSID", "long")]
+    [InlineData("__Secure-1PSID=long; __Secure-1PSIDTS=short", "__Secure-1PSIDTS", "short")]
+    [InlineData("__Secure-1PSIDTS=short; __Secure-1PSID=long", "__Secure-1PSID", "long")]
+    [InlineData("__Secure-1PSIDTS=short; __Secure-1PSID=long", "__Secure-1PSIDTS", "short")]
+    [InlineData("SAPISID=s;__Secure-3PSIDTS=v3", "__Secure-3PSIDTS", "v3")]      // no space after ';'
+    [InlineData("SAPISID=s", "__Secure-1PSIDTS", null)]                          // absent
+    [InlineData("", "__Secure-1PSIDTS", null)]                                   // empty header
+    public void ReadCookie_MatchesAtATokenBoundary(string header, string name, string? expected)
+    {
+        Assert.Equal(expected, GvCookieSet.ReadCookie(header, name));
+    }
+
+    [Fact]
+    public void RotatingPsidts_ReadsFromTheRenderedHeader_NotTheTypedFields()
+    {
+        // The PSIDTS live ONLY inside RawCookieHeader. Secure1Psid is the long-lived PSID and must not
+        // be mistaken for one.
+        var set = new GvCookieSet
+        {
+            Sapisid = "s", Sid = "sid", Hsid = "h", Ssid = "ss", Apisid = "a",
+            Secure1Psid = "the-long-lived-psid",
+            RawCookieHeader = "SAPISID=s; __Secure-1PSID=the-long-lived-psid; "
+                            + "__Secure-1PSIDTS=v1; __Secure-3PSIDTS=v3",
+        };
+
+        Assert.Equal(("v1", "v3"), set.RotatingPsidts());
+
+        // A set with no raw header carries no PSIDTS at all, however many typed fields it has.
+        var typedOnly = new GvCookieSet
+        {
+            Sapisid = "s", Sid = "sid", Hsid = "h", Ssid = "ss", Apisid = "a",
+            Secure1Psid = "p1", Secure3Psid = "p3",
+        };
+        Assert.Equal((null, null), typedOnly.RotatingPsidts());
+    }
+
+    [Fact]
+    public void CarriesTheSamePsidtsAs_IsTrueOnlyForByteIdenticalRotatingCookies()
+    {
+        var held = WithHeader("SAPISID=s; __Secure-1PSIDTS=v1; __Secure-3PSIDTS=v3");
+
+        // Same values, different surrounding cookies and different order — still the same credential.
+        Assert.True(held.CarriesTheSamePsidtsAs(
+            WithHeader("NID=other; __Secure-3PSIDTS=v3; SAPISID=s; __Secure-1PSIDTS=v1")));
+
+        // One value rotated: a different credential, minted at a time we cannot read.
+        Assert.False(held.CarriesTheSamePsidtsAs(
+            WithHeader("SAPISID=s; __Secure-1PSIDTS=v1-NEW; __Secure-3PSIDTS=v3")));
+
+        // Partner missing entirely is also a difference, not a match.
+        Assert.False(held.CarriesTheSamePsidtsAs(WithHeader("SAPISID=s; __Secure-1PSIDTS=v1")));
+    }
+
+    [Fact]
+    public void CarriesTheSamePsidtsAs_IsFalseWhenNeitherSetHasAnyPsidts()
+    {
+        // ⚠ Vacuously "unchanged" must NOT count as a match: with no rotating credential present there
+        // is nothing for a mint time to describe, and carrying one forward would be an invented fact.
+        // Unknown then flows through to ComputeFirstRefreshDelayMs, which treats it as "refresh at the
+        // floor" rather than "brand new" — the conservative direction, deliberately.
+        var a = WithHeader("SAPISID=s; SID=sid");
+        var b = WithHeader("SAPISID=s; SID=sid");
+
+        Assert.False(a.CarriesTheSamePsidtsAs(b));
+    }
+
     [Fact]
     public void CopyWith_CoversEveryProperty()
     {

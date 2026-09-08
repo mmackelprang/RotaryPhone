@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Auth;
+using RotaryPhoneController.GVBridge.Models;
 using RotaryPhoneController.GVBridge.Services;
 using RotaryPhoneController.GVBridge.Tests.Support;
 using Xunit;
@@ -315,6 +316,119 @@ public class GVApiAdapterCookieLineageTests
         // Untouched: still ~300 s, not reset to 0 and not made null.
         Assert.NotNull(adapter.PsidtsAgeSeconds);
         Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 295, 310);
+
+        File.Delete(path);
+    }
+
+    // ------------- the 20-minute cron must not WIPE psidtsMintedAtUtc, the headline diagnostic
+    //
+    // A CDP-extracted set has PsidtsMintedAtUtc == null — Chrome's jar carries no readable issue time —
+    // and WithBrowserSessionValidatedAt faithfully preserves that null. So every successful cron fire
+    // erased the mint time from memory AND disk; TryRotateCookiesAsync re-stamped it 8 minutes later;
+    // the next cron erased it again. A consumer would watch the new field flap to null on a healthy box,
+    // and every restart landing in that window would pay an extra RotateCookies at the 5 s floor —
+    // recurring for ever, where the plan approved it as costing one rotation per activation ONCE.
+
+    /// <summary>
+    /// An adapter holding <paramref name="held"/>, wired to accept any candidate.
+    /// </summary>
+    private static (GVApiAdapter Adapter, GvCookieStore Store, string Path) NewAdoptingAdapter(
+        GvCookieSet held, GVBridgeConfig? config = null)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        store.SaveAsync(held).GetAwaiter().GetResult();
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(config: config);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", held);
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+        return (adapter, store, path);
+    }
+
+    /// <summary>A browser-shaped set: a full raw header, and NO mint time — Chrome cannot supply one.</summary>
+    private static GvCookieSet FromChrome(string rawCookieHeader) => new()
+    {
+        Sapisid = "SAPISID-GOOD", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
+        RawCookieHeader = rawCookieHeader,
+    };
+
+    [Fact]
+    public async Task CronAdoption_WhenThePsidtsIsUnchanged_CarriesTheMintTimeForward()
+    {
+        var minted = DateTime.UtcNow.AddMinutes(-1);
+        var held = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD")
+            .WithRefreshedPsidts("psidts-1", "psidts-3", minted);
+
+        var (adapter, store, path) = NewAdoptingAdapter(
+            held, GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 8));
+        using var _ = adapter;
+
+        // Chrome hands back the very same rotating cookies — the normal case, since PSIDTS rotates every
+        // ~11 minutes and the cron runs every 20 with an 8-minute proactive rotation in between.
+        Assert.True(await adapter.TryAdoptAndPersistCookiesAsync(
+            FromChrome(held.RawCookieHeader!), "refresh-from-browser"));
+
+        // THE assertion. Without the carry-forward both of these are null after every cron fire.
+        Assert.NotNull(adapter.PsidtsMintedAtUtc);
+        Assert.Equal(minted, adapter.PsidtsMintedAtUtc!.Value);
+
+        var onDisk = await store.LoadAsync();
+        Assert.Equal(minted, onDisk!.PsidtsMintedAtUtc);
+
+        // ...and the consequence the plan actually cared about: a restart in this window still schedules
+        // from the credential's real age instead of falling back to the 5 s floor and paying an extra
+        // RotateCookies on every activation for ever.
+        GVApiAdapterRecoveryTests.Invoke(adapter, "StartPeriodicTimers");
+        Assert.InRange(adapter.LastFirstRefreshDelayMs!.Value, 410_000, 425_000);   // ~7 min, not 5 s
+        Assert.NotEqual(GVApiAdapter.MinFirstRefreshDelayMs, adapter.LastFirstRefreshDelayMs!.Value);
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task CronAdoption_WhenThePsidtsGenuinelyDiffers_LeavesTheMintTimeUnknown()
+    {
+        // The honesty half. A different PSIDTS was minted by Google at a moment we cannot read, so null
+        // is the only true answer — and null routes to the 5 s floor, which is the safe direction.
+        var held = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD")
+            .WithRefreshedPsidts("psidts-1", "psidts-3", DateTime.UtcNow.AddMinutes(-1));
+
+        var (adapter, store, path) = NewAdoptingAdapter(held);
+        using var _ = adapter;
+
+        var rotatedByGoogle = GvCookieSet.SpliceCookie(
+            held.RawCookieHeader!, "__Secure-1PSIDTS", "psidts-1-BRAND-NEW");
+
+        Assert.True(await adapter.TryAdoptAndPersistCookiesAsync(
+            FromChrome(rotatedByGoogle), "refresh-from-browser"));
+
+        Assert.Null(adapter.PsidtsMintedAtUtc);
+        var onDisk = await store.LoadAsync();
+        Assert.Null(onDisk!.PsidtsMintedAtUtc);
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task CdpRecoveryRung_AlsoCarriesTheMintTimeForward()
+    {
+        // Both adoption paths took the candidate verbatim, so both wiped it. Rung 3 is the other one.
+        var minted = DateTime.UtcNow.AddMinutes(-2);
+        var held = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD")
+            .WithRefreshedPsidts("psidts-1", "psidts-3", minted);
+
+        var (adapter, store, path) = NewAdoptingAdapter(held);
+        using var _ = adapter;
+        adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, FromChrome(held.RawCookieHeader!), 20, null)));
+
+        Assert.True(await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!);
+
+        Assert.Equal(minted, adapter.PsidtsMintedAtUtc);
+        var onDisk = await store.LoadAsync();
+        Assert.Equal(minted, onDisk!.PsidtsMintedAtUtc);
 
         File.Delete(path);
     }
