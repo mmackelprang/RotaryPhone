@@ -850,11 +850,39 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _cookieSet = validated;
         await _cookieStore.SaveAsync(validated);
         _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
-        if (!IsAvailable) SetAvailable(true);
+        MarkAvailableIfTransportExists(source);
 
         _logger.LogInformation(
             "GVApi: adopted and persisted a cookie set from {Source} after it passed a live probe", source);
         return true;
+    }
+
+    /// <summary>
+    /// Mark the adapter available after a successful adoption — but ONLY if a SIP transport actually
+    /// exists to carry calls.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ AVAILABILITY REQUIRES A TRANSPORT, NOT JUST CREDENTIALS. <see cref="ActivateCoreAsync"/> can
+    /// exit at step 4 (<c>SetAvailable(false); return;</c>) with a dead PSIDTS, leaving
+    /// <c>_cookieSet</c> and <c>_cookieStore</c> set but <c>_sipTransport</c> null and both timers
+    /// unarmed. If the cron's adoption then claimed availability, status would read
+    /// <c>available:true, cookiesValid:true, sipRegistered:false</c> for ever: SMS and voicemail would
+    /// recover while <see cref="PlaceCallAsync"/> kept dereferencing a null <c>_sipTransport!</c>.
+    /// Refusing the claim is what keeps that dead end VISIBLE, so the caller re-activates instead of
+    /// believing it is done.
+    /// </remarks>
+    private void MarkAvailableIfTransportExists(string source)
+    {
+        if (_sipTransport == null)
+        {
+            _logger.LogWarning(
+                "GVApi: adopted a validated cookie set from {Source}, but there is NO SIP transport — "
+                + "NOT marking the adapter available. Credentials are good; calls cannot be placed "
+                + "until the adapter re-activates and rebuilds the transport.", source);
+            return;
+        }
+
+        if (!IsAvailable) SetAvailable(true);
     }
 
     public async Task<string> PlaceCallAsync(string e164Number, CancellationToken ct = default)

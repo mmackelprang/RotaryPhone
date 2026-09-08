@@ -96,8 +96,45 @@ public class GvCookieManager : IGvCookieManager
         _logger.LogWarning(
           "Rejected an incoming cookie set: it failed a live health probe. Existing credentials kept, "
           + "{Path} not overwritten.", _config.CookieFilePath);
+        return false;
       }
-      return adopted;
+
+      // ⚠ THE STRANDED-ADAPTER RECOVERY. Adopting credentials is not the same as having a working
+      // adapter, and this hot path never calls SwitchModeAsync — so on its own it can never rebuild
+      // anything. The state that makes that fatal is reachable and is the incident's OWN recovery
+      // path: a restart holding a dead PSIDTS makes ActivateCoreAsync fail its probe at step 4 and
+      // return, leaving _cookieSet and _cookieStore set but NO SIP transport and NO timers. The
+      // operator then re-logs into Chrome, the 20-minute cron POSTs refresh-from-browser, this branch
+      // adopts the good cookies — and without the re-activation below every later cron fire repeats
+      // exactly that and changes nothing. SMS and voicemail recover; CALLS NEVER DO.
+      //
+      // Gated on IsSipRegistered rather than on IsAvailable: a live, registered transport must not be
+      // churned on the cron's cadence (that is the F6/F7 regression), while an absent or unregistered
+      // one is precisely what needs rebuilding. The set on disk has already passed a live probe at
+      // this point, so re-activation is loading a set we just proved.
+      if (!_adapter.IsSipRegistered)
+      {
+        try
+        {
+          _logger.LogInformation(
+            "Adopted new cookies but SIP is not registered — re-activating the GV adapter to rebuild "
+            + "the transport and re-arm the periodic timers.");
+          await _registry.SwitchModeAsync(CallAdapterMode.GVApi, ct);
+        }
+        catch (Exception ex)
+        {
+          // A failed re-activation must NOT be reported as a failed refresh: the cookies were proven
+          // against Google and are safely on disk, which is what this endpoint was asked to do. Losing
+          // that distinction would send the operator to re-login at voice.google.com for a fault that
+          // has nothing to do with their Google session.
+          _logger.LogError(ex,
+            "Cookies were validated and persisted, but re-activating the GV adapter failed. SMS and "
+            + "voicemail should work; CALLS WILL NOT until the adapter activates. ACTION: check the "
+            + "service log above this line, then GET /api/gvbridge/status.");
+        }
+      }
+
+      return true;
     }
 
     // COLD PATH — no validated credentials exist to protect (first boot, or the adapter never activated).
