@@ -1277,6 +1277,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                         _config.ChromeCdpPort);
                     break;
 
+                case BrowserRefreshOutcome.TornDown:
+                    // Logged at WARNING, deliberately breaking this switch's Error convention: an
+                    // exhausted ladder normally means the phone is about to be down, but a ladder
+                    // abandoned because the service was stopping means nothing is wrong. Raising it to
+                    // Error would train the operator to ignore the level that matters.
+                    _logger.LogWarning(
+                        "GVApi: cookie recovery was ABANDONED because the adapter was torn down "
+                        + "mid-ladder — it did not fail. Neither Chrome nor the Google login was "
+                        + "tested. No action needed if the service was stopping.");
+                    break;
+
                 default:
                     _logger.LogError(
                         "GVApi: all cookie-recovery rungs failed and the browser was NEVER CONSULTED (no "
@@ -1331,7 +1342,13 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         => MarkAvailable(rung, refuseWithoutTransport: false);
 
     /// <summary>Why the last browser (CDP) refresh attempt ended the way it did. Feeds status + alarms.</summary>
-    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded }
+    /// <remarks>
+    /// <c>TornDown</c> is NOT a variety of <c>NotAttempted</c> and must not be folded into it: the
+    /// operator action differs. <c>NotAttempted</c> sends them to check the CDP wiring, and
+    /// <c>Unreachable</c> sends them to check whether Chrome is running — both are wrong, and one of
+    /// them alarming, when the real answer is that the service was shutting down.
+    /// </remarks>
+    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded, TornDown }
 
     private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
 
@@ -1527,6 +1544,21 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 "GVApi: CDP cookie refresh validated against Google and persisted ({Count} cookies)",
                 result.CookieCount);
             return true;
+        }
+        catch (ObjectDisposedException ex)
+        {
+            // ⚠ NOT "Chrome unreachable", which is what the general catch below would have called this.
+            // LockCookieMutationsAsync sits inside this try, and Dispose() disposes _cookieMutationGate
+            // while a rung may still be running — so a service teardown surfaces here as an
+            // ObjectDisposedException from WaitAsync. Reporting that as Unreachable sends the operator
+            // to check whether Chrome is running, for a fault that has nothing to do with Chrome and
+            // needs no action at all. Nothing here tested the Google login OR the browser.
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.TornDown;
+            _logger.LogWarning(ex,
+                "GVApi: CDP cookie refresh abandoned — the adapter was torn down mid-rung. Chrome was "
+                + "NOT found unreachable and the Google login was NOT tested. No action needed if the "
+                + "service was stopping.");
+            return false;
         }
         catch (Exception ex)
         {

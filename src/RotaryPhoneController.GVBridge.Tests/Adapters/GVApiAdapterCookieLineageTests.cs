@@ -819,6 +819,45 @@ public class GVApiAdapterCookieLineageTests
         Assert.Contains(errors, e => e.Message.Contains("do NOT assume the login is dead"));
     }
 
+    /// <summary>An extractor whose own disposed dependency surfaces the way a teardown really does.</summary>
+    private sealed class ThrowingCdpExtractor(Exception toThrow) : ICdpCookieExtractor
+    {
+        public Task<CdpExtractionResult> ExtractAsync(
+            int cdpPort, string targetUrl, CancellationToken ct = default) => throw toThrow;
+    }
+
+    [Fact]
+    public async Task ExhaustedLadder_AdapterTornDownMidRung_DoesNotSendTheOperatorAfterChrome()
+    {
+        // ⛔ LOW-3. Every ObjectDisposedException raised inside TryCdpRefreshAsync used to land in the
+        // general catch and be recorded as Unreachable — so a SERVICE TEARDOWN told the operator that
+        // CHROME WAS UNREACHABLE and to go check whether the browser was running. Same unearned-
+        // assertion class the rest of this PR exists to remove: nothing there tested Chrome at all.
+        //
+        // Two things raise it. This test drives the deterministic one (the extractor's own disposed
+        // HttpClient/WebSocket). The other is LockCookieMutationsAsync: Dispose() disposes
+        // _cookieMutationGate while a rung may still be running, and that acquisition sits inside the
+        // same try. It is not driven here because it is unreachable in isolation — rung 2 takes the
+        // very same gate first (ReloadCookiesAsync's opening statement), so a gate disposed before the
+        // ladder starts throws out of rung 2 instead. Reaching rung 3's acquisition needs the disposal
+        // to land in the window between the two, which a test cannot pin deterministically.
+        var (adapter, log) = NewExhaustedLadder(
+            new ThrowingCdpExtractor(new ObjectDisposedException(nameof(SemaphoreSlim))));
+
+        Assert.False(await adapter.TryRecoverAuthAsync("test"));
+
+        var said = log.AtLevel(LogLevel.Error).Concat(log.AtLevel(LogLevel.Warning)).ToList();
+
+        // It says what actually happened...
+        Assert.Contains(said, e => e.Message.Contains("torn down"));
+
+        // ...and asserts NONE of the three things it did not test. "Unreachable" is the regression;
+        // the other two would be equally unearned.
+        Assert.DoesNotContain(said, e => e.Message.Contains("CHROME WAS UNREACHABLE"));
+        Assert.DoesNotContain(said, e => e.Message.Contains("BROWSER SESSION IS STALE"));
+        Assert.DoesNotContain(said, e => e.Message.Contains("NEVER CONSULTED"));
+    }
+
     [Fact]
     public async Task ExhaustedLadder_LogsAtError_NotWarning()
     {
