@@ -492,10 +492,15 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _logger.LogWarning(ex, "GVApi: SIP registration failed — will retry on first call");
         }
 
-        // 7. Start the periodic timers (health watchdog + proactive PSIDTS refresh)
+        // 7. Mark available BEFORE arming the timers. The proactive refresh bails on !IsAvailable and
+        // then waits a full period, so a short first due time firing into an adapter that is not yet
+        // marked available would silently cost an entire interval — the same failure mode as the
+        // dueTime==period bug. Ordering, not the 5 s floor, is what makes that unreachable.
+        SetAvailable(true);
+
+        // 8. Start the periodic timers (health watchdog + proactive PSIDTS refresh).
         StartPeriodicTimers();
 
-        SetAvailable(true);
         _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
     }
 
@@ -1145,6 +1150,60 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     }
 
     /// <summary>
+    /// Floor for the first proactive refresh delay. Never zero, and the reason is subtle:
+    /// <see cref="RunProactiveCookieRefreshAsync"/> bails on <c>!IsAvailable</c> and then waits a FULL
+    /// period for its next tick. So a tick that fires before activation finishes is not merely wasted —
+    /// it is SKIPPED, and the next one is an interval away. That is the same "miss it and wait a whole
+    /// period" shape as the bug this method exists to fix.
+    /// </summary>
+    internal const int MinFirstRefreshDelayMs = 5_000;
+
+    /// <summary>
+    /// Test seam: the due time (ms) handed to the most recently created refresh timer.
+    /// <see cref="System.Threading.Timer"/> exposes no readable due time, so this is the only way a test
+    /// can assert the scheduling decision without waiting out a real interval.
+    /// </summary>
+    internal int? LastFirstRefreshDelayMs { get; private set; }
+
+    /// <summary>
+    /// Delay (ms) until the FIRST proactive PSIDTS refresh of this activation.
+    /// </summary>
+    /// <remarks>
+    /// A long-running process keeps its timer and its credential locked together — every rotation resets
+    /// the timer and mints in the same instant — so <c>dueTime == period</c> is invisible there.
+    /// ONLY A RESTART decouples them. A fresh process inherits a credential of arbitrary age and, before
+    /// this method existed, waited a full interval regardless. On 2026-09-08 it inherited a 55-second-old
+    /// PSIDTS, scheduled its first refresh 8m00s out, and the credential died at 8m03s — missed by 52
+    /// seconds, and an 83-minute guest-facing outage followed.
+    ///
+    /// An UNKNOWN age is deliberately treated as "refresh at the floor", not as "brand new". A credential
+    /// we cannot date is one we must not extend a full interval of credit to; assuming age-zero would
+    /// reproduce precisely the bug being fixed.
+    ///
+    /// Pure and static so a test can drive it directly — the adapter has no clock seam, and this needs
+    /// none.
+    /// </remarks>
+    internal static int ComputeFirstRefreshDelayMs(
+        int refreshIntervalMs, DateTime? psidtsMintedAtUtc, DateTime nowUtc)
+    {
+        var floorMs = Math.Min(MinFirstRefreshDelayMs, refreshIntervalMs);
+
+        if (psidtsMintedAtUtc is not { } minted)
+            return floorMs;
+
+        var remainingMs = refreshIntervalMs - (nowUtc - minted).TotalMilliseconds;
+
+        // Clamp high: a mint time in the future (clock skew, a hand-edited file, a restored backup)
+        // must never push the first refresh out beyond one interval.
+        if (remainingMs > refreshIntervalMs) return refreshIntervalMs;
+
+        // Clamp low: already past due, or so close that the tick would race activation.
+        if (remainingMs < floorMs) return floorMs;
+
+        return (int)remainingMs;
+    }
+
+    /// <summary>
     /// Install the periodic timers: the health watchdog and the proactive PSIDTS refresh. Extracted
     /// from <see cref="ActivateAsync"/> so the cadence wiring — including the
     /// <c>CookieRefreshIntervalMinutes: 0</c> kill switch — is unit-testable without a live
@@ -1160,7 +1219,22 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         if (_config.CookieRefreshIntervalMinutes > 0)
         {
             var refreshMs = _config.CookieRefreshIntervalMinutes * 60 * 1000;
-            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, refreshMs, refreshMs);
+
+            // dueTime is NOT the period. It is what remains of the interval for the credential we are
+            // actually holding — which, after a restart, is not a fresh one. See ComputeFirstRefreshDelayMs.
+            var firstMs = ComputeFirstRefreshDelayMs(refreshMs, _cookieSet?.PsidtsMintedAtUtc, DateTime.UtcNow);
+            LastFirstRefreshDelayMs = firstMs;
+
+            if (firstMs != refreshMs)
+            {
+                _logger.LogInformation(
+                    "GVApi: first proactive PSIDTS refresh in {FirstMs} ms of a {IntervalMs} ms interval — "
+                    + "anchored to the inherited credential's age ({MintedAt}), not to process start",
+                    firstMs, refreshMs,
+                    _cookieSet?.PsidtsMintedAtUtc?.ToString("O") ?? "unknown");
+            }
+
+            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, firstMs, refreshMs);
         }
     }
 

@@ -13,6 +13,94 @@ namespace RotaryPhoneController.GVBridge.Tests.Adapters;
 /// </summary>
 public class GVApiAdapterCookieLineageTests
 {
+    // -------------------------------------------------- §2.1 ⭐ the restart-simulation tests
+    //
+    // Defect 1 is INVISIBLE in a long-running process: each rotation resets the timer and mints the
+    // credential in the same instant, so the two stay locked. ONLY A RESTART decouples them. A test
+    // that does not simulate a restart passes against the bug and proves nothing.
+
+    [Theory]
+    // A process that loads a PSIDTS of age N must schedule its FIRST refresh at (interval - N).
+    [InlineData(0,       480_000)]  // brand new            -> a full interval
+    [InlineData(55_000,  425_000)]  // THE 2026-09-08 SHAPE -> 7m05s, not 8m00s. Off by 52s = the outage.
+    [InlineData(420_000,  60_000)]  // 7 min old (KNOWN-ISSUES L2) -> 1 min, not 8
+    [InlineData(479_000,   5_000)]  // 7m59s old            -> the floor, not 1s
+    [InlineData(600_000,   5_000)]  // already past due     -> the floor, never negative
+    public void ComputeFirstRefreshDelay_AnchorsToInheritedCredentialAge(int ageMs, int expectedMs)
+    {
+        var now = new DateTime(2026, 9, 8, 18, 1, 0, DateTimeKind.Utc);
+
+        var delay = GVApiAdapter.ComputeFirstRefreshDelayMs(
+            refreshIntervalMs: 8 * 60 * 1000, psidtsMintedAtUtc: now.AddMilliseconds(-ageMs), nowUtc: now);
+
+        Assert.Equal(expectedMs, delay);
+    }
+
+    [Fact]
+    public void ComputeFirstRefreshDelay_UnknownMintTime_RefreshesAtTheFloor()
+    {
+        // A credential we cannot date must NOT be trusted for a full interval — that is the bug.
+        var delay = GVApiAdapter.ComputeFirstRefreshDelayMs(
+            8 * 60 * 1000, psidtsMintedAtUtc: null, nowUtc: DateTime.UtcNow);
+
+        Assert.Equal(GVApiAdapter.MinFirstRefreshDelayMs, delay);
+    }
+
+    [Fact]
+    public void ComputeFirstRefreshDelay_MintTimeInTheFuture_IsClampedToOneInterval()
+    {
+        // Clock skew or a restored backup must not push the first refresh past a full interval.
+        var now = new DateTime(2026, 9, 8, 18, 1, 0, DateTimeKind.Utc);
+
+        var delay = GVApiAdapter.ComputeFirstRefreshDelayMs(
+            8 * 60 * 1000, psidtsMintedAtUtc: now.AddHours(3), nowUtc: now);
+
+        Assert.Equal(8 * 60 * 1000, delay);
+    }
+
+    [Fact]
+    public void StartPeriodicTimers_OnRestart_SchedulesFromThePersistedMintTime_NotFromProcessStart()
+    {
+        // THE RESTART SIMULATION, end to end through the production wiring.
+        // A brand-new adapter instance stands in for a brand-new process: it knows nothing about the
+        // credential except what the cookie set carries.
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+            config: GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 8));
+
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", new GvCookieSet
+        {
+            Sapisid = "SAPISID-A", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
+            PsidtsMintedAtUtc = DateTime.UtcNow.AddMinutes(-7),   // inherited, 7 minutes old
+        });
+
+        GVApiAdapterRecoveryTests.Invoke(adapter, "StartPeriodicTimers");
+
+        // ~1 minute remains of the 8-minute interval.
+        Assert.NotNull(adapter.LastFirstRefreshDelayMs);
+        Assert.InRange(adapter.LastFirstRefreshDelayMs!.Value, 55_000, 65_000);
+
+        // The assertion that fails on main: main schedules a FULL interval regardless of age.
+        Assert.NotEqual(8 * 60 * 1000, adapter.LastFirstRefreshDelayMs!.Value);
+    }
+
+    [Fact]
+    public void StartPeriodicTimers_FreshCredential_StillUsesTheFullInterval()
+    {
+        // The paired negative: the fix must not turn every activation into an immediate rotation.
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+            config: GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 8));
+
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", new GvCookieSet
+        {
+            Sapisid = "SAPISID-A", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
+            PsidtsMintedAtUtc = DateTime.UtcNow,
+        });
+
+        GVApiAdapterRecoveryTests.Invoke(adapter, "StartPeriodicTimers");
+
+        Assert.InRange(adapter.LastFirstRefreshDelayMs!.Value, 475_000, 480_000);
+    }
+
     // ------------------------------------------- §2.2 the persisted mint time survives a restart
 
     [Fact]
