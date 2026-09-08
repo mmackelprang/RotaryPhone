@@ -1002,30 +1002,115 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         if (!IsAvailable) SetAvailable(true);
     }
 
+    /// <summary>Why the last browser (CDP) refresh attempt ended the way it did. Feeds status + alarms.</summary>
+    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded }
+
+    private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
+
     /// <summary>
-    /// Recovery rung 3: extract fresh cookies from the box's logged-in Chrome via CDP, persist them,
-    /// and adopt them in-process (<see cref="ReloadCookiesAsync"/> swaps the HttpClient — no restart).
-    /// The extractor is optional; returns false if it was never wired or extraction/validation fails.
+    /// Adopt <paramref name="candidate"/> in memory, prove it against Google, and roll back completely
+    /// if it fails. Returns true ONLY when the candidate passed a live probe.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Persists NOTHING. The caller decides whether to write to disk, and must do so only on true.
+    /// That ordering is the entire point. On 2026-08-01 and again on 2026-09-06→08, a refresh from a
+    /// signed-out Chrome overwrote a WORKING on-disk cookie set with a dead one and the working set was
+    /// unrecoverable. docs/KNOWN-ISSUES.md proposed this exact rule five weeks before the second outage:
+    /// "Never let an unvalidated refresh overwrite a validated set."
+    /// </remarks>
+    private async Task<bool> TryValidateCandidateAsync(GvCookieSet candidate, CancellationToken ct = default)
+    {
+        var previousSet = _cookieSet;
+        var previousValid = _areCookiesValid;
+
+        _cookieSet = candidate;
+        SwapAuthenticatedClients();
+
+        var healthy = await ProbeHealthAsync(ct);
+        LastValidatedAt = DateTime.UtcNow;
+
+        if (healthy)
+        {
+            _areCookiesValid = true;
+            LoadedAt = DateTime.UtcNow;
+
+            // ⚠ DateTime.UtcNow, not candidate.PsidtsMintedAtUtc — deliberately.
+            // This method REPLACES the old TryCdpRefreshAsync -> ReloadCookiesAsync call path, and
+            // ReloadCookiesAsync stamps DateTime.UtcNow here. psidtsAgeSeconds is a published
+            // cross-repo contract whose observable behaviour is frozen (see PsidtsAgeSeconds), so
+            // stamping anything else would change its values on this path and break that freeze.
+            // The honest credential lineage travels on the cookie set and is read back through
+            // PsidtsMintedAtUtc, which needs no write site here at all.
+            _psidtsRefreshedAt = DateTime.UtcNow;
+            return true;
+        }
+
+        // Roll back to the set that was working. If there was none, there is nothing to protect and
+        // nothing to restore — leave the candidate in place so status reflects what we actually tried.
+        _areCookiesValid = previousValid;
+        if (previousSet != null)
+        {
+            _cookieSet = previousSet;
+            SwapAuthenticatedClients();
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Recovery rung 3: extract fresh cookies from the box's logged-in Chrome via CDP, VALIDATE them
+    /// against Google, and only then persist and adopt them. The extractor is optional; returns false
+    /// if it was never wired or extraction/validation fails.
     /// </summary>
     private async Task<bool> TryCdpRefreshAsync()
     {
         if (_cdpExtractor == null || _cookieStore == null)
+        {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
             return false;
+        }
 
         try
         {
             var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, "voice.google.com");
             if (!result.Success || result.Cookies == null)
             {
-                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}", result.Status, result.Error);
+                _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Unreachable;
+                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}",
+                    result.Status, result.Error);
                 return false;
             }
 
-            await _cookieStore.SaveAsync(result.Cookies);
-            return await ReloadCookiesAsync(); // adopt in-memory + re-validate against Google
+            // VALIDATE BEFORE PERSISTING. A signed-out Chrome hands back a full, well-formed, completely
+            // dead cookie set; persisting that first destroys the last known-good copy on disk.
+            if (!await TryValidateCandidateAsync(result.Cookies))
+            {
+                _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Stale;
+                _logger.LogError(
+                    "GVApi: STALE BROWSER SESSION — Chrome returned {Count} cookies and Google rejected "
+                    + "them. The on-disk cookie set was NOT overwritten and the working credentials were "
+                    + "kept. The box's Chrome login is dead or signed out; ACTION: re-login at "
+                    + "voice.google.com. Browser session last validated: {LastValidated}.",
+                    result.CookieCount,
+                    _cookieSet?.BrowserSessionValidatedAtUtc?.ToString("O") ?? "never");
+                return false;
+            }
+
+            // Proven. Stamp the browser-session validation and persist — in that order.
+            // No SwapAuthenticatedClients needed: GvHttpClientHandler resolves _cookieSet through a
+            // closure on every request, and the stamp changes no wire-visible cookie.
+            var validated = result.Cookies.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+            _cookieSet = validated;
+            await _cookieStore.SaveAsync(validated);
+
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
+            _logger.LogInformation(
+                "GVApi: CDP cookie refresh validated against Google and persisted ({Count} cookies)",
+                result.CookieCount);
+            return true;
         }
         catch (Exception ex)
         {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Unreachable;
             _logger.LogWarning(ex, "GVApi: CDP cookie refresh threw");
             return false;
         }

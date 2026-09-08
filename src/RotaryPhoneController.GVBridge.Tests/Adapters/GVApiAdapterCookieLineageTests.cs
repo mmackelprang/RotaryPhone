@@ -1,5 +1,6 @@
 using RotaryPhoneController.GVBridge.Adapters;
 using RotaryPhoneController.GVBridge.Auth;
+using RotaryPhoneController.GVBridge.Services;
 using Xunit;
 
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
@@ -208,6 +209,107 @@ public class GVApiAdapterCookieLineageTests
 
         Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 0, 5);          // restamped, as designed
         Assert.Equal(mintedAfterFirstLoad, adapter.PsidtsMintedAtUtc!.Value);   // immovable
+
+        File.Delete(path);
+    }
+    // ------------- §2.3 ⭐ a failed recovery must not destroy the last known-good cookie set
+
+    private sealed class FakeCdpExtractor(CdpExtractionResult result) : ICdpCookieExtractor
+    {
+        public int Calls { get; private set; }
+
+        public Task<CdpExtractionResult> ExtractAsync(int cdpPort, string targetUrl, CancellationToken ct = default)
+        {
+            Calls++;
+            return Task.FromResult(result);
+        }
+    }
+
+    [Fact]
+    public async Task CdpRefresh_WhenExtractedCookiesAreRejected_LeavesTheStoredGoodSetIntact()
+    {
+        // The 2026-08-01 and 2026-09-06 mechanism: a signed-out Chrome returns a full, well-formed,
+        // completely dead cookie set, and the old code persisted it BEFORE discovering that.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        await store.SaveAsync(good);
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+        adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);   // Google rejects the dead set
+
+        var refreshed = await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
+
+        Assert.False(refreshed);
+
+        // THE assertion. On main the on-disk set is SAPISID-DEAD and the good one is gone forever.
+        var onDisk = await store.LoadAsync();
+        Assert.NotNull(onDisk);
+        Assert.Equal("SAPISID-GOOD", onDisk!.Sapisid);
+
+        // ...and the in-memory set rolled back too, so the adapter is not left holding proven-bad creds.
+        Assert.Equal("SAPISID-GOOD", adapter.CurrentCookieSet!.Sapisid);
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task CdpRefresh_WhenExtractedCookiesValidate_PersistsThemAndStampsTheBrowserSession()
+    {
+        // The paired positive: the guard must not block a genuine recovery.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        await store.SaveAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-OLD"));
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-OLD"));
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+        adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+
+        var refreshed = await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
+
+        Assert.True(refreshed);
+        var onDisk = await store.LoadAsync();
+        Assert.Equal("SAPISID-FRESH", onDisk!.Sapisid);
+        Assert.NotNull(onDisk.BrowserSessionValidatedAtUtc);
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task CdpRefresh_RejectedCandidate_DoesNotDisturbTheFrozenPsidtsAgeSeconds()
+    {
+        // The freeze, on the rollback path. A rejected candidate must leave psidtsAgeSeconds exactly
+        // where it was — the field is a published cross-repo contract and a failed refresh is not an
+        // event a consumer should see in it.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        await store.SaveAsync(good);
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_psidtsRefreshedAt", DateTime.UtcNow.AddSeconds(-300));
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+        adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);
+
+        await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
+
+        // Untouched: still ~300 s, not reset to 0 and not made null.
+        Assert.NotNull(adapter.PsidtsAgeSeconds);
+        Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 295, 310);
 
         File.Delete(path);
     }
