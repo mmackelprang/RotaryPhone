@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 
 namespace RotaryPhoneController.Core.Bell;
 
@@ -33,24 +34,82 @@ public interface IBellFailureTracker
 }
 
 /// <summary>
-/// Per-phone, in-memory, thread-safe bell-failure state.
+/// Per-phone, thread-safe bell-failure state, persisted through an optional
+/// <see cref="IBellFailureStore"/>.
 ///
-/// Deliberately NOT persisted, for the same reason registrar bindings are not (plan D5): a failure
-/// recorded before a restart says nothing about the current state of the hardware, and a restored
-/// stale alert would be a second source of untruth about the bell — the exact class of problem this
-/// work exists to remove. The next ring attempt re-establishes the truth within seconds.
+/// <para>
+/// <b>This REVERSES plan decision D5, which said the tracker was deliberately not persisted.</b>
+/// D5's argument was sound as far as it went: a failure recorded before a restart says nothing about
+/// the current state of the hardware, so restoring it risks a second source of untruth about the
+/// bell — the exact class of problem this work exists to remove. That concern is not being
+/// dismissed. It is being answered.
+/// </para>
+///
+/// <para>
+/// <b>What answers it: this record was never the live health signal.</b> Live reachability is
+/// <c>Ht801Reachable</c>, re-probed within ~30 s of boot and now reported identically over REST and
+/// SignalR. What is stored here is a timestamped HISTORICAL note carrying its own
+/// <see cref="BellFailureRecord.OccurredAtUtc"/>, and acknowledging it explicitly does not touch
+/// reachability — the reply's phrasing is "acking clears the note, not the fault". A note dated an
+/// hour ago is not a claim about now, and it is rendered as what it is.
+/// </para>
+///
+/// <para>
+/// <b>The overriding reason, though, is that we already promised this in writing.</b>
+/// docs/handoffs/radioconsole-bell-failure-reply.md §5 tells RadioConsole the acknowledged flag
+/// "survives a service restart" and that their Q4 concern — a nightly-restarting kiosk resurrecting
+/// a note the operator already dismissed — "is addressed". It was not; the tracker was in-memory.
+/// Given the choice between retracting the claim and making it true, the owner chose to make it
+/// true. A dismissal that silently undismisses itself every night is worse than a note that is one
+/// restart stale, and a document asserting more than the code does is the specific failure this
+/// project keeps tripping over.
+/// </para>
+///
+/// <para>
+/// <b>FailureCount survives too, and that is intended.</b> It counts consecutive failures since the
+/// last DEMONSTRATED success; a restart demonstrates nothing. Resetting it on boot would quietly
+/// downgrade a bell that has failed five times in a row to a bell that has failed once.
+/// </para>
+///
+/// <para>
+/// Constructed with no store, the tracker is in-memory only and touches no disk — which is what the
+/// unit tests use.
+/// </para>
 /// </summary>
 public sealed class BellFailureTracker : IBellFailureTracker
 {
-    private readonly ConcurrentDictionary<string, BellFailureRecord> _failures =
-        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, BellFailureRecord> _failures;
 
     // Guards the read-modify-write sequences (increment the consecutive count, flip Acknowledged).
     // BellFailureRecord is immutable, so every mutation is a replace and must not race another.
     private readonly object _lock = new();
 
+    private readonly IBellFailureStore? _store;
+    private readonly ILogger<BellFailureTracker>? _logger;
+
     public event Action<string, BellFailureRecord>? OnBellFailure;
     public event Action<string>? OnBellRecovered;
+
+    public BellFailureTracker(IBellFailureStore? store = null, ILogger<BellFailureTracker>? logger = null)
+    {
+        _store = store;
+        _logger = logger;
+
+        // Load is contractually incapable of throwing — see JsonBellFailureStore. That matters here
+        // specifically: this runs while the DI container is building a singleton the whole server
+        // depends on, and a bad state file must not be able to stop the appliance from booting.
+        var restored = store?.Load();
+
+        _failures = restored is null
+            ? new ConcurrentDictionary<string, BellFailureRecord>(StringComparer.OrdinalIgnoreCase)
+            : new ConcurrentDictionary<string, BellFailureRecord>(restored, StringComparer.OrdinalIgnoreCase);
+
+        if (_failures.Count > 0)
+        {
+            _logger?.LogInformation(
+                "Restored bell-failure state for {Count} phone(s) across restart", _failures.Count);
+        }
+    }
 
     public BellFailureRecord RecordFailure(string phoneId, BellFailureReason reason, string? callerNumber,
         string? callId, string? target, string? detail, DateTime occurredAtUtc)
@@ -68,6 +127,7 @@ public sealed class BellFailureTracker : IBellFailureTracker
                 previousCount + 1, Acknowledged: false);
 
             _failures[phoneId] = record;
+            Persist();
         }
 
         // Raise outside the lock: subscribers broadcast over SignalR and must never run under it.
@@ -82,6 +142,10 @@ public sealed class BellFailureTracker : IBellFailureTracker
         lock (_lock)
         {
             cleared = _failures.TryRemove(phoneId, out _);
+
+            // Only on an actual clear. A healthy bell rings all day and reports success every time;
+            // rewriting an unchanged file on each of those would be pure disk churn.
+            if (cleared) Persist();
         }
 
         // Only announce recovery when something was actually cleared — otherwise every successful ring
@@ -104,10 +168,31 @@ public sealed class BellFailureTracker : IBellFailureTracker
             }
 
             _failures[phoneId] = existing with { Acknowledged = true };
+
+            // The one persist that was promised to another team by name. Only on the actual flip —
+            // the early return above already covers the idempotent second ack.
+            Persist();
             return true;
         }
     }
 
     public BellFailureRecord? Get(string phoneId) =>
         _failures.TryGetValue(phoneId, out var record) ? record : null;
+
+    /// <summary>
+    /// Writes the current state through the store. <b>Call sites must already hold _lock.</b>
+    ///
+    /// Persisting inside the lock rather than after it costs a file write on a path that runs at
+    /// most a few times per call, and buys the guarantee that the file's write order can never
+    /// disagree with the in-memory order: two concurrent mutations serialized in one order but
+    /// flushed in the other would leave the durable state contradicting the state the UI is showing,
+    /// which is the failure mode this whole feature exists to eliminate. The store swallows its own
+    /// I/O errors, so this cannot throw out of a mutation.
+    /// </summary>
+    private void Persist()
+    {
+        if (_store is null) return;
+
+        _store.Save(new Dictionary<string, BellFailureRecord>(_failures, StringComparer.OrdinalIgnoreCase));
+    }
 }
