@@ -84,6 +84,34 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     // adapter only through that registry.
     private readonly SemaphoreSlim _activationGate = new(1, 1);
 
+    // Serializes every section that SWAPS THE COOKIE SET — validate-and-persist, rotate, reload.
+    //
+    // Why it exists: TryValidateCandidateAsync publishes an UNVALIDATED candidate into _cookieSet and
+    // then awaits a live HTTP probe (30 s client timeout). Without this gate that window is wide open:
+    // rung 1 would rotate FROM the candidate and save a candidate-derived set over the good on-disk one
+    // — literally the invariant this work exists to establish, defeated through the window it opens —
+    // and a concurrent recovery that published a WORKING set could be undone by the probe's rollback.
+    //
+    // DEADLOCK RULE: taken by the four OUTER cookie-swapping methods only —
+    // TryAdoptAndPersistCookiesAsync, TryCdpRefreshAsync, TryRotateCookiesAsync, ReloadCookiesAsync.
+    // TryValidateCandidateAsync does NOT take it (it is called from two of those, and taking it there
+    // would acquire it twice on one path); its doc comment states that it must be called with the gate
+    // held. Verified safe:
+    //   * None of the four calls another of the four. TryAdoptAndPersistCookiesAsync and
+    //     TryCdpRefreshAsync call only TryValidateCandidateAsync, which is ungated.
+    //   * The recovery ladder invokes rungs 1/2/3 SEQUENTIALLY (`if (await rung) { ...; return true; }`),
+    //     never nested, so each rung's gate is released before the next is entered.
+    //   * Lock ORDER with _activationGate is one-way and therefore cannot invert: ActivateAsync takes
+    //     _activationGate and may then reach ReloadCookiesAsync, i.e. activation -> mutation. Nothing
+    //     takes this gate and then calls ActivateAsync/DeactivateAsync — GvCookieManager's
+    //     re-activation runs AFTER TryAdoptAndPersistCookiesAsync has returned and released.
+    //   * ActivateCoreAsync's own step-4 probe is deliberately NOT gated. It runs under
+    //     _activationGate, and gating it too would create the second lock-ordering edge this analysis
+    //     depends on not existing.
+    // A probe can hold this for up to 30 s. Callers wait; the proactive timer does not (see
+    // RunProactiveCookieRefreshAsync), so timer callbacks cannot pile up.
+    private readonly SemaphoreSlim _cookieMutationGate = new(1, 1);
+
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
     private string? _negotiatedHt801RtpIp;
@@ -779,6 +807,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// </summary>
     public async Task<bool> ReloadCookiesAsync(CancellationToken ct = default)
     {
+        // Serialized against the other cookie-set swappers. Safe to take while _activationGate is held
+        // (ActivateCoreAsync branch B and the mid-call path both reach here): the lock order is always
+        // activation -> mutation and never the reverse — see the _cookieMutationGate field remark.
+        using var gate = await LockCookieMutationsAsync(ct);
+
         if (_cookieStore == null)
         {
             _logger.LogWarning("ReloadCookiesAsync: adapter not activated, cannot reload");
@@ -835,6 +868,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     {
         if (_cookieStore == null || _cookieSet == null)
             return false;
+
+        // Held across the WHOLE validate-and-persist section: the probe inside
+        // TryValidateCandidateAsync runs with the candidate published into _cookieSet, and nothing else
+        // may swap the cookie set — or write one to disk — until we have finished deciding.
+        using var gate = await LockCookieMutationsAsync(ct);
 
         if (!await TryValidateCandidateAsync(candidate, ct))
         {
@@ -1132,6 +1170,29 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
 
     /// <summary>
+    /// Acquire <see cref="_cookieMutationGate"/>; dispose the returned handle to release it.
+    /// </summary>
+    /// <remarks>
+    /// The release tolerates a gate disposed underneath it, which is otherwise an
+    /// <see cref="ObjectDisposedException"/> thrown from a <c>finally</c> during process teardown —
+    /// a probe may still be holding the gate when <see cref="Dispose"/> runs.
+    /// </remarks>
+    private async Task<IDisposable> LockCookieMutationsAsync(CancellationToken ct = default)
+    {
+        await _cookieMutationGate.WaitAsync(ct);
+        return new GateRelease(_cookieMutationGate);
+    }
+
+    private sealed class GateRelease(SemaphoreSlim gate) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { gate.Release(); }
+            catch (ObjectDisposedException) { /* torn down while we held it — nothing to release into */ }
+        }
+    }
+
+    /// <summary>
     /// Adopt <paramref name="candidate"/> in memory, prove it against Google, and roll back completely
     /// if it fails. Returns true ONLY when the candidate passed a live probe.
     /// </summary>
@@ -1141,6 +1202,12 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// signed-out Chrome overwrote a WORKING on-disk cookie set with a dead one and the working set was
     /// unrecoverable. docs/KNOWN-ISSUES.md proposed this exact rule five weeks before the second outage:
     /// "Never let an unvalidated refresh overwrite a validated set."
+    /// <para>
+    /// ⚠ MUST BE CALLED WITH <c>_cookieMutationGate</c> HELD. It publishes an unvalidated candidate into
+    /// <c>_cookieSet</c> and then awaits a live HTTP probe, so everything that swaps the cookie set has
+    /// to be excluded for the duration. It does NOT take the gate itself: both callers already hold it,
+    /// and acquiring it here would be a second acquisition on one path — see the field remark.
+    /// </para>
     /// </remarks>
     private async Task<bool> TryValidateCandidateAsync(GvCookieSet candidate, CancellationToken ct = default)
     {
@@ -1150,34 +1217,73 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _cookieSet = candidate;
         SwapAuthenticatedClients();
 
-        var healthy = await ProbeHealthAsync(ct);
-        LastValidatedAt = DateTime.UtcNow;
-
-        if (healthy)
+        var healthy = false;
+        try
         {
-            _areCookiesValid = true;
-            LoadedAt = DateTime.UtcNow;
+            healthy = await ProbeHealthAsync(ct);
+            LastValidatedAt = DateTime.UtcNow;
 
-            // ⚠ DateTime.UtcNow, not candidate.PsidtsMintedAtUtc — deliberately.
-            // This method REPLACES the old TryCdpRefreshAsync -> ReloadCookiesAsync call path, and
-            // ReloadCookiesAsync stamps DateTime.UtcNow here. psidtsAgeSeconds is a published
-            // cross-repo contract whose observable behaviour is frozen (see PsidtsAgeSeconds), so
-            // stamping anything else would change its values on this path and break that freeze.
-            // The honest credential lineage travels on the cookie set and is read back through
-            // PsidtsMintedAtUtc, which needs no write site here at all.
-            _psidtsRefreshedAt = DateTime.UtcNow;
-            return true;
+            if (healthy)
+            {
+                _areCookiesValid = true;
+                LoadedAt = DateTime.UtcNow;
+
+                // ⚠ DateTime.UtcNow, not candidate.PsidtsMintedAtUtc — deliberately.
+                // This method REPLACES the old TryCdpRefreshAsync -> ReloadCookiesAsync call path, and
+                // ReloadCookiesAsync stamps DateTime.UtcNow here. psidtsAgeSeconds is a published
+                // cross-repo contract whose observable behaviour is frozen (see PsidtsAgeSeconds), so
+                // stamping anything else would change its values on this path and break that freeze.
+                // The honest credential lineage travels on the cookie set and is read back through
+                // PsidtsMintedAtUtc, which needs no write site here at all.
+                _psidtsRefreshedAt = DateTime.UtcNow;
+                return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            // try/finally so a THROWING probe cannot leave _cookieSet holding the unvalidated
+            // candidate with no rollback at all. Unreachable today (GvAccountClient.IsHealthyAsync
+            // catches everything) but structurally required: the injectable HealthProbeOverride, and
+            // any future probe, can throw.
+            if (!healthy) RollBackRejectedCandidate(candidate, previousSet, previousValid);
+        }
+    }
+
+    /// <summary>
+    /// Undo the in-memory adoption of a candidate the probe rejected — but ONLY if we are still the
+    /// owner of the state we would be undoing.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ COMPARE-AND-SWAP, NOT A BLIND SNAPSHOT RESTORE. The restore is the first write in this class
+    /// that moves state BACKWARDS, which is why last-writer-wins stopped being benign here. If a
+    /// concurrent recovery published a working set while the probe was in flight, restoring the
+    /// snapshot would discard that recovery and dispose the client the ladder had just published.
+    /// Re-entrancy is the same hazard from the other side: a nested validation would capture the dead
+    /// candidate as its own "previous" and roll back TO it as if it were known-good.
+    /// <para>
+    /// A null <paramref name="previousSet"/> means there was nothing to protect and nothing to restore —
+    /// the candidate stays in place so status reflects what we actually tried.
+    /// </para>
+    /// </remarks>
+    private void RollBackRejectedCandidate(
+        GvCookieSet candidate, GvCookieSet? previousSet, bool previousValid)
+    {
+        if (!ReferenceEquals(_cookieSet, candidate))
+        {
+            _logger.LogInformation(
+                "GVApi: not rolling back the rejected candidate — the cookie set moved on while the "
+                + "probe was in flight, so restoring our snapshot would undo whatever replaced it.");
+            return;
         }
 
-        // Roll back to the set that was working. If there was none, there is nothing to protect and
-        // nothing to restore — leave the candidate in place so status reflects what we actually tried.
         _areCookiesValid = previousValid;
         if (previousSet != null)
         {
             _cookieSet = previousSet;
             SwapAuthenticatedClients();
         }
-        return false;
     }
 
     /// <summary>
@@ -1203,6 +1309,10 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                     result.Status, result.Error);
                 return false;
             }
+
+            // Taken only now, not around the CDP extraction: talking to Chrome swaps nothing, and
+            // holding the gate across it would block rotations for the extraction's duration too.
+            using var gate = await LockCookieMutationsAsync();
 
             // VALIDATE BEFORE PERSISTING. A signed-out Chrome hands back a full, well-formed, completely
             // dead cookie set; persisting that first destroys the last known-good copy on disk.
@@ -1289,6 +1399,12 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// </summary>
     private async Task<bool> TryRotateCookiesAsync()
     {
+        // ⚠ The gate is taken BEFORE _cookieSet is read. Reading it first would reintroduce the exact
+        // defect this closes: during a validate-and-persist window _cookieSet holds the UNVALIDATED
+        // candidate, so a rotation starting there would rotate from the candidate and then
+        // _cookieStore.SaveAsync a candidate-derived set over the known-good one on disk.
+        using var gate = await LockCookieMutationsAsync();
+
         var current = _cookieSet;
         if (current == null)
             return false;
@@ -1480,6 +1596,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 return;
             }
 
+            // A cookie-set swap is already in progress (a probe can hold the gate for up to 30 s).
+            // SKIP rather than queue: this path is best-effort by design — the comment below says so —
+            // and a timer callback that waits on a gate is the shape that piles up unboundedly. With
+            // this check at most one tick is ever in flight, so nothing can accumulate.
+            if (_cookieMutationGate.CurrentCount == 0)
+            {
+                _logger.LogDebug(
+                    "GVApi: proactive PSIDTS refresh skipped — a cookie-set mutation is in progress");
+                return;
+            }
+
             if (await TryRotateCookiesAsync())
                 _logger.LogInformation("GVApi: proactive PSIDTS refresh succeeded");
             else
@@ -1572,6 +1699,9 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _healthCheckTimer?.Dispose();
         _cookieRefreshTimer?.Dispose();
         _httpClient?.Dispose();
+        // A probe may still be holding this. GateRelease swallows the ObjectDisposedException that
+        // its release would otherwise throw from a finally block during teardown.
+        _cookieMutationGate.Dispose();
         // Same leak class as F6: these were never released here. The transport's DisposeAsync is
         // fire-and-forget because Dispose() must not block on async work.
         _rotatorHttpClient?.Dispose();

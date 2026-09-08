@@ -319,6 +319,124 @@ public class GVApiAdapterCookieLineageTests
         File.Delete(path);
     }
 
+    // ------------- the validation window: a rollback must not undo a concurrent recovery
+    //
+    // TryValidateCandidateAsync publishes an UNVALIDATED candidate into _cookieSet and then awaits a
+    // live HTTP probe (30 s client timeout) with nothing excluded. Every writer in this class used to
+    // move state FORWARD, so last-writer-wins was benign; the rollback is the first BACKWARD write, and
+    // that is what made the window dangerous rather than merely untidy.
+
+    /// <summary>
+    /// An adapter holding a known-good set, with a probe a test can suspend mid-flight.
+    /// </summary>
+    private static (GVApiAdapter Adapter, GvCookieStore Store, string Path,
+                    TaskCompletionSource ProbeEntered, TaskCompletionSource<bool> ReleaseProbe)
+        NewAdapterWithSuspendableProbe(GVApiAdapterRecoveryTests.FakeCookieRotator? rotator = null)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        store.SaveAsync(good).GetAwaiter().GetResult();
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(rotator: rotator);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        adapter.HealthProbeOverride = async _ =>
+        {
+            entered.TrySetResult();
+            return await release.Task;
+        };
+
+        return (adapter, store, path, entered, release);
+    }
+
+    [Fact]
+    public async Task RejectedCandidate_DoesNotRollBackOverASetPublishedWhileTheProbeWasInFlight()
+    {
+        // ⛔ THE HIGH-2 REGRESSION. previousSet/previousValid are captured, then a live HTTP call runs
+        // with nothing excluded. During that window the recovery ladder can complete a rung and publish
+        // a WORKING set — and a blind snapshot restore then throws that recovery away and disposes the
+        // client the ladder just published. The restore has to be a compare-and-swap: only undo the
+        // state we are still the owner of.
+        var (adapter, store, path, entered, release) = NewAdapterWithSuspendableProbe();
+        using var _ = adapter;
+
+        var adopting = adapter.TryAdoptAndPersistCookiesAsync(
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), "test");
+        await entered.Task;
+
+        // The candidate really is published — this is the window, not a hypothetical.
+        Assert.Equal("SAPISID-DEAD", adapter.CurrentCookieSet!.Sapisid);
+
+        // A concurrent recovery finishes and publishes a working set. Written by reflection precisely
+        // BECAUSE it bypasses the mutation gate: the compare-and-swap has to hold on its own, for
+        // whatever the gate does not serialize.
+        var recovered = GVApiAdapterRecoveryTests.NewCookies("SAPISID-RECOVERED");
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", recovered);
+        await store.SaveAsync(recovered);
+
+        release.SetResult(false);                 // ...and only now does Google reject the candidate
+        Assert.False(await adopting);
+
+        // THE assertion. Without the compare-and-swap this reads SAPISID-GOOD: the stale snapshot was
+        // restored over a live, working recovery.
+        Assert.Equal("SAPISID-RECOVERED", adapter.CurrentCookieSet!.Sapisid);
+
+        // ...and nothing candidate-derived ever reached disk.
+        var onDisk = await store.LoadAsync();
+        Assert.Equal("SAPISID-RECOVERED", onDisk!.Sapisid);
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task ARotationCannotStartWhileAnUnvalidatedCandidateSitsInTheCookieSet()
+    {
+        // The other half of HIGH-2, and the worse one. Rung 1 reads _cookieSet — the CANDIDATE during
+        // the validation window — rotates from it, and calls _cookieStore.SaveAsync. That writes a
+        // candidate-derived set over the known-good one on disk: the very invariant this PR exists to
+        // establish, defeated through the window this PR opens. The gate is what closes it.
+        GvCookieSet? rotatedFrom = null;
+        var rotator = new GVApiAdapterRecoveryTests.FakeCookieRotator(current =>
+        {
+            rotatedFrom = current;
+            return Task.FromResult(new CookieRotationResult(true, "fresh-1psidts", "fresh-3psidts"));
+        });
+
+        var (adapter, store, path, entered, release) = NewAdapterWithSuspendableProbe(rotator);
+        using var _ = adapter;
+
+        var adopting = adapter.TryAdoptAndPersistCookiesAsync(
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), "test");
+        await entered.Task;
+        Assert.Equal("SAPISID-DEAD", adapter.CurrentCookieSet!.Sapisid);
+
+        // Rung 1 / the proactive timer fires straight into the window.
+        var rotating = (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryRotateCookiesAsync")!;
+
+        Assert.False(await GVApiAdapterRecoveryTests.WaitForAsync(() => rotator.Calls > 0, timeoutMs: 250));
+        Assert.Equal(0, rotator.Calls);   // it has not even READ _cookieSet yet
+
+        release.SetResult(false);
+        Assert.False(await adopting);
+        await rotating;
+
+        // It ran only after the rollback, so it rotated from the GOOD set — never from the rejected
+        // candidate. Without the gate this is "SAPISID-DEAD".
+        Assert.Equal(1, rotator.Calls);
+        Assert.Equal("SAPISID-GOOD", rotatedFrom!.Sapisid);
+
+        // ...and therefore what landed on disk is still derived from the good lineage.
+        var onDisk = await store.LoadAsync();
+        Assert.Equal("SAPISID-GOOD", onDisk!.Sapisid);
+
+        File.Delete(path);
+    }
+
     // ---------------------- §Task 6: the browser session's true age, and the stale-session alarm
 
     [Fact]
