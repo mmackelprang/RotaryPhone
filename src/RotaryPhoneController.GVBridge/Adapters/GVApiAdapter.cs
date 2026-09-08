@@ -84,7 +84,30 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     // adapter only through that registry.
     private readonly SemaphoreSlim _activationGate = new(1, 1);
 
-    // Serializes every section that SWAPS THE COOKIE SET — validate-and-persist, rotate, reload.
+    // Serializes the four MUTATION paths that swap the cookie set against EACH OTHER —
+    // TryAdoptAndPersistCookiesAsync, TryCdpRefreshAsync, TryRotateCookiesAsync, ReloadCookiesAsync.
+    //
+    // ⚠ IT DOES NOT SERIALIZE EVERY WRITE TO _cookieSet, and reading it that way is a trap. The
+    // ACTIVATION paths write the field too — ActivateCoreAsync (`_cookieSet = incomingCookies`) and
+    // TearDownGenerationAsync (`_cookieSet = null`) — and they are serialized by _activationGate
+    // instead. Two DISJOINT mutual-exclusion domains write one field, and holding either gate excludes
+    // only its own domain: a mutation path can run concurrently with an activation-path write.
+    //
+    // No live defect follows from that today, because neither activation-path write persists a
+    // CANDIDATE-derived set to disk, and rung 1 — the only candidate-derived disk writer — is gated.
+    // But one consequence is load-bearing and must not be undone:
+    //
+    // ⚠ THIS IS PRECISELY WHY RollBackRejectedCandidate MUST BE A COMPARE-AND-SWAP RATHER THAN A BLIND
+    // RESTORE. A probe running under this gate can be raced by an activation-domain write it does not
+    // exclude, so by the time the rollback runs _cookieSet may no longer be the candidate we published.
+    // Restoring the snapshot unconditionally would then undo whatever replaced it — including a
+    // teardown's null, resurrecting a torn-down generation's cookies. The ReferenceEquals check is what
+    // makes the rollback safe across the domain boundary; do not "simplify" it away.
+    //
+    // ⚠ SetAvailable fires OnAvailabilityChanged SYNCHRONOUSLY, and it is called from inside this gate
+    // (ReloadCookiesAsync, and TryAdoptAndPersistCookiesAsync via MarkAvailableIfTransportExists). A
+    // future subscriber that re-entered any gated method from that callback would deadlock on a
+    // non-reentrant SemaphoreSlim. Nothing subscribes to this adapter's OnAvailabilityChanged today.
     //
     // Why it exists: TryValidateCandidateAsync publishes an UNVALIDATED candidate into _cookieSet and
     // then awaits a live HTTP probe (30 s client timeout). Without this gate that window is wide open:
