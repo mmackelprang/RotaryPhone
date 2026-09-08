@@ -254,6 +254,7 @@ public class GVApiAdapterCookieLineageTests
 
         // ...and the in-memory set rolled back too, so the adapter is not left holding proven-bad creds.
         Assert.Equal("SAPISID-GOOD", adapter.CurrentCookieSet!.Sapisid);
+        Assert.True(adapter.BrowserSessionStale);
 
         File.Delete(path);
     }
@@ -281,6 +282,8 @@ public class GVApiAdapterCookieLineageTests
         var onDisk = await store.LoadAsync();
         Assert.Equal("SAPISID-FRESH", onDisk!.Sapisid);
         Assert.NotNull(onDisk.BrowserSessionValidatedAtUtc);
+        Assert.False(adapter.BrowserSessionStale);
+        Assert.NotNull(adapter.BrowserSessionAgeSeconds);
 
         File.Delete(path);
     }
@@ -310,6 +313,113 @@ public class GVApiAdapterCookieLineageTests
         // Untouched: still ~300 s, not reset to 0 and not made null.
         Assert.NotNull(adapter.PsidtsAgeSeconds);
         Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 295, 310);
+
+        File.Delete(path);
+    }
+
+    // ---------------------- §Task 6: the browser session's true age, and the stale-session alarm
+
+    [Fact]
+    public async Task BrowserSessionAge_SurvivesARestart_AndKeepsClimbing()
+    {
+        // THE SIGNAL WHOSE ABSENCE COST TWO DAYS. The service mints its own PSIDTS and can look
+        // perfectly healthy on a lineage it regenerates from itself, while the Chrome it bootstraps
+        // from has been signed out since Sep 6. Nothing on status reported that. This does — and
+        // because the stamp rides the cookie set, it does not reset when the process restarts.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+
+        var validatedTwoDaysAgo = DateTime.UtcNow.AddDays(-2);
+        await store.SaveAsync(GVApiAdapterRecoveryTests.NewCookies()
+            .WithBrowserSessionValidatedAt(validatedTwoDaysAgo));
+
+        // A brand-new adapter instance — i.e. a restarted process.
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+
+        Assert.True(await adapter.ReloadCookiesAsync());
+
+        Assert.NotNull(adapter.BrowserSessionValidatedAt);
+        Assert.NotNull(adapter.BrowserSessionAgeSeconds);
+        Assert.InRange(adapter.BrowserSessionAgeSeconds!.Value, 172_000, 173_600);   // ~2 days, not ~0
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public void BrowserSessionAge_IsNullWhenNoBrowserSetWasEverValidated()
+    {
+        // Null means UNKNOWN, and unknown is not healthy. It must not read as 0 / "fresh".
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", GVApiAdapterRecoveryTests.NewCookies());
+
+        Assert.Null(adapter.BrowserSessionValidatedAt);
+        Assert.Null(adapter.BrowserSessionAgeSeconds);
+        Assert.False(adapter.BrowserSessionStale);   // nothing was attempted, so nothing is stale
+    }
+
+    [Fact]
+    public async Task BrowserSessionStale_DistinguishesADeadLoginFromAnUnreachableChrome()
+    {
+        // "Chrome handed us cookies and Google rejected them" and "we never reached Chrome" call for
+        // OPPOSITE operator actions. Conflating them is what produced an unearned "your Google login
+        // is dead" message on a run where the browser was never consulted (Task 7).
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        await store.SaveAsync(good);
+
+        // Chrome is reachable but signed out: a full, well-formed, dead cookie set.
+        var stale = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(stale, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(stale, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetAvailable(stale, true);
+        stale.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
+        stale.HealthProbeOverride = _ => Task.FromResult(false);
+
+        await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(stale, "TryCdpRefreshAsync")!;
+        Assert.True(stale.BrowserSessionStale);
+
+        // Chrome is down: extraction never produced a cookie set, so the login was never tested.
+        var unreachable = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(unreachable, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(unreachable, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetAvailable(unreachable, true);
+        unreachable.SetCookieExtractor(new FakeCdpExtractor(
+            CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "connection refused")));
+
+        await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(unreachable, "TryCdpRefreshAsync")!;
+        Assert.False(unreachable.BrowserSessionStale);   // NOT stale — nothing tested the login
+
+        File.Delete(path);
+    }
+
+    [Fact]
+    public async Task Deactivate_ClearsTheStaleBrowserSessionFlag()
+    {
+        // Per-generation state, like the data-plane outcome timestamps. Carrying a stale flag from a
+        // torn-down generation into a fresh one would keep a resolved alarm lit on the dashboard.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        await store.SaveAsync(good);
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", good);
+        GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
+        adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);
+
+        await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
+        Assert.True(adapter.BrowserSessionStale);
+
+        await adapter.DeactivateAsync();
+
+        Assert.False(adapter.BrowserSessionStale);
 
         File.Delete(path);
     }

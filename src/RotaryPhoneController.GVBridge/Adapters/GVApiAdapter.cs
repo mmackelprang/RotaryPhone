@@ -210,6 +210,34 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public DateTime? PsidtsMintedAtUtc => _cookieSet?.PsidtsMintedAtUtc;
 
     /// <summary>
+    /// UTC time a browser-extracted cookie set last passed a live probe, or null if never. Persisted on
+    /// the cookie set, so it survives a restart.
+    /// </summary>
+    public DateTime? BrowserSessionValidatedAt => _cookieSet?.BrowserSessionValidatedAtUtc;
+
+    /// <summary>
+    /// Age (seconds) of the box's Chrome Google Voice session — how long since cookies pulled from it
+    /// last actually worked. Null if no browser-sourced set has ever been validated.
+    /// </summary>
+    /// <remarks>
+    /// This is the signal whose absence cost two days. The service mints its own PSIDTS and can look
+    /// perfectly healthy on a lineage it regenerates from itself, while the browser it depends on for
+    /// bootstrap has been dead since Sep 6. A steadily climbing value here, with everything else green,
+    /// IS the warning — recovery has no floor below a working browser session.
+    /// </remarks>
+    public long? BrowserSessionAgeSeconds =>
+        _cookieSet?.BrowserSessionValidatedAtUtc is { } validated
+            ? (long)Math.Max(0, (DateTime.UtcNow - validated).TotalSeconds)
+            : null;
+
+    /// <summary>
+    /// True when the most recent attempt to pull cookies from the box's Chrome produced a set Google
+    /// rejected — i.e. Chrome is running and reachable but its Google Voice session is dead.
+    /// Distinguishes "the browser session is stale" from "we could not reach the browser at all".
+    /// </summary>
+    public bool BrowserSessionStale => _lastBrowserRefreshOutcome == BrowserRefreshOutcome.Stale;
+
+    /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
     /// </summary>
     public DateTime? LoadedAt { get; private set; }
@@ -724,6 +752,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         // and mislead the dashboard until the next real GV call happened to land.
         _lastApiSuccessAtUtc = null;
         _lastApiAuthFailureAtUtc = null;
+        _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
 
         Interlocked.Exchange(ref _activeCallId, null);
 
