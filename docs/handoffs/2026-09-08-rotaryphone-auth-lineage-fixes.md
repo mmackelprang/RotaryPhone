@@ -49,6 +49,13 @@ do not coerce it to `0`.**
 `cookiesValid` still reads `true`. ⚠ **Unlike the old field, this value has no upper bound** — a restart
 onto an old credential can legitimately report days.
 
+⚠ **`null` can appear on a perfectly healthy box — do not alarm on it.** Cookies pulled from Chrome carry
+no readable mint time, so adopting a browser-sourced set whose PSIDTS genuinely differs from ours leaves
+the mint unknown until our next rotation (≤ 8 minutes). We carry the previous mint forward whenever the
+PSIDTS values are unchanged, so this is uncommon rather than routine — a pre-merge review caught an
+earlier build in which **every** 20-minute cron fire wiped the field, which would have had you watching it
+flap. **Treat `null` as "not yet known", and alarm on a mint time that is old, not on one that is absent.**
+
 ## 2. `psidtsAgeSeconds` — unchanged, and now deprecated in the payload
 
 **It is byte-for-byte unchanged.** All three write sites, the property expression, the position in the
@@ -113,6 +120,39 @@ answers **502**.
 **If anything on your side treats 200 from this route as "done", that changes.** A 502 here means *"the
 browser session is dead, a human must re-login"* — it does **not** mean the phone is down. The box cron
 only logs, so it needs no change.
+
+### 4a. The full status taxonomy on both cookie routes
+
+The old code had **one** answer for several very different situations, and the message it gave was wrong
+for most of them. Each cause now gets its own status and says only what was actually tested:
+
+| Status | Meaning | Operator action |
+|---|---|---|
+| `200` | Validated against Google, persisted, in use | none |
+| `202` | Cookies **passed** the probe and were persisted, but re-activating the adapter failed | investigate the call path — **do not** re-login |
+| `500` | Cookies passed but could not be written to disk, or activation threw | **the disk**, not Google |
+| `502` | Google **refused** the cookies — tested, not inferred. Nothing was overwritten | re-login at `voice.google.com` |
+| `503` | Chrome was **unreachable** on the CDP port; the Google login was never tested | check Chrome is running — **the session may be fine** |
+
+⚠ **`503` vs `502` is the distinction that matters.** The old code asserted "your Chrome login may be
+dead" for every exhausted attempt, including runs where Chrome was never consulted at all. It happened to
+be right on 2026-09-08 and was still unearned.
+
+### 4b. ⚠ `POST /api/gvbridge/cookies` — `saved` is now honest
+
+The paste-in route keeps its response shape, and `saved` keeps its **name, position and meaning** — *"the
+cookies actually work"*. **What changes is that it is now true.** Previously `saved` was `true` whenever
+re-activation merely failed to throw, so **a set of completely dead cookies returned `saved: true`.** It
+now returns `false` for cookies that did not prove themselves.
+
+A new **additive** `outcome` string says which case it was — `Adopted`, `RejectedByGoogle`,
+`ColdSeedUnvalidated`, `AdoptedButActivationFailed`, `AdoptedButNotPersisted`, `ActivationFailed`. Existing
+readers of `saved` keep working; `outcome` is there when you want the cause.
+
+⚠ **`ColdSeedUnvalidated` is not a failure.** It means there was no validated set to protect, so the
+incoming set was written **unproven** — the correct behaviour for seeding a fresh box, and the reason the
+recovery procedure in `KNOWN-ISSUES` still works. It returns `200` with `saved: false`, because the file
+genuinely was written but nothing has proved it yet.
 
 ## 5. Voicemail saturation — both halves of your ask are now shipped
 

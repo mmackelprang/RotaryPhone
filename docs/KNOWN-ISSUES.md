@@ -91,6 +91,13 @@ two places that persist cookies:
 **502** (was **200**) when the browser session is stale, and the recovery procedure below therefore
 reports honestly instead of silently destroying the working set.
 
+The route also stops giving one answer for several different situations — **502** means Google *tested
+and refused* the cookies (re-login), while **503** means Chrome was *unreachable* and **the Google login
+was never tested at all** (check Chrome is running first; the session may be perfectly fine). **502** and
+**503** send you to two different places, and the old code sent you to the wrong one whenever the browser
+was simply down. **202** means the cookies passed but re-activation failed — investigate the call path,
+do **not** re-login. **500** means the disk, not Google.
+
 **Recovery procedure:** re-login at `voice.google.com` in the box's Chrome (profile on `radio`, CDP port
 9224), confirm the URL stays on `voice.google.com` rather than redirecting, then
 `curl -X POST localhost:5004/api/gvbridge/cookies/refresh-from-browser` and restart `rotary-phone`.
