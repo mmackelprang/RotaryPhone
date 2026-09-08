@@ -150,10 +150,21 @@ public class GvVoicemailController : ControllerBase
     /// guest the recording is permanently gone. Callers MUST answer 502 on !Succeeded and reserve
     /// 404 for a SUCCESSFUL list that did not contain the id — the same distinction
     /// <see cref="GetList"/> has drawn since it shipped (see the comment above its guard).
+    ///
+    /// ⚠ LIMITATION — the 404 half of that contract is bounded at the 100 most recent voicemails.
+    /// We request count: 100 with no page token, and GvThreadClient.ListRawAsync deliberately IGNORES
+    /// a page token because the paging field position is UNVERIFIED. So a voicemail older than the
+    /// 100th returns Succeeded: true with the id absent, and this helper reports it as a genuine miss.
+    /// 404 therefore means "we looked at the 100 most recent and it is not there", NOT "it does not
+    /// exist". That is pre-existing and unchanged here, but it is the same guest-facing lie XR-6 fixed
+    /// reached by a different trigger, so do not harden anything on 404 meaning "permanently gone"
+    /// until paging is verified.
     /// </summary>
     private async Task<(bool Succeeded, GvVoicemailNode? Node)> FindNodeAsync(
         string id, CancellationToken ct)
     {
+        // LIMITATION: count: 100, and pageToken is ignored downstream (paging UNVERIFIED) — so this
+        // resolves only within the 100 most recent voicemails. See the ⚠ note in the summary above.
         var result = await _voicemailClient.ListVoicemailsAsync(count: 100, pageToken: null, ct);
         return (result.Succeeded, result.Items.FirstOrDefault(v => v.MessageId == id));
     }

@@ -22,6 +22,13 @@ namespace RotaryPhoneController.GVBridge.Tests.Api;
 /// The distinction under test: 502 means "we could not look", 404 means "we looked and it is not
 /// there". Each route is covered by a PAIR — the failure case and the genuine-miss case — because a
 /// fix that turned every miss into a 502 would pass the failure half alone.
+///
+/// NOTE — the three "…_WhenListSucceedsButIdAbsent_Still404" twins DUPLICATE existing coverage:
+/// GvVoicemailControllerTests.GetItem_NotFound_Returns404 / GetAudio_UnknownId_Returns404, and
+/// GvVoicemailControllerMarkReadTests.MarkRead_UnknownId_Returns404_NoGvCall (which is strictly
+/// stronger — it also asserts no write was attempted). They are kept here deliberately, so the
+/// 502/404 boundary reads as one pair per route in a single file. They are NOT replacements:
+/// do not delete the originals on the strength of these.
 /// </summary>
 public class GvVoicemailControllerAuthBlackoutTests : IDisposable
 {
@@ -164,6 +171,14 @@ public class GvVoicemailControllerAuthBlackoutTests : IDisposable
         Assert.True(dto.IsRead);          // the applied truth survives the failed re-read
         Assert.Equal("vm.1", dto.Id);     // fell back to the optimistic node, not to an empty DTO
         Assert.Single(events);            // the write happened, so the broadcast must fire
+
+        // REQUIRED, and not redundant: every assertion above passes identically whether the re-read
+        // failed or succeeded, because the fallback node and the re-read node are the same vm.1 and
+        // `with { IsRead = ... }` overrides the only field that could differ. Without this line the
+        // test would keep passing while testing nothing if the second list stopped being issued —
+        // exactly what the "cache the last list" optimization proposed in FindNodeAsync's own summary
+        // would do. This pins that step 5 really does re-read, and really does swallow the failure.
+        Assert.Equal(2, listCalls);
     }
 
     private sealed class StubFetcher : IGvRecordingFetcher

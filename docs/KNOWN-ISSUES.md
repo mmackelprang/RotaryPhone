@@ -164,6 +164,17 @@ all want the same treatment:**
 
 **Resulting contract:** `502` = *"we could not look."* `404` = *"we looked and it is not there."*
 
+⚠️ **The 404 half is bounded at the 100 most recent voicemails, and this is still open.**
+`FindNodeAsync` requests `count: 100` with no page token, and `GvThreadClient.ListRawAsync`
+**deliberately ignores** a page token because the paging field position is UNVERIFIED (it logs a
+warning rather than guess and silently re-read page 1 forever). So a voicemail older than the 100th
+returns `Succeeded: true` with the id absent and is reported as a genuine miss — **a 404 for a
+voicemail that exists**. That is pre-existing and was not introduced or changed here, but it is the
+same guest-facing lie described above reached by a different trigger, and it means `404` from these
+routes means *"not in the 100 most recent"* rather than *"does not exist"*. **Do not harden anything
+on 404 meaning "permanently gone" until paging is verified** — which needs a paged capture from the
+box first. Raised with Radio Console in the reply.
+
 **Tests.** Each route is covered by a **pair** — one proving a failed list becomes 502, its twin
 proving a successful list that lacks the id is **still 404**. The pair is load-bearing: a fix that
 turned every miss into a 502 would pass the failure half alone and silently break the 404 semantics

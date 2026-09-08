@@ -103,7 +103,10 @@ it looked like an independent checkout. Its files are frozen at Jul 29–31.
 | `RotaryPhoneController.GVBridge.dll` | — | Aug 1 19:44 |
 
 A binary dated Aug 1 19:44 that contains `DecodeThreadId` cannot have been built from a tree that
-does not contain `DecodeThreadId`. The box runs `main`.
+does not contain `DecodeThreadId`. **The box is not running `rp-deploy`.** (Strictly, that is what the
+evidence proves — any tree containing the method would satisfy it. The build is consistent with `main`
+at the time, but the load-bearing point for you is simply that `rp-deploy` is not the deployed tree
+and is not a repo you need to reason about.)
 
 **Verify it yourself rather than taking our word:**
 
@@ -135,10 +138,18 @@ Your `XR-4` finding rests on *"nothing is listening on 9224 unless someone separ
 GV-session Chrome."* **That premise is now false.** Checked on the box just now:
 
 ```
-$ ss -ltn | grep 922
-LISTEN 0 10 127.0.0.1:9224 0.0.0.0:*      <- GV bridge (ours)
-LISTEN 0 10 127.0.0.1:9223 0.0.0.0:*      <- your kiosk
+$ ss -ltnp | grep 922
+LISTEN 0 10 127.0.0.1:9224 0.0.0.0:*  users:(("chrome",pid=3128,fd=89))
+LISTEN 0 10 127.0.0.1:9223 0.0.0.0:*  users:(("chrome",pid=32425,fd=96))
+
+$ tr '\0' ' ' < /proc/3128/cmdline  | grep -o -- '--user-data-dir=[^ ]*'
+--user-data-dir=/home/mmack/.config/gv-bridge-chrome     <- GV bridge (ours)
+$ tr '\0' ' ' < /proc/32425/cmdline | grep -o -- '--user-data-dir=[^ ]*'
+--user-data-dir=/home/mmack/.config/radio-kiosk-chrome   <- your kiosk
 ```
+
+(Both listeners are `chrome`, so the port alone does not attribute them — the profile directory is
+what distinguishes the two, which is also why `gv-bridge-ensure.sh` uses that marker for liveness.)
 
 `gv-bridge-ensure.sh` now launches Chrome with `--remote-debugging-port=9224 --remote-allow-origins=*`,
 and those flags are load-bearing rather than debug aids — our cookie refresh reaches the browser over
@@ -170,7 +181,17 @@ its twin proving a successful list that simply lacks the id is **still 404**. Th
 fix that turned every miss into a 502 would pass the first half and break your `404` semantics.
 
 **So the contract is now:** `502` = *"we could not look."* `404` = *"we looked, and it is not there."*
-Your `IsPermanent` mapping of `NotFound` becomes correct rather than merely harmless.
+
+⚠️ **One ceiling you should know about before you harden anything on that.** The 404 half is bounded
+at the **100 most recent voicemails**. We request `count: 100`, and our client deliberately *ignores* a
+page token because the paging field position in Google's wire format is unverified (we log a warning
+rather than guess and silently re-read page 1). So a voicemail older than the 100th comes back as a
+successful list with the id absent, and we report it as a genuine miss — a **404 for a voicemail that
+exists**. That is pre-existing, unchanged by this PR, and out of its scope, but it is the same
+guest-facing lie `XR-6` fixed, reached by a different trigger. **`404` from us means "not in the 100
+most recent", not "does not exist"** — so `IsPermanent` on `NotFound` is now correct within that
+window, and still overclaims outside it. Tell us if you want paging made real; it needs a paged
+capture from the box first.
 
 **Please drop the "~45% of the time / ~9 minutes in every 20" severity figure.** It was measured before
 PR #72, which added recover-and-retry on 401/403 at the shared read path. The blackout window is now
