@@ -64,14 +64,32 @@ path**, and the box-side cron fires it **every 20 minutes**.
 > expired; the cron is now the mechanism most likely to *destroy* working credentials. Retiring it should
 > be prioritized accordingly. It remains a box-side change needing its own rollback story.
 
-**Proposed hardening (not implemented — needs its own change):**
+**Proposed hardening — ✅ IMPLEMENTED 2026-09-08**, five weeks after it was proposed here and **one day
+after the delay cost an 83-minute guest-facing outage.** All three rules below now hold, in both of the
+two places that persist cookies:
 
-- **Validate before adopting.** Health-check a newly extracted cookie set **before** persisting it and
-  swapping it in. Today the order is adopt → persist → discover it fails.
-- **Keep a last-known-good set and roll back** when the new set fails its health check, instead of leaving
-  the adapter holding credentials already proven bad.
-- **Never let an unvalidated refresh overwrite a validated set** — that single rule would have contained
-  this outage to a logged warning.
+- ✅ **Validate before adopting.** `GVApiAdapter.TryValidateCandidateAsync` adopts a candidate in memory,
+  probes it against Google, and persists **only** on success. It writes nothing itself — the caller does,
+  and only on `true`.
+- ✅ **Keep a last-known-good set and roll back.** A failed probe restores the previous cookie set and the
+  previous `_areCookiesValid`, so the adapter is never left holding credentials already proven bad.
+- ✅ **Never let an unvalidated refresh overwrite a validated set.** Both write paths are covered:
+  recovery rung 3 (`TryCdpRefreshAsync`) and — the one that actually ran for two days — the 20-minute
+  cron's `GvCookieManager.SetCookiesAsync`, which used to save on its **first statement** and return
+  `true` whenever `SwitchModeAsync` merely failed to throw.
+
+> ⚠ **Read this before deferring a LOW again.** This block was written on 2026-08-01 with the mechanism
+> correctly diagnosed and the fix correctly specified, and was not built. On 2026-09-06 the same path
+> silently overwrote working credentials with dead ones every 20 minutes for two days; on 2026-09-08 it
+> combined with finding **L2** below to produce the outage. The cost of writing the fix was about a day.
+
+**Regression tests** (each verified to FAIL against the unfixed code, not merely to pass against the fix):
+`CdpRefresh_WhenExtractedCookiesAreRejected_LeavesTheStoredGoodSetIntact` and
+`SetCookiesAsync_GoodCookiesHeld_DeadOnesOffered_ReturnsFalseAndKeepsTheGoodSet`.
+
+⚠ **Behaviour change for operators:** `POST /api/gvbridge/cookies/refresh-from-browser` now answers
+**502** (was **200**) when the browser session is stale, and the recovery procedure below therefore
+reports honestly instead of silently destroying the working set.
 
 **Recovery procedure:** re-login at `voice.google.com` in the box's Chrome (profile on `radio`, CDP port
 9224), confirm the URL stays on `voice.google.com` rather than redirecting, then
@@ -368,6 +386,32 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   (`_psidtsRefreshedAt = DateTime.UtcNow` on load) — it read `6` right after a restart whose on-disk PSIDTS
   was ~7 minutes old. Pre-existing, not introduced by B2, but B2's re-activation path hits it more often,
   so the field is a **less trustworthy staleness signal** than the pre-fix traces implied. (Finding **L2**.)
+
+  > **Status 2026-09-08: ⚠ SUPERSEDED, deliberately NOT resolved. Scored LOW; it caused the outage.**
+  >
+  > **The field still does exactly this, on purpose.** `psidtsAgeSeconds` is a published cross-repo
+  > contract and RotaryPhone told Radio Console in writing that it *"stays exactly as it is"*. Correcting
+  > it in place would have changed values underneath a consumer that already binds to them — the same
+  > class of mistake as the defect itself. So its behaviour is **frozen**, and three tests now pin that
+  > freeze so nobody "fixes" it by accident.
+  >
+  > What changed instead:
+  > - **The information gap is closed.** The genuine mint time now travels **with the cookie set**, is
+  >   persisted, survives a restart, and is exposed as **`psidtsMintedAtUtc`** — a nullable ISO-8601
+  >   timestamp on `/api/gvbridge/status`. `null` means the mint time is genuinely unknown (a legacy
+  >   cookie file, a hand-pasted set, or one extracted from Chrome, whose jar carries no readable issue
+  >   time). **Unknown is not healthy; do not render it as fresh or as zero.**
+  > - **`psidtsAgeSeconds` is now marked deprecated in the payload's own doc comment**, not only in a
+  >   handoff — a true-but-invisible caveat becomes a false premise six months later.
+  > - **The operational consequence is fixed.** This finding's real cost was never the misleading number:
+  >   it was that *the scheduler could not know the credential's age either*, so a restarted process
+  >   waited a full 8-minute interval on a credential that was already 7 minutes old. That is defect 1 of
+  >   the 2026-09-08 outage and it is fixed by `ComputeFirstRefreshDelayMs`.
+  >
+  > **Retiring `psidtsAgeSeconds` outright is an open owner decision.** Radio Console has since retracted
+  > the published bands that motivated the freeze and confirmed **zero code references** to the field in
+  > their `src/` — so the freeze now protects prose rather than a parser. It was kept anyway because
+  > reversing an owner decision is not a Builder's call.
 
 **See:** [`docs/plans/gv-auth-blackout-b2-design.md`](plans/gv-auth-blackout-b2-design.md) (findings
 F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plans/gv-auth-blackout-b2-plan.md)

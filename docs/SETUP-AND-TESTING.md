@@ -187,7 +187,10 @@ signaling state, not a stale flag:
 curl http://radio:5004/api/gvbridge/status
 # {"available":true,"activeMode":"GVApi","sipRegistered":true,
 #  "wsConnected":true,"lastConnectedAt":"2026-06-13T16:02:11Z",
-#  "cookiesValid":true,"psidtsAgeSeconds":420}
+#  "cookiesValid":true,"psidtsAgeSeconds":420,
+#  "psidtsMintedAtUtc":"2026-09-08T18:01:00Z",
+#  "browserSessionValidatedAt":"2026-09-08T17:44:02Z",
+#  "browserSessionAgeSeconds":1018,"browserSessionStale":false}
 ```
 
 | Field | Meaning |
@@ -195,7 +198,15 @@ curl http://radio:5004/api/gvbridge/status
 | `sipRegistered` | `true` only when registered **and** the socket is actually open (honest — a dead socket can no longer report `true`). |
 | `wsConnected` | Whether the SIP WebSocket is currently open. |
 | `lastConnectedAt` | UTC of the last successful REGISTER 200-OK. A **new** value after a gap means a reconnect happened. |
-| `psidtsAgeSeconds` | Age of the rotating freshness cookies (`__Secure-1PSIDTS/3PSIDTS`). A large age hints the next request may 401 even if `cookiesValid` last passed. |
+| `psidtsAgeSeconds` | ⚠ **DEPRECATED — do not use for new work.** Seconds since this process last **loaded or minted** the freshness cookies. Because a mere load restamps it, it resets to ~0 on every restart and reload, so it reads reassuringly low for a credential that is in fact days old. Behaviour is **frozen** for contract compatibility. Use `psidtsMintedAtUtc`. |
+| `psidtsMintedAtUtc` | ⭐ UTC instant Google actually **minted** the credential now held, persisted with the cookie set so it survives a restart. **`null` means UNKNOWN** — a legacy cookie file, a hand-pasted set, or one extracted from the browser (Chrome's jar carries no readable issue time). **Unknown is NOT healthy: never render it as fresh or as `0`.** PSIDTS lives ~11 minutes, and the service re-mints every 8, so an age past ~11 minutes means the next request may 401 even if `cookiesValid` last passed. After a restart onto an old credential this can legitimately be **days** old — do not assume an upper bound. |
+| `browserSessionValidatedAt` | UTC of the last time cookies pulled from the box's Chrome actually **worked**. `null` if none ever has. |
+| `browserSessionAgeSeconds` | Convenience age of the above. A steadily climbing value **with everything else green** is the warning: the service can regenerate its own PSIDTS lineage indefinitely while the Chrome session it bootstraps from is dead. Recovery has no floor below a working browser session. |
+| `browserSessionStale` | `true` when Chrome was reachable, handed us cookies, and **Google rejected them** — tested, not inferred. Means a human must re-login at `voice.google.com`. Distinct from "we could not reach Chrome at all". |
+
+> **Why two PSIDTS fields.** `psidtsAgeSeconds` measures the age of a *cache operation*; `psidtsMintedAtUtc`
+> measures the age of the *credential*. Only the second one can tell you the phone is about to stop
+> working. The first is retained solely because a cross-repo consumer was told it would not change.
 
 **Keep-alive:** the transport parses Google's RFC 6223 `keep=` (e.g. `keep=240`) from the
 REGISTER 200-OK Via and sends an RFC 5626 §3.5.1 double-CRLF (`\r\n\r\n`) ping every
