@@ -22,6 +22,28 @@ public sealed class GvCookieSet
     /// </summary>
     public string? RawCookieHeader { get; init; }
 
+    /// <summary>
+    /// UTC time the PSIDTS values carried by this set were genuinely MINTED — the moment
+    /// <c>RotateCookies</c> returned them. <c>null</c> means UNKNOWN: a set written before this field
+    /// existed, one pasted in by hand, one produced by <c>scripts/gv-extract-cookies.py</c>, or one
+    /// extracted from the browser (Chrome's jar carries no issue time we can read).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Deliberately NOT "when we loaded the file". The adapter used to stamp <c>DateTime.UtcNow</c> on
+    /// every load, which reported a credential minted 2026-09-06 as 208 seconds old and concealed a
+    /// two-day session death. It is PERSISTED because a process that cannot know the age of the
+    /// credential it inherited cannot schedule around it — that is the 2026-09-08 outage.
+    /// </remarks>
+    public DateTime? PsidtsMintedAtUtc { get; init; }
+
+    /// <summary>
+    /// UTC time a cookie set extracted from the box's Chrome last PASSED a live health probe against
+    /// Google. <c>null</c> means no browser-sourced set in this lineage has ever been validated.
+    /// Persisted so the age of the BROWSER session survives a restart — the missing signal that let a
+    /// dead Chrome login go unnoticed from 2026-09-06 to 2026-09-08.
+    /// </summary>
+    public DateTime? BrowserSessionValidatedAtUtc { get; init; }
+
     public string ToCookieHeader()
     {
         if (!string.IsNullOrEmpty(RawCookieHeader))
@@ -50,7 +72,10 @@ public sealed class GvCookieSet
     /// ToCookieHeader() stops sending the stale ones. A null argument leaves that partner
     /// unchanged. If no raw header is present, one is built from the typed fields first.
     /// </summary>
-    public GvCookieSet WithRefreshedPsidts(string? psidts1, string? psidts3)
+    /// <param name="mintedAtUtc">
+    /// Test seam. Defaults to now; pass an explicit value to build a set of a known age.
+    /// </param>
+    public GvCookieSet WithRefreshedPsidts(string? psidts1, string? psidts3, DateTime? mintedAtUtc = null)
     {
         if (psidts1 is null && psidts3 is null)
             return this;
@@ -63,7 +88,30 @@ public sealed class GvCookieSet
         if (psidts3 is not null)
             raw = SpliceCookie(raw, "__Secure-3PSIDTS", psidts3);
 
-        return new GvCookieSet
+        // A successful RotateCookies IS the mint, so the timestamp is stamped here rather than at the
+        // call site — that is what makes it travel into Serialize() and onto disk.
+        return CopyWith(raw, mintedAtUtc ?? DateTime.UtcNow, BrowserSessionValidatedAtUtc);
+    }
+
+    /// <summary>
+    /// Record that this set came from the browser and has just passed a live health probe. Only ever
+    /// called after a successful probe — an unvalidated browser set must never carry this stamp.
+    /// </summary>
+    public GvCookieSet WithBrowserSessionValidatedAt(DateTime validatedAtUtc)
+        => CopyWith(RawCookieHeader, PsidtsMintedAtUtc, validatedAtUtc);
+
+    /// <summary>
+    /// The ONLY place this type is copied. Every property must appear here exactly once.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ A property added to <see cref="GvCookieSet"/> and forgotten here is silently reset on every
+    /// rotation. No test of a rotation's OUTPUT would catch it, because the output looks correct — the
+    /// loss is of a field the test did not think to check. <c>CopyWith_CoversEveryProperty</c> is the
+    /// tripwire; if you add a property, it will fail until you add it here too.
+    /// </remarks>
+    private GvCookieSet CopyWith(
+        string? rawCookieHeader, DateTime? psidtsMintedAtUtc, DateTime? browserSessionValidatedAtUtc)
+        => new()
         {
             Sapisid = Sapisid,
             Sid = Sid,
@@ -72,9 +120,10 @@ public sealed class GvCookieSet
             Apisid = Apisid,
             Secure1Psid = Secure1Psid,
             Secure3Psid = Secure3Psid,
-            RawCookieHeader = raw,
+            RawCookieHeader = rawCookieHeader,
+            PsidtsMintedAtUtc = psidtsMintedAtUtc,
+            BrowserSessionValidatedAtUtc = browserSessionValidatedAtUtc,
         };
-    }
 
     /// <summary>
     /// Replace the value of <paramref name="name"/> in a "name=value; name2=value2" cookie
