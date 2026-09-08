@@ -40,10 +40,22 @@ public interface IBellFailureStore
 /// <para>
 /// <b>One deliberate improvement on the precedent: the write is atomic.</b> HT801ConfigService does
 /// a plain File.WriteAllText, which can leave a truncated file if the process dies mid-write. This
-/// class exists BECAUSE a dismissal has to survive a crash — a crash-torn state file would defeat
-/// the entire point of it — so it serializes to a sibling .tmp and then File.Move(overwrite: true),
+/// class exists BECAUSE a dismissal has to survive a restart — a torn state file would defeat the
+/// entire point of it — so it serializes to a sibling temp file and then File.Move(overwrite: true),
 /// which is a rename(2) on Linux and therefore all-or-nothing. A reader sees either the previous
 /// complete file or the new complete file, never a half of one.
+/// </para>
+///
+/// <para>
+/// <b>Atomicity is not durability, and the difference is worth stating precisely.</b> What
+/// WriteAllText + Move buys is that the file is never observed half-written. It does NOT buy a
+/// guaranteed flush to the platter: nothing here calls fsync on either the file or the directory.
+/// So a PROCESS CRASH or a normal service restart is fully covered — the page cache outlives the
+/// process — and that is the case this feature was built for. A POWER LOSS is best-effort: on ext4
+/// the auto_da_alloc heuristic makes a rename-over-existing-file case commit the data first in
+/// practice, but that is a mount-option-dependent behaviour, not a promise. The cost of losing the
+/// file in a power cut is one dismissed note reappearing, which does not justify an fsync on the
+/// ring path.
 /// </para>
 /// </summary>
 public sealed class JsonBellFailureStore : IBellFailureStore
@@ -55,6 +67,18 @@ public sealed class JsonBellFailureStore : IBellFailureStore
     // would come back as whatever landed in slot 2 next, and it would come back looking perfectly
     // valid. Strings survive a reordering; the cost is a handful of bytes.
     //
+    // They survive an UNKNOWN MEMBER too, but only because of the custom converter below rather than
+    // the string encoding itself. JsonStringEnumConverter throws on a name it does not recognise,
+    // and Load's catch-all would then discard the ENTIRE file — every phone's state, including a
+    // dismissal — over one unreadable field. That is a real rollback scenario: a build that adds a
+    // BellFailureReason member writes the new name, and the older build you roll back to cannot read
+    // it. Mapping the unrecognised name to Unknown keeps the rest of the record intact.
+    //
+    // Still NOT covered, deliberately: a MISSING field degrades to its CLR default rather than being
+    // detected, so an older build reading a newer file that omits Acknowledged would read it as
+    // false. No shipped build writes a record without those fields, so this is a hazard to know
+    // about rather than one to guard against today.
+    //
     // PropertyNameCaseInsensitive because BellFailureRecord is a positional record: deserialization
     // goes through its generated constructor, matching JSON names to constructor parameters, and
     // this removes any dependence on the casing convention in force when the file was written.
@@ -62,8 +86,48 @@ public sealed class JsonBellFailureStore : IBellFailureStore
     {
         WriteIndented = true,
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new UnknownTolerantReasonConverter() }
     };
+
+    /// <summary>
+    /// Writes <see cref="BellFailureReason"/> as its name, and reads any name it does not recognise
+    /// as <see cref="BellFailureReason.Unknown"/> rather than throwing.
+    ///
+    /// <para>
+    /// <c>Unknown</c> exists precisely as the unrecognised-value bucket — BellFailureReason's own
+    /// summary says Radio.Web "treats an unrecognised value as Unknown", so this makes the store
+    /// agree with the contract the enum already advertises. Anything that is not a recognised name
+    /// lands there: an unknown string, a number, an explicit null. The alternative is a JsonException
+    /// that costs the whole file.
+    /// </para>
+    /// </summary>
+    private sealed class UnknownTolerantReasonConverter : JsonConverter<BellFailureReason>
+    {
+        public override BellFailureReason Read(ref Utf8JsonReader reader, Type typeToConvert,
+            JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.String)
+            {
+                var name = reader.GetString();
+
+                // Enum.IsDefined rejects a numeric string that parses to an undefined value — e.g.
+                // "99" would otherwise become (BellFailureReason)99 and pass for a real member.
+                if (name is not null
+                    && Enum.TryParse<BellFailureReason>(name, ignoreCase: true, out var parsed)
+                    && Enum.IsDefined(parsed))
+                {
+                    return parsed;
+                }
+            }
+
+            // Any other token (number, null, ...) is left unconsumed on purpose — the serializer
+            // skips the value for us — and reported as Unknown.
+            return BellFailureReason.Unknown;
+        }
+
+        public override void Write(Utf8JsonWriter writer, BellFailureReason value,
+            JsonSerializerOptions options) => writer.WriteStringValue(value.ToString());
+    }
 
     private readonly string _path;
     private readonly ILogger? _logger;
@@ -85,14 +149,22 @@ public sealed class JsonBellFailureStore : IBellFailureStore
         try
         {
             var json = File.ReadAllText(_path);
-            var records = JsonSerializer.Deserialize<Dictionary<string, BellFailureRecord>>(json, JsonOptions);
+
+            // Deserialized as NULLABLE values on purpose. `{"default": null}` is valid JSON and
+            // produces a present key with a null value — the static type says that cannot happen,
+            // the runtime disagrees, and nothing above would catch it. Filtering here fixes it at
+            // the source: the tracker dereferences these records on the ring path and from the ack
+            // endpoint, so a null that got through would surface as an NRE during an incoming call.
+            var records = JsonSerializer.Deserialize<Dictionary<string, BellFailureRecord?>>(json, JsonOptions);
 
             if (records is null)
             {
                 return new Dictionary<string, BellFailureRecord>(StringComparer.OrdinalIgnoreCase);
             }
 
-            return new Dictionary<string, BellFailureRecord>(records, StringComparer.OrdinalIgnoreCase);
+            return records
+                .Where(kv => kv.Value is not null)
+                .ToDictionary(kv => kv.Key, kv => kv.Value!, StringComparer.OrdinalIgnoreCase);
         }
         catch (Exception ex)
         {
@@ -109,7 +181,9 @@ public sealed class JsonBellFailureStore : IBellFailureStore
 
     public void Save(IReadOnlyDictionary<string, BellFailureRecord> records)
     {
-        var tempPath = _path + ".tmp";
+        // Declared out here so the catch can clean it up; assigned inside the try so that nothing on
+        // the way to it can throw past the guard.
+        string? tempPath = null;
 
         try
         {
@@ -118,6 +192,17 @@ public sealed class JsonBellFailureStore : IBellFailureStore
             {
                 Directory.CreateDirectory(directory);
             }
+
+            // A RANDOM temp name in the same directory, not a fixed "<path>.tmp". Two processes over
+            // the same data/ directory — a manual `dotnet run` alongside the installed service, or
+            // an overlapping restart — would otherwise share one scratch file and could interleave a
+            // write with the other's rename, silently publishing a mix or losing an update. The
+            // rename is atomic either way; what the fixed name lost was the guarantee that the bytes
+            // being renamed are the ones THIS call wrote. Same directory is required, not incidental:
+            // rename(2) is only atomic within a filesystem.
+            tempPath = Path.Combine(
+                string.IsNullOrEmpty(directory) ? "." : directory,
+                Path.GetRandomFileName());
 
             File.WriteAllText(tempPath, JsonSerializer.Serialize(records, JsonOptions));
             File.Move(tempPath, _path, overwrite: true);
@@ -129,11 +214,11 @@ public sealed class JsonBellFailureStore : IBellFailureStore
             // into an unhandled exception during an incoming call.
             _logger?.LogWarning(ex, "Could not persist bell-failure state to {Path}", _path);
 
-            // A leftover .tmp is not itself harmful — nothing reads it — but it is the kind of
+            // A leftover temp file is not itself harmful — nothing reads it — but it is the kind of
             // debris that makes a later reader wonder whether the real file is trustworthy.
             try
             {
-                if (File.Exists(tempPath)) File.Delete(tempPath);
+                if (tempPath is not null && File.Exists(tempPath)) File.Delete(tempPath);
             }
             catch
             {

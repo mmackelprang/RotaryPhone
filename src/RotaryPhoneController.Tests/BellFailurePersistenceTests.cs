@@ -165,16 +165,92 @@ public class BellFailurePersistenceTests : IDisposable
     }
 
     [Fact]
-    public void InMemoryTracker_WritesNoFile()
+    public void InMemoryTracker_WritesNothingWhereAStoreBackedTrackerDoes()
     {
+        // This test used to be called InMemoryTracker_WritesNoFile and asserted Assert.Empty against
+        // a directory it had never shown anything writes to. That assertion could not fail for the
+        // reason the name claimed: a store-less tracker has no path at all, so it could only ever
+        // have written somewhere OTHER than _dir. It passed vacuously.
+        //
+        // So establish the premise first: prove _dir IS a place a tracker writes.
+        var storeBacked = NewTracker();
+        Fail(storeBacked);
+        Assert.NotEmpty(Directory.GetFiles(_dir));
+
+        // ...then clear it and run a store-less tracker over the same ground.
+        File.Delete(_path);
+        Assert.Empty(Directory.GetFiles(_dir));
+
         // No store means no disk, which is what the eight pre-existing BellFailureTrackerTests rely
         // on and what keeps `new BellFailureTracker()` a valid construction.
-        var tracker = new BellFailureTracker();
+        var inMemory = new BellFailureTracker();
 
-        Fail(tracker);
-        tracker.Acknowledge(PhoneId);
+        Fail(inMemory);
+        inMemory.Acknowledge(PhoneId);
 
-        Assert.True(tracker.Get(PhoneId)!.Acknowledged);
+        Assert.True(inMemory.Get(PhoneId)!.Acknowledged);
         Assert.Empty(Directory.GetFiles(_dir));
+    }
+
+    [Fact]
+    public void UnknownReasonName_LoadsAsUnknown_WithTheRestOfTheRecordIntact()
+    {
+        // The rollback scenario: a build that added a BellFailureReason member wrote this file, and
+        // an older build is now reading it. JsonStringEnumConverter throws on a name it does not
+        // recognise, and Load's catch-all would then discard EVERY phone's state — including the
+        // dismissal RadioConsole was promised in writing — over one unreadable field.
+        File.WriteAllText(_path, """
+        {
+          "default": {
+            "OccurredAtUtc": "2026-07-28T12:34:56Z",
+            "Reason": "SomeReasonFromANewerBuild",
+            "CallerNumber": "5551234567",
+            "CallId": "call-abc",
+            "Target": "192.0.2.240",
+            "Detail": "486 Busy Here",
+            "FailureCount": 4,
+            "Acknowledged": true
+          }
+        }
+        """);
+
+        var restored = NewTracker().Get(PhoneId);
+
+        // The record survives at all — this is what fails on JsonStringEnumConverter.
+        Assert.NotNull(restored);
+
+        // BellFailureReason.Unknown exists precisely as the unrecognised-value bucket, and the enum's
+        // own summary already says Radio.Web treats an unrecognised value that way.
+        Assert.Equal(BellFailureReason.Unknown, restored!.Reason);
+
+        // The point of the fix: an unreadable field costs the FIELD, not the whole file. Asserting
+        // only on Reason would pass even if everything else came back as a CLR default.
+        Assert.Equal(new DateTime(2026, 7, 28, 12, 34, 56, DateTimeKind.Utc), restored.OccurredAtUtc);
+        Assert.Equal("5551234567", restored.CallerNumber);
+        Assert.Equal("call-abc", restored.CallId);
+        Assert.Equal("192.0.2.240", restored.Target);
+        Assert.Equal("486 Busy Here", restored.Detail);
+        Assert.Equal(4, restored.FailureCount);
+        Assert.True(restored.Acknowledged);
+    }
+
+    [Fact]
+    public void NullRecordInStateFile_IsDropped_AndDoesNotBreakTheRingPath()
+    {
+        // `{"default": null}` is valid JSON that deserializes to a PRESENT key with a NULL value.
+        // The static type (Dictionary<string, BellFailureRecord>) says that cannot happen and Load's
+        // try/catch does not cover it, so the null reached the tracker: RecordFailure reads
+        // existing.FailureCount and Acknowledge reads existing.Acknowledged, both of which would
+        // throw an NRE — the first on the incoming-call ring path, the second as a 500 from the ack
+        // endpoint. Load now filters nulls out at the source.
+        File.WriteAllText(_path, """{ "default": null, "other-phone": null }""");
+
+        var tracker = NewTracker();
+
+        Assert.Null(tracker.Get(PhoneId));
+
+        // The assertions that actually matter: both paths survive the file.
+        Assert.Equal(1, Fail(tracker).FailureCount);
+        Assert.True(tracker.Acknowledge(PhoneId));
     }
 }

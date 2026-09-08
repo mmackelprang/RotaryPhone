@@ -104,7 +104,6 @@ public class SystemStatusTransportParityTests
         // 2026-07 outage while every INVITE went somewhere else; only the resolved binding says
         // anything about where a ring actually lands.
         Assert.Equal(ResolvedAddress, Status(controller).Ht801IpAddress);
-        Assert.NotEqual(ConfiguredAddress, Status(controller).Ht801IpAddress);
     }
 
     [Fact]

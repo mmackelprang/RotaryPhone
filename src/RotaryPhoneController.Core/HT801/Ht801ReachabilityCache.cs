@@ -32,6 +32,14 @@ public interface IHt801ReachabilityCache
     /// i.e. when there is something worth telling clients about. A refresh that only moves the
     /// timestamp returns false, which is what keeps the SignalR broadcast from firing every 30
     /// seconds on a healthy system.
+    ///
+    /// <para>
+    /// <b>Safe for concurrent writers, and the returned flag is trustworthy under them.</b> The
+    /// implementation commits with a compare-and-swap and recomputes the comparison on retry, so the
+    /// bool always describes the transition THAT CALL actually committed — never a transition
+    /// against a snapshot another writer has already replaced. Without that, two writers could each
+    /// see "no change" against the same stale snapshot and a real change would go unbroadcast.
+    /// </para>
     /// </summary>
     bool Update(bool? reachable, string probedAddress, DateTime probedAtUtc);
 }
@@ -67,17 +75,37 @@ public sealed class Ht801ReachabilityCache : IHt801ReachabilityCache
 
     public bool Update(bool? reachable, string probedAddress, DateTime probedAtUtc)
     {
-        var previous = Volatile.Read(ref _current);
+        // The timestamp advances regardless of whether anything else did. Broadcast suppression is
+        // about what clients are TOLD, not about what we know — a caller reading Current must always
+        // see the true probe age, or the staleness affordance this endpoint exists to feed would
+        // freeze at the last change.
+        var updated = new Ht801ProbeSnapshot(reachable, probedAtUtc, probedAddress);
 
-        // The null -> bool transition counts as a change: it is what turns "Unknown" into a real
-        // answer in the UI, and suppressing it would leave the first successful probe invisible.
-        var changed = reachable != previous.Reachable || probedAddress != previous.ProbedAddress;
+        // Read, compare and commit as ONE atomic step, retrying if someone committed in between.
+        //
+        // Today the only writer is the notifier's probe, which claims a slot with Interlocked before
+        // it runs — but that guarantee lives in a different type, in a different assembly, and is
+        // invisible from here. This type is public, DI-registered behind a public interface, and the
+        // ADR contemplates a POST /api/phone/bell/probe that would be the obvious second writer. A
+        // plain read-then-write would then let two probes compute `changed` against the same stale
+        // snapshot, and a genuine reachability transition would return false and never be broadcast
+        // — a silent stuck-green UI, which is the whole class of bug this work exists to remove.
+        //
+        // On a 30-second path the loop costs nothing and it never spins in practice: it iterates
+        // only when a write genuinely interleaved.
+        while (true)
+        {
+            var previous = Volatile.Read(ref _current);
 
-        // The timestamp advances regardless. Broadcast suppression is about what clients are TOLD,
-        // not about what we know — a caller reading Current must always see the true probe age, or
-        // the staleness affordance this endpoint exists to feed would freeze at the last change.
-        Volatile.Write(ref _current, new Ht801ProbeSnapshot(reachable, probedAtUtc, probedAddress));
+            // The null -> bool transition counts as a change: it is what turns "Unknown" into a real
+            // answer in the UI, and suppressing it would leave the first successful probe invisible.
+            // Recomputed on every attempt so it describes the transition we actually commit.
+            var changed = reachable != previous.Reachable || probedAddress != previous.ProbedAddress;
 
-        return changed;
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _current, updated, previous), previous))
+            {
+                return changed;
+            }
+        }
     }
 }

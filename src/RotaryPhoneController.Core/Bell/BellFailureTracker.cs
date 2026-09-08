@@ -95,10 +95,24 @@ public sealed class BellFailureTracker : IBellFailureTracker
         _store = store;
         _logger = logger;
 
-        // Load is contractually incapable of throwing — see JsonBellFailureStore. That matters here
-        // specifically: this runs while the DI container is building a singleton the whole server
-        // depends on, and a bad state file must not be able to stop the appliance from booting.
-        var restored = store?.Load();
+        // This runs while the DI container is building a singleton the whole server depends on, so a
+        // throwing Load would mean an appliance that does not boot — a phone that will not ring, to
+        // protect a dismissal flag.
+        //
+        // JsonBellFailureStore already swallows its own I/O errors, but _store is the INTERFACE, and
+        // that guarantee belongs to one implementation rather than to the contract. The tracker
+        // therefore defends itself rather than trusting whatever was injected: a test double, a
+        // future store, or a decorator can throw here without taking the server down with it.
+        IReadOnlyDictionary<string, BellFailureRecord>? restored = null;
+        try
+        {
+            restored = store?.Load();
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Bell-failure store threw while loading — starting empty. A dismissed note may reappear once.");
+        }
 
         _failures = restored is null
             ? new ConcurrentDictionary<string, BellFailureRecord>(StringComparer.OrdinalIgnoreCase)
@@ -186,13 +200,30 @@ public sealed class BellFailureTracker : IBellFailureTracker
     /// most a few times per call, and buys the guarantee that the file's write order can never
     /// disagree with the in-memory order: two concurrent mutations serialized in one order but
     /// flushed in the other would leave the durable state contradicting the state the UI is showing,
-    /// which is the failure mode this whole feature exists to eliminate. The store swallows its own
-    /// I/O errors, so this cannot throw out of a mutation.
+    /// which is the failure mode this whole feature exists to eliminate.
+    ///
+    /// <para>
+    /// <b>This method cannot throw, because it catches — not because it trusts the store.</b>
+    /// JsonBellFailureStore swallows its own I/O errors, but <c>_store</c> is the interface and no
+    /// other implementation is bound by that. The call site that matters is RecordFailure, which
+    /// runs INSIDE _lock on the incoming-call ring path: a store that threw would propagate out of a
+    /// bell-failure recording, during a live call, holding a lock. Persisting a note is the least
+    /// important thing happening on that path and it must never be the thing that breaks it.
+    /// </para>
     /// </summary>
     private void Persist()
     {
         if (_store is null) return;
 
-        _store.Save(new Dictionary<string, BellFailureRecord>(_failures, StringComparer.OrdinalIgnoreCase));
+        try
+        {
+            _store.Save(new Dictionary<string, BellFailureRecord>(_failures, StringComparer.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex,
+                "Bell-failure store threw while saving — in-memory state is unchanged and correct, "
+                + "but it may not survive a restart.");
+        }
     }
 }
