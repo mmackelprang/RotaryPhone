@@ -52,7 +52,9 @@ public class GvVoicemailController : ControllerBase
     [HttpGet("{id}")]
     public async Task<IActionResult> GetItem(string id, CancellationToken ct = default)
     {
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node is null) return NotFound(new { error = $"Voicemail {id} not found" });
         return Ok(ToDto(node));
     }
@@ -60,7 +62,13 @@ public class GvVoicemailController : ControllerBase
     [HttpGet("{id}/audio")]
     public async Task<IActionResult> GetAudio(string id, CancellationToken ct = default)
     {
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        // Do not mask an auth/transport failure as "has no recording" — the same rule GetList states
+        // above its own guard. RadioConsole maps 404 from this route to "retrying will not help"
+        // (GvMediaUnavailableException.IsPermanent), so a 404 here tells a guest a recording that
+        // exists is permanently gone. 404 must mean "we looked and it is not there".
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node?.MediaId is null)
             return NotFound(new { error = $"Voicemail {id} has no recording" });
 
@@ -89,7 +97,11 @@ public class GvVoicemailController : ControllerBase
             return BadRequest(new { error = "unread_unsupported" });
 
         // 2. Find the node (also needed to build the response DTO — same list+filter the read routes do).
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        // Same blackout hazard as GetAudio: an unread list yields null and we would 404 a voicemail
+        // that exists, before any write is attempted.
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node is null) return NotFound(new { error = $"Voicemail {id} not found" });
 
         // 3. Idempotent no-op (ADR §4.3): already in the target state → 200 with the true DTO, no GV call.
@@ -107,7 +119,15 @@ public class GvVoicemailController : ControllerBase
 
         // 5. Re-read so the response DTO reflects GV's truth (ADR §4.4). Fall back to the optimistic node
         //    if the re-read can't find it (rare race) — but with the applied IsRead.
-        var fresh = await FindNodeAsync(id, ct) ?? node;
+        //
+        //    The re-read's Succeeded flag is DELIBERATELY DISCARDED. Step 4 already wrote successfully
+        //    to Google; returning 502 now would tell RadioConsole the mark-read did not happen when it
+        //    did, and it would reconcile away a change that is real — a worse lie than a marginally
+        //    stale DTO. The `with { IsRead = ... }` below already carries the applied truth, so the
+        //    fallback node is correct on the field that matters. This is the one call site where
+        //    !Succeeded must NOT become a 502.
+        var (_, freshNode) = await FindNodeAsync(id, ct);
+        var fresh = freshNode ?? node;
         var dto = ToDto(fresh) with { IsRead = request.IsRead };
 
         // 6. Broadcast path-a ReadStateChanged (ADR §5). Unconditional; RadioConsole de-dupes.
@@ -118,12 +138,35 @@ public class GvVoicemailController : ControllerBase
         return Ok(dto);
     }
 
-    // Voicemail is a thread/message subtype — there is no per-id GET on GV; we list and filter.
-    // Lists are small (tens of items); a future optimization could cache the last list.
-    private async Task<GvVoicemailNode?> FindNodeAsync(string id, CancellationToken ct)
+    /// <summary>
+    /// Resolve one voicemail node by message id. Voicemail is a thread/message subtype — there is no
+    /// per-id GET on GV, so we list and filter. Lists are small (tens of items); a future
+    /// optimization could cache the last list.
+    ///
+    /// Returns the LIST's Succeeded flag alongside the node, because a bare null cannot tell the two
+    /// failure modes apart. A list that FAILED (auth blackout, GV 5xx, wire-shape drift) yields an
+    /// empty item set, so FirstOrDefault returns null for a voicemail that exists — and the caller,
+    /// seeing only null, answers 404. RadioConsole reads 404 as "retrying will not help" and tells a
+    /// guest the recording is permanently gone. Callers MUST answer 502 on !Succeeded and reserve
+    /// 404 for a SUCCESSFUL list that did not contain the id — the same distinction
+    /// <see cref="GetList"/> has drawn since it shipped (see the comment above its guard).
+    ///
+    /// ⚠ LIMITATION — the 404 half of that contract is bounded at the 100 most recent voicemails.
+    /// We request count: 100 with no page token, and GvThreadClient.ListRawAsync deliberately IGNORES
+    /// a page token because the paging field position is UNVERIFIED. So a voicemail older than the
+    /// 100th returns Succeeded: true with the id absent, and this helper reports it as a genuine miss.
+    /// 404 therefore means "we looked at the 100 most recent and it is not there", NOT "it does not
+    /// exist". That is pre-existing and unchanged here, but it is the same guest-facing lie XR-6 fixed
+    /// reached by a different trigger, so do not harden anything on 404 meaning "permanently gone"
+    /// until paging is verified.
+    /// </summary>
+    private async Task<(bool Succeeded, GvVoicemailNode? Node)> FindNodeAsync(
+        string id, CancellationToken ct)
     {
+        // LIMITATION: count: 100, and pageToken is ignored downstream (paging UNVERIFIED) — so this
+        // resolves only within the 100 most recent voicemails. See the ⚠ note in the summary above.
         var result = await _voicemailClient.ListVoicemailsAsync(count: 100, pageToken: null, ct);
-        return result.Items.FirstOrDefault(v => v.MessageId == id);
+        return (result.Succeeded, result.Items.FirstOrDefault(v => v.MessageId == id));
     }
 
     private static VoicemailItemDto ToDto(GvVoicemailNode n) => new(
