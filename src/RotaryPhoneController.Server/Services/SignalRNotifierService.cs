@@ -6,7 +6,6 @@ using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
-using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Server.Hubs;
 
 namespace RotaryPhoneController.Server.Services;
@@ -399,22 +398,10 @@ public class SignalRNotifierService : IHostedService
         // build a status out of two different ones — see Ht801ReachabilityCache.
         var probe = _ht801Cache.Current;
 
-        var status = new SystemStatus
-        {
-            Platform = PlatformDetector.CurrentPlatform.ToString(),
-            IsRaspberryPi = PlatformDetector.IsRaspberryPi,
-            BluetoothEnabled = _config.UseActualBluetoothHfp,
-            BluetoothConnected = _bluetoothAdapter.IsConnected,
-            BluetoothDeviceAddress = _bluetoothAdapter.ConnectedDeviceAddress,
-            SipListening = _sipAdapter.IsListening,
-            SipListenAddress = _config.SipListenAddress,
-            SipPort = _config.SipPort,
-            // Read the cached probe result — never probe synchronously here, or every status
-            // broadcast would block on a network timeout.
-            Ht801IpAddress = probe.ProbedAddress,
-            Ht801Reachable = probe.Reachable,
-            Ht801LastCheckedUtc = probe.LastCheckedUtc
-        };
+        // Built through the SHARED factory, which is the same call PhoneController.GetSystemStatus
+        // makes for the REST payload. That is what stops this event and that endpoint from drifting
+        // apart again — they no longer have two projections that must be kept in step by hand.
+        var status = SystemStatusFactory.Create(_config, _bluetoothAdapter, _sipAdapter, probe);
 
         _logger.LogDebug("Broadcasting system status: Bluetooth={Connected}, SIP={Listening}",
             status.BluetoothConnected, status.SipListening);

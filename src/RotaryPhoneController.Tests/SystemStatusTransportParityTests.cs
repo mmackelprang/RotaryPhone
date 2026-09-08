@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -6,8 +7,11 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
+using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
 using RotaryPhoneController.Server.Controllers;
+using RotaryPhoneController.Server.Hubs;
+using RotaryPhoneController.Server.Services;
 
 namespace RotaryPhoneController.Tests;
 
@@ -119,11 +123,148 @@ public class SystemStatusTransportParityTests
         Assert.Null(status.Ht801IpAddress);
     }
 
+    /// <summary>
+    /// The test this file is named for, and which until now it did not contain: it drove
+    /// PhoneController only, so the SignalR half of "one probe, one meaning" was never exercised and
+    /// nothing here would have failed if the hub payload drifted from the REST payload again.
+    ///
+    /// <para>
+    /// Both are now built by <see cref="SystemStatusFactory"/>, so this asserts the property that
+    /// makes the extraction worth having. It drives the REAL SignalRNotifierService through its
+    /// public surface — StartAsync, then a Bluetooth connection change, which is what triggers a
+    /// broadcast — and captures what actually goes onto the hub, rather than asserting against a
+    /// re-implementation of the projection.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task BothTransports_ProduceAnIdenticalStatus_FromTheSameCacheSnapshot()
+    {
+        var probedAt = new DateTime(2026, 9, 8, 15, 54, 0, DateTimeKind.Utc);
+        _cache.Update(true, ResolvedAddress, probedAt);
+
+        // Every non-HT801 field is set to a NON-DEFAULT value too. If they were all left at their
+        // defaults, two empty objects would compare equal and this test would pass on a projection
+        // that had drifted in any of the other eight fields.
+        var config = new AppConfiguration
+        {
+            UseActualBluetoothHfp = true,
+            SipListenAddress = "192.0.2.10",
+            SipPort = 5062
+        };
+
+        // Flipped after StartAsync: the monitor loop broadcasts when this CHANGES, and StartAsync
+        // seeds itself with the current value, so it has to start false.
+        var connected = false;
+        var bluetooth = new Mock<IBluetoothHfpAdapter>();
+        bluetooth.SetupGet(b => b.IsConnected).Returns(() => connected);
+        bluetooth.SetupGet(b => b.ConnectedDeviceAddress).Returns("10:91:D1:FE:00:46");
+
+        var sip = new Mock<ISipAdapter>();
+        sip.SetupGet(s => s.IsListening).Returns(true);
+
+        SystemStatus? broadcast = null;
+        var hubContext = CaptureSystemStatusBroadcast(status => broadcast = status);
+
+        var notifier = new SignalRNotifierService(
+            NewPhoneManager(config, sip.Object, bluetooth.Object),
+            hubContext,
+            NullLogger<SignalRNotifierService>.Instance,
+            bluetooth.Object,
+            sip.Object,
+            config,
+            new SipDiagnosticService(Mock.Of<ILogger<SipDiagnosticService>>()),
+            new BellFailureTracker(),
+            _ht801Service.Object,
+            _cache);
+
+        using var cts = new CancellationTokenSource();
+        try
+        {
+            await notifier.StartAsync(cts.Token);
+
+            // config.Phones is empty, so the probe the monitor loop kicks off returns without
+            // touching the cache — the snapshot set above survives for both transports to read.
+            connected = true;
+
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (broadcast is null && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(25, cts.Token);
+            }
+        }
+        finally
+        {
+            cts.Cancel();
+        }
+
+        Assert.NotNull(broadcast);
+
+        var rest = Status(new PhoneController(
+            NewPhoneManager(config, sip.Object, bluetooth.Object),
+            NullLogger<PhoneController>.Instance,
+            bluetooth.Object,
+            sip.Object,
+            config,
+            _ht801Service.Object,
+            _cache,
+            new BellFailureTracker()));
+
+        // Compared by REFLECTION over every public property rather than field by field. A hand-written
+        // list is exactly what goes stale: someone adds a twelfth field to SystemStatus, sets it in
+        // one transport, and a fixed list of eleven assertions still passes. This cannot.
+        var properties = typeof(SystemStatus).GetProperties();
+        Assert.Equal(11, properties.Length);
+
+        foreach (var property in properties)
+        {
+            Assert.Equal(property.GetValue(rest), property.GetValue(broadcast));
+        }
+
+        // ...and prove the comparison was not two all-default objects agreeing about nothing.
+        Assert.Equal(ResolvedAddress, broadcast!.Ht801IpAddress);
+        Assert.Equal(true, broadcast.Ht801Reachable);
+        Assert.Equal(probedAt, broadcast.Ht801LastCheckedUtc);
+        Assert.True(broadcast.BluetoothConnected);
+        Assert.True(broadcast.SipListening);
+        Assert.Equal(5062, broadcast.SipPort);
+    }
+
     // --- Helpers ---
 
     private static SystemStatus Status(PhoneController controller) =>
         Assert.IsType<SystemStatus>(
             Assert.IsType<OkObjectResult>(controller.GetSystemStatus()).Value);
+
+    /// <summary>
+    /// An IHubContext whose All-proxy hands every "SystemStatusChanged" payload to <paramref name="onStatus"/>.
+    /// SendAsync is an extension over SendCoreAsync, so SendCoreAsync is the mockable seam.
+    /// </summary>
+    private static IHubContext<RotaryHub> CaptureSystemStatusBroadcast(Action<SystemStatus> onStatus)
+    {
+        var proxy = new Mock<IClientProxy>();
+        proxy.Setup(p => p.SendCoreAsync(It.IsAny<string>(), It.IsAny<object?[]>(), It.IsAny<CancellationToken>()))
+            .Callback<string, object?[], CancellationToken>((method, args, _) =>
+            {
+                if (method == "SystemStatusChanged" && args.Length > 0 && args[0] is SystemStatus status)
+                {
+                    onStatus(status);
+                }
+            })
+            .Returns(Task.CompletedTask);
+
+        var clients = new Mock<IHubClients>();
+        clients.SetupGet(c => c.All).Returns(proxy.Object);
+
+        var hubContext = new Mock<IHubContext<RotaryHub>>();
+        hubContext.SetupGet(h => h.Clients).Returns(clients.Object);
+
+        return hubContext.Object;
+    }
+
+    private static PhoneManagerService NewPhoneManager(
+        AppConfiguration config, ISipAdapter sip, IBluetoothHfpAdapter bluetooth) =>
+        new(Mock.Of<ILogger<PhoneManagerService>>(), config, sip, bluetooth,
+            Mock.Of<IRtpAudioBridge>(), Mock.Of<ILogger<CallManager>>());
 
     private PhoneController CreateController()
     {

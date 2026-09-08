@@ -3,7 +3,6 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
-using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Core.HT801;
 
 namespace RotaryPhoneController.Server.Controllers;
@@ -205,20 +204,10 @@ public class PhoneController : ControllerBase
         // One read, into a local: three reads could straddle a probe and mix two of them together.
         var probe = _ht801Cache.Current;
 
-        var status = new SystemStatus
-        {
-            Platform = PlatformDetector.CurrentPlatform.ToString(),
-            IsRaspberryPi = PlatformDetector.IsRaspberryPi,
-            BluetoothEnabled = _config.UseActualBluetoothHfp,
-            BluetoothConnected = _bluetoothAdapter.IsConnected,
-            BluetoothDeviceAddress = _bluetoothAdapter.ConnectedDeviceAddress,
-            SipListening = _sipAdapter.IsListening,
-            SipListenAddress = _config.SipListenAddress,
-            SipPort = _config.SipPort,
-            Ht801IpAddress = probe.ProbedAddress,
-            Ht801Reachable = probe.Reachable,
-            Ht801LastCheckedUtc = probe.LastCheckedUtc
-        };
+        // Built through the SHARED factory, which is the same call SignalRNotifierService makes for
+        // the SystemStatusChanged event. The two payloads are therefore identical by construction
+        // rather than by two code paths that happen to agree.
+        var status = SystemStatusFactory.Create(_config, _bluetoothAdapter, _sipAdapter, probe);
 
         _logger.LogDebug("System status requested: Platform={Platform}, Bluetooth={BluetoothConnected}, SIP={SipListening}, HT801={Ht801Reachable}",
             status.Platform, status.BluetoothConnected, status.SipListening, status.Ht801Reachable);
