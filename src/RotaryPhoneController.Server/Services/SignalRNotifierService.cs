@@ -351,8 +351,20 @@ public class SignalRNotifierService : IHostedService
             ? null
             : _sipAdapter.ResolveHt801Address(phone.HT801Extension, phone.HT801IpAddress, logDiagnostics: false);
 
-        // No usable address is a CONFIGURATION problem, not an offline device. Leave the reachable
-        // value null ("Unknown") rather than reporting a device we never asked about as down.
+        // No usable address is a CONFIGURATION problem, not an offline device, so we must not report
+        // a device we never asked about as down. We do that by NOT TOUCHING THE CACHE at all — which
+        // is not quite the same as "leave the reachable value null", as this comment used to claim.
+        // From cold start it amounts to the same thing (the cache is already all-null, and stays
+        // null for the process lifetime). But if a probe previously SUCCEEDED and the address later
+        // became unresolvable, this path leaves the last good snapshot standing rather than
+        // downgrading it to Unknown.
+        //
+        // That is benign only because both inputs are fixed at start-up: _config.Phones is bound
+        // once, and the fallback configured address with it. The resolver's learned binding can go
+        // stale, but it cannot turn a resolvable address into an unresolvable one. If either input
+        // ever becomes dynamic, this becomes a live "confidently green during an outage" bug — the
+        // exact failure mode this convergence work exists to remove — and this path would then have
+        // to expire the snapshot instead of silently keeping it.
         if (string.IsNullOrWhiteSpace(address) || address == "0.0.0.0")
         {
             return;

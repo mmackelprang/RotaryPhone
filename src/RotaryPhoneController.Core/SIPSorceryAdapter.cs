@@ -499,9 +499,16 @@ public class SIPSorceryAdapter : ISipAdapter
 
     /// <summary>
     /// Chooses the address the HT801 is actually reached at: a fresh learned registrar binding when
-    /// one exists, otherwise the configured address. The log line this emits is the ONLY trustworthy
-    /// answer to "which address will the bell be rung at" — /api/phone/system-status reports the
-    /// configured value and can disagree.
+    /// one exists, otherwise the configured address. The log line this emits is the authoritative
+    /// answer to "which address will the bell be rung at".
+    ///
+    /// <para>
+    /// /api/phone/system-status used to report the CONFIGURED value and could therefore disagree
+    /// with this resolver. As of 2026-09-08 it no longer can: its background reachability probe
+    /// calls THIS method and reports what it returned, so <c>ht801IpAddress</c> is the resolved
+    /// address. It lags by up to one probe interval (~30 s) and is null before the first probe, but
+    /// it cannot name a different address.
+    /// </para>
     ///
     /// This is the single resolver for the whole system. Both the INVITE that rings the bell and the
     /// RTP endpoint that carries the audio go through it, so the two legs cannot disagree. It is

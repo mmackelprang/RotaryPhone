@@ -170,16 +170,33 @@ public class PhoneController : ControllerBase
     /// <c>GET /api/diagnostics/sip-registrations</c>.
     /// </para>
     /// <para>
-    /// <b>The value is up to 30 seconds stale by design</b> — the probe runs on that cadence in the
-    /// background, and nothing is pinged in this request. Ht801LastCheckedUtc is therefore a genuine
-    /// probe age: it is when the probe RAN, not when you asked, so it is safe to build a "last
-    /// checked" or stale-data affordance on it.
+    /// <b>The value is roughly 30 seconds stale by design</b> — the probe runs on that cadence in
+    /// the background, and nothing is pinged in this request. The true bound is a little over 30 s:
+    /// the interval is re-armed when a probe is KICKED OFF rather than when it finishes, and the
+    /// monitor loop only tests for due-ness once a second, so the worst case is ~30 s + the probe's
+    /// own duration (≤3 s) + up to 1 s of loop tick — call it ~34 s. Ht801LastCheckedUtc is a
+    /// genuine probe age: it is when the probe RAN, not when you asked, so it is safe to build a
+    /// "last checked" or stale-data affordance on it.
     /// </para>
     /// <para>
-    /// Before the first probe completes — a window of up to 30 seconds after start-up — all three
-    /// fields are null. That means NOT YET PROBED, never "offline"; render it as "Unknown". The same
-    /// null contract applies afterwards if a probe cannot reach a conclusion
-    /// (see <see cref="SystemStatus.Ht801Reachable"/>).
+    /// <b>The cold-start window is one ping, not one interval.</b> The next-probe deadline starts at
+    /// DateTime.MinValue and the monitor loop tests it on its FIRST iteration, so the first probe
+    /// fires at start-up rather than 30 seconds into it. All three fields are null only for as long
+    /// as that one ping takes: ~3 ms against a healthy device, and at most 3 s
+    /// (SendPingAsync(ip, 3000)) against one that does not answer.
+    /// </para>
+    /// <para>
+    /// <b>...or indefinitely, if no HT801 address can be resolved at all.</b> If <c>Phones</c> is
+    /// empty, or nothing resolves and the configured address is blank or 0.0.0.0, the probe returns
+    /// without writing to the cache and all three fields stay null for the process lifetime. That is
+    /// a CONFIGURATION fault presenting as "Unknown", which is the honest rendering of it.
+    /// </para>
+    /// <para>
+    /// Null means NOT YET PROBED, never "offline" — render it as "Unknown"
+    /// (see <see cref="SystemStatus.Ht801Reachable"/>). Note that null is the cold-start and
+    /// no-address contract specifically. Once a probe has succeeded, a LATER probe that cannot reach
+    /// a conclusion does not necessarily null the fields: a probe that throws writes null, but the
+    /// no-usable-address path leaves the previous snapshot in place rather than wiping it.
     /// </para>
     /// </remarks>
     [HttpGet("system-status")]

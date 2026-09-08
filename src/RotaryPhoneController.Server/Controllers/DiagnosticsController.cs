@@ -44,8 +44,21 @@ public class DiagnosticsController : ControllerBase
 
     /// <summary>
     /// Learned registrar bindings — i.e. where INVITEs will ACTUALLY be sent.
-    /// Use this, NOT /api/phone/system-status, to verify HT801 addressing: system-status reports the
-    /// configured address, which is a different value and can disagree.
+    ///
+    /// <para>
+    /// This used to say "use this, NOT /api/phone/system-status", because system-status reported the
+    /// CONFIGURED address — a different value that could disagree, and that stayed green throughout
+    /// the 2026-07 outage while every INVITE went elsewhere. That is why the endpoint was changed:
+    /// as of 2026-09-08 system-status reports the RESOLVED binding the reachability probe was aimed
+    /// at, so the two now AGREE on which address a ring lands on.
+    /// </para>
+    ///
+    /// <para>
+    /// This endpoint remains the place to see the full registration table — every AOR, its port,
+    /// <c>learnedAtUtc</c> and freshness — where system-status answers only the narrower question
+    /// "is the one resolved address reachable, and when was that last checked". Reach for this one
+    /// when you need to see the bindings themselves, or when there may be more than one.
+    /// </para>
     /// </summary>
     [HttpGet("sip-registrations")]
     public IActionResult GetSipRegistrations()
