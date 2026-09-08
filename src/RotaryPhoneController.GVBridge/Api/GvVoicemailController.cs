@@ -52,7 +52,9 @@ public class GvVoicemailController : ControllerBase
     [HttpGet("{id}")]
     public async Task<IActionResult> GetItem(string id, CancellationToken ct = default)
     {
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node is null) return NotFound(new { error = $"Voicemail {id} not found" });
         return Ok(ToDto(node));
     }
