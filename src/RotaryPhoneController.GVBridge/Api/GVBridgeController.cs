@@ -55,7 +55,11 @@ public class GVBridgeController : ControllerBase
             ThrottleReason: _adapter.ThrottleReason,
             AuthBlackout: _adapter.AuthBlackout,
             LastApiSuccessAt: _adapter.LastApiSuccessAt,
-            LastApiAuthFailureAt: _adapter.LastApiAuthFailureAt));
+            LastApiAuthFailureAt: _adapter.LastApiAuthFailureAt,
+            PsidtsMintedAtUtc: _adapter.PsidtsMintedAtUtc,
+            BrowserSessionValidatedAt: _adapter.BrowserSessionValidatedAt,
+            BrowserSessionAgeSeconds: _adapter.BrowserSessionAgeSeconds,
+            BrowserSessionStale: _adapter.BrowserSessionStale));
     }
 
     [HttpGet("adapter/mode")]
@@ -146,8 +150,16 @@ public class GVBridgeController : ControllerBase
             RawCookieHeader = request.RawCookieHeader
         };
 
-        var success = await _cookieManager.SetCookiesAsync(cookieSet);
-        return Ok(new { saved = success });
+        var outcome = await _cookieManager.SetCookiesAsync(cookieSet);
+
+        // `saved` keeps its meaning exactly — "the cookies actually WORK" — so the existing consumer
+        // contract does not move; `outcome` is additive and says WHICH of the several very different
+        // things happened.
+        return Ok(new
+        {
+            saved = outcome is SetCookiesOutcome.Adopted or SetCookiesOutcome.AdoptedButActivationFailed,
+            outcome = outcome.ToString()
+        });
     }
 
     /// <summary>
@@ -175,15 +187,76 @@ public class GVBridgeController : ControllerBase
         }
 
         var cookieSet = extraction.Cookies!;
-        var success = await _cookieManager.SetCookiesAsync(cookieSet);
-        if (!success)
-            return StatusCode(500, new { error = "Cookies extracted successfully but failed to save/activate. Check server logs." });
+        var outcome = await _cookieManager.SetCookiesAsync(cookieSet);
+
+        // ⚠ ONE 502 FOR EVERY CAUSE IS A LIE, and it was this endpoint's. It told the operator that
+        // "the browser session is stale" and that "nothing was overwritten" for three unrelated causes:
+        // a genuinely stale session, an unrelated earlier data-plane 401 that makes AreCookiesValid
+        // false, and a missing key / registry throw / IO error. On the cold path the file HAD been
+        // overwritten, and in two of the three branches nothing had tested the Google login at all.
+        // Same rule as the exhausted-ladder message (Task 7): state only what was actually tested.
+        switch (outcome)
+        {
+            case SetCookiesOutcome.RejectedByGoogle:
+                return StatusCode(502, new
+                {
+                    error = "Cookies were extracted from Chrome and Google refused them on a live probe "
+                          + "— the browser session is stale. This is TESTED, not inferred. The existing "
+                          + "credentials were kept and the cookie file was NOT overwritten. "
+                          + "ACTION: re-login at voice.google.com."
+                });
+
+            case SetCookiesOutcome.ColdSeedUnvalidated:
+                return StatusCode(202, new
+                {
+                    error = "Cookies were extracted from Chrome and WRITTEN to disk — there was no "
+                          + "validated set to protect, so the previous file WAS overwritten. Nothing "
+                          + "here proved them against Google: the adapter does not report valid cookies "
+                          + "afterwards, which may be a dead set OR an unrelated auth failure still in "
+                          + "effect. ACTION: check GET /api/gvbridge/status before re-logging in."
+                });
+
+            case SetCookiesOutcome.ActivationFailed:
+                return StatusCode(500, new
+                {
+                    error = "Cookies were extracted from Chrome, but the write or the re-activation "
+                          + "threw. Nothing here tested the Google login — do NOT assume it is dead. "
+                          + "ACTION: check the service log, which says which step failed."
+                });
+
+            case SetCookiesOutcome.AdoptedButNotPersisted:
+                return StatusCode(500, new
+                {
+                    error = "Cookies were extracted from Chrome and Google ACCEPTED them on a live "
+                          + "probe — they are in use now — but they could not be written to disk, so a "
+                          + "restart will revert to the older set. The Google login is fine; the disk "
+                          + "is not. ACTION: check disk space and permissions."
+                });
+
+            case SetCookiesOutcome.AdoptedButActivationFailed:
+                // The refresh itself SUCCEEDED: the cookies passed a live probe and are on disk, which
+                // is what this endpoint was asked to do. The call path may still be down, which is
+                // separately visible as sipRegistered:false / degraded:true on /status.
+                _logger.LogError(
+                    "CDP cookie refresh validated and persisted {Count} cookies, but re-activating the "
+                    + "adapter failed — SMS and voicemail should work, CALLS MAY NOT. "
+                    + "ACTION: GET /api/gvbridge/status.", extraction.CookieCount);
+                break;
+
+            case SetCookiesOutcome.Adopted:
+                break;
+        }
 
         var sapisidPrefix = cookieSet.Sapisid.Length > 8
             ? cookieSet.Sapisid[..8]
             : cookieSet.Sapisid;
 
-        _logger.LogInformation("CDP cookie refresh: {Count} cookies extracted and activated", extraction.CookieCount);
+        // "extracted and activated" used to be logged for cookies Google had already rejected — the exact
+        // INF line that ran every 20 minutes for two days while the bridge was dead. It now means what it
+        // says: this set passed a live probe before it was persisted.
+        _logger.LogInformation(
+            "CDP cookie refresh: {Count} cookies extracted, validated against Google, and activated",
+            extraction.CookieCount);
 
         return Ok(new RefreshFromBrowserResponse(
             Refreshed: true,

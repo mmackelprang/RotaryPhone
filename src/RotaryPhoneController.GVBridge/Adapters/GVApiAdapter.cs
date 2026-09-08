@@ -40,7 +40,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private bool _disposed;
     private bool _areCookiesValid;
 
-    // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
+    // When this process last LOADED OR MINTED the rotating freshness cookies (PSIDTS), in UTC.
+    //
+    // ⚠ The name says "refreshed"; the value is stamped on a mere LOAD as well, so it resets to ~0 on
+    // every restart and every reload for a credential that may be days old. That is a defect
+    // (docs/KNOWN-ISSUES.md finding L2) and it is FROZEN DELIBERATELY — PsidtsAgeSeconds, which reads
+    // this field, is a published cross-repo contract and correcting it in place would silently change
+    // values a consumer already binds to. Do not "fix" this without a conscious contract decision;
+    // GVApiAdapterCookieLineageTests.PsidtsAgeSeconds_IsFrozen_AndStillRestampsOnEveryLoad guards it.
+    //
+    // The honest credential lineage is PsidtsMintedAtUtc, which is derived straight from the cookie
+    // set and has no write site at all.
     private DateTime? _psidtsRefreshedAt;
 
     // Last time the adapter was fully healthy (cookies valid AND SIP registered), set by the watchdog.
@@ -73,6 +83,57 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     // activates the INCOMING one, never both on the same instance. GvCookieManager reaches the
     // adapter only through that registry.
     private readonly SemaphoreSlim _activationGate = new(1, 1);
+
+    // Serializes the four MUTATION paths that swap the cookie set against EACH OTHER —
+    // TryAdoptAndPersistCookiesAsync, TryCdpRefreshAsync, TryRotateCookiesAsync, ReloadCookiesAsync.
+    //
+    // ⚠ IT DOES NOT SERIALIZE EVERY WRITE TO _cookieSet, and reading it that way is a trap. The
+    // ACTIVATION paths write the field too — ActivateCoreAsync (`_cookieSet = incomingCookies`) and
+    // TearDownGenerationAsync (`_cookieSet = null`) — and they are serialized by _activationGate
+    // instead. Two DISJOINT mutual-exclusion domains write one field, and holding either gate excludes
+    // only its own domain: a mutation path can run concurrently with an activation-path write.
+    //
+    // No live defect follows from that today, because neither activation-path write persists a
+    // CANDIDATE-derived set to disk, and rung 1 — the only candidate-derived disk writer — is gated.
+    // But one consequence is load-bearing and must not be undone:
+    //
+    // ⚠ THIS IS PRECISELY WHY RollBackRejectedCandidate MUST BE A COMPARE-AND-SWAP RATHER THAN A BLIND
+    // RESTORE. A probe running under this gate can be raced by an activation-domain write it does not
+    // exclude, so by the time the rollback runs _cookieSet may no longer be the candidate we published.
+    // Restoring the snapshot unconditionally would then undo whatever replaced it — including a
+    // teardown's null, resurrecting a torn-down generation's cookies. The ReferenceEquals check is what
+    // makes the rollback safe across the domain boundary; do not "simplify" it away.
+    //
+    // ⚠ SetAvailable fires OnAvailabilityChanged SYNCHRONOUSLY, and it is called from inside this gate
+    // (ReloadCookiesAsync, and TryAdoptAndPersistCookiesAsync via MarkAvailableIfTransportExists). A
+    // future subscriber that re-entered any gated method from that callback would deadlock on a
+    // non-reentrant SemaphoreSlim. Nothing subscribes to this adapter's OnAvailabilityChanged today.
+    //
+    // Why it exists: TryValidateCandidateAsync publishes an UNVALIDATED candidate into _cookieSet and
+    // then awaits a live HTTP probe (30 s client timeout). Without this gate that window is wide open:
+    // rung 1 would rotate FROM the candidate and save a candidate-derived set over the good on-disk one
+    // — literally the invariant this work exists to establish, defeated through the window it opens —
+    // and a concurrent recovery that published a WORKING set could be undone by the probe's rollback.
+    //
+    // DEADLOCK RULE: taken by the four OUTER cookie-swapping methods only —
+    // TryAdoptAndPersistCookiesAsync, TryCdpRefreshAsync, TryRotateCookiesAsync, ReloadCookiesAsync.
+    // TryValidateCandidateAsync does NOT take it (it is called from two of those, and taking it there
+    // would acquire it twice on one path); its doc comment states that it must be called with the gate
+    // held. Verified safe:
+    //   * None of the four calls another of the four. TryAdoptAndPersistCookiesAsync and
+    //     TryCdpRefreshAsync call only TryValidateCandidateAsync, which is ungated.
+    //   * The recovery ladder invokes rungs 1/2/3 SEQUENTIALLY (`if (await rung) { ...; return true; }`),
+    //     never nested, so each rung's gate is released before the next is entered.
+    //   * Lock ORDER with _activationGate is one-way and therefore cannot invert: ActivateAsync takes
+    //     _activationGate and may then reach ReloadCookiesAsync, i.e. activation -> mutation. Nothing
+    //     takes this gate and then calls ActivateAsync/DeactivateAsync — GvCookieManager's
+    //     re-activation runs AFTER TryAdoptAndPersistCookiesAsync has returned and released.
+    //   * ActivateCoreAsync's own step-4 probe is deliberately NOT gated. It runs under
+    //     _activationGate, and gating it too would create the second lock-ordering edge this analysis
+    //     depends on not existing.
+    // A probe can hold this for up to 30 s. Callers wait; the proactive timer does not (see
+    // RunProactiveCookieRefreshAsync), so timer callbacks cannot pile up.
+    private readonly SemaphoreSlim _cookieMutationGate = new(1, 1);
 
     // Negotiated RTP details from HT801's SDP 200 OK response (set by CallManager)
     private int? _negotiatedHt801RtpPort;
@@ -163,16 +224,69 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public string? ThrottleReason => _sipTransport?.ThrottleReason;
 
     /// <summary>
-    /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
-    /// based on when they were last loaded or refreshed. Null if no cookie set is loaded.
-    /// Google rotates PSIDTS on its own cadence (minutes–hours); a large age is a hint that
-    /// the next request may 401 with SESSION_COOKIE_INVALID even if the periodic health
-    /// check last passed. Used to make /api/gvbridge/status's cookiesValid less misleading.
+    /// ⚠ DEPRECATED — reports the age of the last cookie LOAD, not the age of the credential.
+    /// Prefer <see cref="PsidtsMintedAtUtc"/>.
     /// </summary>
+    /// <remarks>
+    /// Seconds since this process last loaded OR minted the rotating freshness cookies
+    /// (__Secure-1PSIDTS/3PSIDTS). Because a mere LOAD restamps it, it resets to ~0 on every restart and
+    /// on every reload — so it reads reassuringly low for a credential that is in fact days old. That is
+    /// how a two-day Google session death went unnoticed from 2026-09-06 to 2026-09-08, and it is
+    /// recorded as finding L2 in docs/KNOWN-ISSUES.md.
+    ///
+    /// The behaviour is FROZEN, deliberately: this field is a published cross-repo contract and
+    /// correcting it in place would silently change values a consumer already binds to. The honest
+    /// value is the new <see cref="PsidtsMintedAtUtc"/> timestamp; this field is retained only for
+    /// compatibility and should not be used for new work.
+    /// </remarks>
     public long? PsidtsAgeSeconds =>
         _psidtsRefreshedAt is { } refreshed
             ? (long)Math.Max(0, (DateTime.UtcNow - refreshed).TotalSeconds)
             : null;
+
+    /// <summary>
+    /// UTC instant Google actually MINTED the PSIDTS this adapter currently holds, as carried by the
+    /// cookie set itself and persisted across restarts. <c>null</c> means UNKNOWN — a cookie file
+    /// written before this field existed, a hand-pasted set, or one extracted from the browser (Chrome's
+    /// jar carries no readable issue time).
+    /// </summary>
+    /// <remarks>
+    /// This is the honest credential lineage, and it is deliberately a TIMESTAMP rather than an age: an
+    /// age is computed at serialisation time and so is only true at the instant of the response, and an
+    /// age derived from a lying clock is indistinguishable on the wire from one derived from a truthful
+    /// one. A mint time cannot be faked by a reload — which is precisely the defect this corrects.
+    /// ⚠ <c>null</c> means UNKNOWN, and unknown is NOT healthy. Do not render it as "fresh".
+    /// Google's PSIDTS lives ~11 minutes (measured 2026-07-31).
+    /// </remarks>
+    public DateTime? PsidtsMintedAtUtc => _cookieSet?.PsidtsMintedAtUtc;
+
+    /// <summary>
+    /// UTC time a browser-extracted cookie set last passed a live probe, or null if never. Persisted on
+    /// the cookie set, so it survives a restart.
+    /// </summary>
+    public DateTime? BrowserSessionValidatedAt => _cookieSet?.BrowserSessionValidatedAtUtc;
+
+    /// <summary>
+    /// Age (seconds) of the box's Chrome Google Voice session — how long since cookies pulled from it
+    /// last actually worked. Null if no browser-sourced set has ever been validated.
+    /// </summary>
+    /// <remarks>
+    /// This is the signal whose absence cost two days. The service mints its own PSIDTS and can look
+    /// perfectly healthy on a lineage it regenerates from itself, while the browser it depends on for
+    /// bootstrap has been dead since Sep 6. A steadily climbing value here, with everything else green,
+    /// IS the warning — recovery has no floor below a working browser session.
+    /// </remarks>
+    public long? BrowserSessionAgeSeconds =>
+        _cookieSet?.BrowserSessionValidatedAtUtc is { } validated
+            ? (long)Math.Max(0, (DateTime.UtcNow - validated).TotalSeconds)
+            : null;
+
+    /// <summary>
+    /// True when the most recent attempt to pull cookies from the box's Chrome produced a set Google
+    /// rejected — i.e. Chrome is running and reachable but its Google Voice session is dead.
+    /// Distinguishes "the browser session is stale" from "we could not reach the browser at all".
+    /// </summary>
+    public bool BrowserSessionStale => _lastBrowserRefreshOutcome == BrowserRefreshOutcome.Stale;
 
     /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
@@ -457,10 +571,15 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             _logger.LogWarning(ex, "GVApi: SIP registration failed — will retry on first call");
         }
 
-        // 7. Start the periodic timers (health watchdog + proactive PSIDTS refresh)
+        // 7. Mark available BEFORE arming the timers. The proactive refresh bails on !IsAvailable and
+        // then waits a full period, so a short first due time firing into an adapter that is not yet
+        // marked available would silently cost an entire interval — the same failure mode as the
+        // dueTime==period bug. Ordering, not the 5 s floor, is what makes that unreachable.
+        SetAvailable(true);
+
+        // 8. Start the periodic timers (health watchdog + proactive PSIDTS refresh).
         StartPeriodicTimers();
 
-        SetAvailable(true);
         _logger.LogInformation("GVApiAdapter activated — SIP transport ready");
     }
 
@@ -684,6 +803,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         // and mislead the dashboard until the next real GV call happened to land.
         _lastApiSuccessAtUtc = null;
         _lastApiAuthFailureAtUtc = null;
+        _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
 
         Interlocked.Exchange(ref _activeCallId, null);
 
@@ -710,6 +830,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// </summary>
     public async Task<bool> ReloadCookiesAsync(CancellationToken ct = default)
     {
+        // Serialized against the other cookie-set swappers. Safe to take while _activationGate is held
+        // (ActivateCoreAsync branch B and the mid-call path both reach here): the lock order is always
+        // activation -> mutation and never the reverse — see the _cookieMutationGate field remark.
+        using var gate = await LockCookieMutationsAsync(ct);
+
         if (_cookieStore == null)
         {
             _logger.LogWarning("ReloadCookiesAsync: adapter not activated, cannot reload");
@@ -750,6 +875,204 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         }
 
         return healthy;
+    }
+
+    /// <summary>
+    /// What happened to a candidate handed to <see cref="TryAdoptAndPersistCookiesAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ These are not interchangeable failures. Collapsing them to a bool made the caller report a
+    /// disk error as "Google rejected your cookies", which is the same untested assertion Task 7
+    /// removed from the exhausted-ladder message. The zero value is deliberately a failure.
+    /// </remarks>
+    public enum CookieAdoptionOutcome
+    {
+        /// <summary>
+        /// The adapter has never activated: there is no validated set to protect and no store to write
+        /// to, so the caller must use its own cold-start path. Nothing was tested.
+        /// </summary>
+        NotActivated = 0,
+
+        /// <summary>
+        /// A live probe against Google refused the candidate. Nothing was written and the in-memory set
+        /// was rolled back. TESTED, not inferred.
+        /// </summary>
+        RejectedByGoogle,
+
+        /// <summary>
+        /// The candidate PASSED a live probe and is in use in memory, but writing it to disk threw. The
+        /// previous set is still what is on disk, so a restart reverts to it.
+        /// </summary>
+        PersistFailed,
+
+        /// <summary>Validated against Google, persisted, and in use.</summary>
+        Adopted,
+    }
+
+    /// <summary>
+    /// Adopt an externally-supplied cookie set — the CDP refresh-from-browser endpoint, or a hand-pasted
+    /// set — prove it against Google, and persist it ONLY if it works. Leaves both the in-memory and the
+    /// on-disk set untouched when the candidate is rejected.
+    /// </summary>
+    public async Task<CookieAdoptionOutcome> TryAdoptAndPersistCookiesAsync(
+        GvCookieSet candidate, string source, CancellationToken ct = default)
+    {
+        if (_cookieStore == null || _cookieSet == null)
+            return CookieAdoptionOutcome.NotActivated;
+
+        // Held across the WHOLE validate-and-persist section: the probe inside
+        // TryValidateCandidateAsync runs with the candidate published into _cookieSet, and nothing else
+        // may swap the cookie set — or write one to disk — until we have finished deciding.
+        using var gate = await LockCookieMutationsAsync(ct);
+
+        // Captured BEFORE the validation, which publishes the candidate into _cookieSet. The store is
+        // captured too, so a concurrent teardown nulling the field cannot turn the save into an NRE.
+        var previous = _cookieSet;
+        var store = _cookieStore;
+
+        if (!await TryValidateCandidateAsync(candidate, ct))
+        {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Stale;
+            _logger.LogError(
+                "GVApi: REJECTED a cookie set from {Source} — Google refused it. The working on-disk set "
+                + "was NOT overwritten. If the source is the box's Chrome, that session is dead: ACTION: "
+                + "re-login at voice.google.com.", source);
+            return CookieAdoptionOutcome.RejectedByGoogle;
+        }
+
+        // ⚠ SAVE FIRST, THEN PUBLISH. SaveAsync can throw — a full or read-only disk, a permissions
+        // change, a store nulled by a concurrent teardown. Unguarded, that escaped as an unhandled 500
+        // AFTER _cookieSet had been mutated but BEFORE the outcome and availability were set: a
+        // half-committed state whose HTTP response said nothing true about either half. Assigning only
+        // after a successful write means memory and disk cannot disagree about the stamped set.
+        GvCookieSet validated;
+        try
+        {
+            validated = StampAdoptedCandidate(candidate, previous, source);
+            await store.SaveAsync(validated);
+        }
+        catch (Exception ex)
+        {
+            // The candidate itself PASSED, and TryValidateCandidateAsync has already published it, so
+            // the adapter keeps working on proven credentials. Only the durable copy is missing.
+            _logger.LogError(ex,
+                "GVApi: a cookie set from {Source} passed a live probe but could NOT be written to "
+                + "{Path}. It is in use in memory; the OLD set is still on disk, so a restart reverts to "
+                + "it. Google is not the problem here. ACTION: check disk space and permissions.",
+                source, _config.CookieFilePath);
+            return CookieAdoptionOutcome.PersistFailed;
+        }
+
+        _cookieSet = validated;
+        _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
+        MarkAvailableIfTransportExists(source);
+
+        _logger.LogInformation(
+            "GVApi: adopted and persisted a cookie set from {Source} after it passed a live probe", source);
+        return CookieAdoptionOutcome.Adopted;
+    }
+
+    /// <summary>
+    /// Stamp a candidate that has just passed a live probe, ready to be adopted and persisted: record
+    /// the browser-session validation, and CARRY FORWARD the mint time of the set we already hold when
+    /// the candidate puts the very same rotating PSIDTS on the wire.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ WITHOUT THE CARRY-FORWARD, EVERY SUCCESSFUL CRON FIRE WIPES <c>psidtsMintedAtUtc</c> — the
+    /// headline diagnostic of this whole change. A CDP-extracted set has <c>PsidtsMintedAtUtc == null</c>
+    /// (Chrome's jar carries no readable issue time), and <c>WithBrowserSessionValidatedAt</c> faithfully
+    /// preserves that null. So the 20-minute cron erased the mint time from memory AND disk,
+    /// <see cref="TryRotateCookiesAsync"/> re-stamped it 8 minutes later, and the next cron erased it
+    /// again — a consumer would watch the new field flap to null on a perfectly healthy box, and every
+    /// restart landing in that window would pay an extra RotateCookies at the 5 s floor. The plan
+    /// approved that extra rotation as costing one per activation ONCE; as built it recurred for ever.
+    /// <para>
+    /// The carry-forward is only ever applied when the PSIDTS values are IDENTICAL, so the timestamp
+    /// still describes the exact credential it is attached to — this is recovering a known fact about
+    /// unchanged values, not inventing one. If the candidate's PSIDTS genuinely differs, Chrome minted
+    /// it at a time we cannot read and <c>null</c> is the honest answer; it is kept.
+    /// </para>
+    /// </remarks>
+    private GvCookieSet StampAdoptedCandidate(GvCookieSet candidate, GvCookieSet? previous, string source)
+    {
+        var stamped = candidate.WithBrowserSessionValidatedAt(DateTime.UtcNow);
+
+        // A candidate that already knows its own mint time is never overwritten.
+        if (stamped.PsidtsMintedAtUtc is not null) return stamped;
+
+        if (previous?.PsidtsMintedAtUtc is { } inherited && previous.CarriesTheSamePsidtsAs(candidate))
+        {
+            _logger.LogDebug(
+                "GVApi: carrying the PSIDTS mint time {Minted:o} forward onto the set from {Source} — its "
+                + "rotating cookies are byte-identical, so it is the same credential.", inherited, source);
+            return stamped.WithPsidtsMintedAt(inherited);
+        }
+
+        return stamped;
+    }
+
+    /// <summary>
+    /// Mark the adapter available after a successful adoption — but ONLY if a SIP transport actually
+    /// exists to carry calls.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ AVAILABILITY REQUIRES A TRANSPORT, NOT JUST CREDENTIALS. <see cref="ActivateCoreAsync"/> can
+    /// exit at step 4 (<c>SetAvailable(false); return;</c>) with a dead PSIDTS, leaving
+    /// <c>_cookieSet</c> and <c>_cookieStore</c> set but <c>_sipTransport</c> null and both timers
+    /// unarmed. If the cron's adoption then claimed availability, status would read
+    /// <c>available:true, cookiesValid:true, sipRegistered:false</c> for ever: SMS and voicemail would
+    /// recover while <see cref="PlaceCallAsync"/> kept dereferencing a null <c>_sipTransport!</c>.
+    /// Refusing the claim is what keeps that dead end VISIBLE, so the caller re-activates instead of
+    /// believing it is done. That closing loop is what earns the refusal: <c>GvCookieManager</c> reads
+    /// the state this leaves behind and re-activates. Where no caller does that, refusing buys nothing
+    /// and costs the read path — see <see cref="MarkAvailableAfterRecovery"/>.
+    /// </remarks>
+    private void MarkAvailableIfTransportExists(string source)
+        => MarkAvailable(source, refuseWithoutTransport: true);
+
+    /// <summary>
+    /// The one implementation of "should this adapter now claim to be available", so the transport
+    /// check cannot drift into two divergent copies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ THE TWO CALLERS DELIBERATELY DISAGREE ABOUT A MISSING TRANSPORT, and the disagreement is
+    /// forced by <see cref="IsAvailable"/> being ONE boolean gating TWO different things:
+    /// <c>GetAuthenticatedClient()</c> (the SMS/voicemail READ path) and <see cref="PlaceCallAsync"/>
+    /// (the CALL path). With no transport those two want opposite answers, so there is no single
+    /// correct value and the choice has to be made per caller:
+    /// <list type="bullet">
+    /// <item><c>refuseWithoutTransport: true</c> — the cron adoption. A caller
+    /// (<c>GvCookieManager</c>) inspects the result and RE-ACTIVATES, so refusing the claim converts
+    /// the dead end into a repair.</item>
+    /// <item><c>refuseWithoutTransport: false</c> — the recovery ladder. Nothing re-activates on its
+    /// behalf, so refusing would repair nothing and would strand the read path returning null until
+    /// the next 30-minute health tick (the PR1 HIGH-2 window). The missing transport is LOGGED
+    /// instead, which is the visibility the refusal was really for.</item>
+    /// </list>
+    /// Collapsing these two into one policy is a behaviour change, not a cleanup: it re-opens HIGH-2,
+    /// and <c>TryRecoverAuthAsync_Success_SetsAvailable</c> fails when it is attempted.
+    /// </remarks>
+    private void MarkAvailable(string source, bool refuseWithoutTransport)
+    {
+        if (_sipTransport == null)
+        {
+            if (refuseWithoutTransport)
+            {
+                _logger.LogWarning(
+                    "GVApi: adopted a validated cookie set from {Source}, but there is NO SIP transport "
+                    + "— NOT marking the adapter available. Credentials are good; calls cannot be placed "
+                    + "until the adapter re-activates and rebuilds the transport.", source);
+                return;
+            }
+
+            _logger.LogWarning(
+                "GVApi: {Source} recovered auth, but there is NO SIP transport. Marking available so the "
+                + "SMS/voicemail read path works again — CALLS CANNOT BE PLACED until the adapter "
+                + "re-activates. available:true here means the API client is usable, NOT that the call "
+                + "path is; read sipRegistered before trusting it.", source);
+        }
+
+        if (!IsAvailable) SetAvailable(true);
     }
 
     public async Task<string> PlaceCallAsync(string e164Number, CancellationToken ct = default)
@@ -902,7 +1225,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 1 (RotateCookies)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
@@ -912,7 +1235,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: reloaded cookies from disk");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 2 (reload from disk)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
@@ -924,14 +1247,56 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 3 (CDP browser refresh)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
 
-            _logger.LogWarning(
-                "GVApi: all cookie-recovery rungs failed. The box's Chrome login may be dead — " +
-                "re-login at voice.google.com so the next CDP refresh can pick up a fresh session.");
+            // Which rung failed determines what the operator should DO, and the actions differ. The old
+            // single message asserted "your Chrome login may be dead" for EVERY exhausted ladder,
+            // including runs in which Chrome was never consulted at all. On 2026-09-08 it happened to be
+            // right and was still unearned — the owner confirmed the browser page was authenticated
+            // while the message claimed otherwise. State only what was actually tested.
+            switch (_lastBrowserRefreshOutcome)
+            {
+                case BrowserRefreshOutcome.Stale:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and the BROWSER SESSION IS STALE — Chrome "
+                        + "handed us cookies and Google rejected them. This is TESTED, not inferred. "
+                        + "ACTION: re-login at voice.google.com in the box's Chrome. Stored credentials "
+                        + "were left intact.");
+                    break;
+
+                case BrowserRefreshOutcome.Unreachable:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and CHROME WAS UNREACHABLE on CDP port "
+                        + "{Port} — our own rotation chain lapsed and the browser fallback could not be "
+                        + "tried, so the Google login was never tested. ACTION: confirm Chrome is running "
+                        + "(pgrep -f \"user-data-dir=$HOME/.config/gv-bridge-chrome\") BEFORE touching the "
+                        + "Google login; the session may be perfectly fine.",
+                        _config.ChromeCdpPort);
+                    break;
+
+                case BrowserRefreshOutcome.TornDown:
+                    // Logged at WARNING, deliberately breaking this switch's Error convention: an
+                    // exhausted ladder normally means the phone is about to be down, but a ladder
+                    // abandoned because the service was stopping means nothing is wrong. Raising it to
+                    // Error would train the operator to ignore the level that matters.
+                    _logger.LogWarning(
+                        "GVApi: cookie recovery was ABANDONED because the adapter was torn down "
+                        + "mid-ladder — it did not fail. Neither Chrome nor the Google login was "
+                        + "tested. No action needed if the service was stopping.");
+                    break;
+
+                default:
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and the browser was NEVER CONSULTED (no "
+                        + "CDP extractor wired, or no cookie store). Our rotation chain lapsed and nothing "
+                        + "tested the Google login. ACTION: check the service's CDP wiring and that Chrome "
+                        + "is up on port {Port}; do NOT assume the login is dead.",
+                        _config.ChromeCdpPort);
+                    break;
+            }
             return false;
         }
         catch (Exception ex)
@@ -957,35 +1322,247 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// the next 30-min health tick — the PR1 review HIGH-2 window (arc tracker, open decision #6) —
     /// which would silently defeat the read-path retry this work adds.
     /// </summary>
-    private void MarkAvailableAfterRecovery()
+    /// <remarks>
+    /// ⚠ Goes through <see cref="MarkAvailable"/> — the same implementation the cron adoption uses —
+    /// but with <c>refuseWithoutTransport: false</c>. This used to be a bare
+    /// <c>if (!IsAvailable) SetAvailable(true);</c>, the same shape HIGH-1 removed one method over,
+    /// and the review asked for it to be routed through <see cref="MarkAvailableIfTransportExists"/>
+    /// "so there is one rule, not two".
+    /// <para>
+    /// There is now one IMPLEMENTATION, but there cannot be one RULE, and that is not an oversight.
+    /// HIGH-1's refusal is earned by a caller that re-activates in response to it; the recovery ladder
+    /// has no such caller, so refusing here repairs nothing and instead leaves
+    /// <c>GetAuthenticatedClient()</c> returning null until the next 30-minute health tick — precisely
+    /// the HIGH-2 window this method exists to close. Routing it through the refusing variant makes
+    /// <c>TryRecoverAuthAsync_Success_SetsAvailable</c> fail, which is that regression caught.
+    /// The missing transport is logged here instead, so the dead end is still visible.
+    /// </para>
+    /// </remarks>
+    private void MarkAvailableAfterRecovery(string rung)
+        => MarkAvailable(rung, refuseWithoutTransport: false);
+
+    /// <summary>Why the last browser (CDP) refresh attempt ended the way it did. Feeds status + alarms.</summary>
+    /// <remarks>
+    /// <c>TornDown</c> is NOT a variety of <c>NotAttempted</c> and must not be folded into it: the
+    /// operator action differs. <c>NotAttempted</c> sends them to check the CDP wiring, and
+    /// <c>Unreachable</c> sends them to check whether Chrome is running — both are wrong, and one of
+    /// them alarming, when the real answer is that the service was shutting down.
+    /// </remarks>
+    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded, TornDown }
+
+    private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
+
+    /// <summary>
+    /// Acquire <see cref="_cookieMutationGate"/>; dispose the returned handle to release it.
+    /// </summary>
+    /// <remarks>
+    /// The release tolerates a gate disposed underneath it, which is otherwise an
+    /// <see cref="ObjectDisposedException"/> thrown from a <c>finally</c> during process teardown —
+    /// a probe may still be holding the gate when <see cref="Dispose"/> runs.
+    /// </remarks>
+    private async Task<IDisposable> LockCookieMutationsAsync(CancellationToken ct = default)
     {
-        if (!IsAvailable) SetAvailable(true);
+        await _cookieMutationGate.WaitAsync(ct);
+        return new GateRelease(_cookieMutationGate);
+    }
+
+    private sealed class GateRelease(SemaphoreSlim gate) : IDisposable
+    {
+        public void Dispose()
+        {
+            try { gate.Release(); }
+            catch (ObjectDisposedException) { /* torn down while we held it — nothing to release into */ }
+        }
     }
 
     /// <summary>
-    /// Recovery rung 3: extract fresh cookies from the box's logged-in Chrome via CDP, persist them,
-    /// and adopt them in-process (<see cref="ReloadCookiesAsync"/> swaps the HttpClient — no restart).
-    /// The extractor is optional; returns false if it was never wired or extraction/validation fails.
+    /// Adopt <paramref name="candidate"/> in memory, prove it against Google, and roll back completely
+    /// if it fails. Returns true ONLY when the candidate passed a live probe.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Persists NOTHING. The caller decides whether to write to disk, and must do so only on true.
+    /// That ordering is the entire point. On 2026-08-01 and again on 2026-09-06→08, a refresh from a
+    /// signed-out Chrome overwrote a WORKING on-disk cookie set with a dead one and the working set was
+    /// unrecoverable. docs/KNOWN-ISSUES.md proposed this exact rule five weeks before the second outage:
+    /// "Never let an unvalidated refresh overwrite a validated set."
+    /// <para>
+    /// ⚠ MUST BE CALLED WITH <c>_cookieMutationGate</c> HELD. It publishes an unvalidated candidate into
+    /// <c>_cookieSet</c> and then awaits a live HTTP probe, so everything that swaps the cookie set has
+    /// to be excluded for the duration. It does NOT take the gate itself: both callers already hold it,
+    /// and acquiring it here would be a second acquisition on one path — see the field remark.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> TryValidateCandidateAsync(GvCookieSet candidate, CancellationToken ct = default)
+    {
+        var previousSet = _cookieSet;
+        var previousValid = _areCookiesValid;
+
+        _cookieSet = candidate;
+        SwapAuthenticatedClients();
+
+        var healthy = false;
+        try
+        {
+            healthy = await ProbeHealthAsync(ct);
+            LastValidatedAt = DateTime.UtcNow;
+
+            if (healthy)
+            {
+                _areCookiesValid = true;
+                LoadedAt = DateTime.UtcNow;
+
+                // ⚠ DateTime.UtcNow, not candidate.PsidtsMintedAtUtc — deliberately.
+                // This method REPLACES the old TryCdpRefreshAsync -> ReloadCookiesAsync call path, and
+                // ReloadCookiesAsync stamps DateTime.UtcNow here. psidtsAgeSeconds is a published
+                // cross-repo contract whose observable behaviour is frozen (see PsidtsAgeSeconds), so
+                // stamping anything else would change its values on this path and break that freeze.
+                // The honest credential lineage travels on the cookie set and is read back through
+                // PsidtsMintedAtUtc, which needs no write site here at all.
+                _psidtsRefreshedAt = DateTime.UtcNow;
+                return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            // try/finally so a THROWING probe cannot leave _cookieSet holding the unvalidated
+            // candidate with no rollback at all. Unreachable today (GvAccountClient.IsHealthyAsync
+            // catches everything) but structurally required: the injectable HealthProbeOverride, and
+            // any future probe, can throw.
+            if (!healthy) RollBackRejectedCandidate(candidate, previousSet, previousValid);
+        }
+    }
+
+    /// <summary>
+    /// Undo the in-memory adoption of a candidate the probe rejected — but ONLY if we are still the
+    /// owner of the state we would be undoing.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ COMPARE-AND-SWAP, NOT A BLIND SNAPSHOT RESTORE. The restore is the first write in this class
+    /// that moves state BACKWARDS, which is why last-writer-wins stopped being benign here. If a
+    /// concurrent recovery published a working set while the probe was in flight, restoring the
+    /// snapshot would discard that recovery and dispose the client the ladder had just published.
+    /// Re-entrancy is the same hazard from the other side: a nested validation would capture the dead
+    /// candidate as its own "previous" and roll back TO it as if it were known-good.
+    /// <para>
+    /// A null <paramref name="previousSet"/> means there was nothing to protect and nothing to restore —
+    /// the candidate stays in place so status reflects what we actually tried.
+    /// </para>
+    /// </remarks>
+    private void RollBackRejectedCandidate(
+        GvCookieSet candidate, GvCookieSet? previousSet, bool previousValid)
+    {
+        if (!ReferenceEquals(_cookieSet, candidate))
+        {
+            _logger.LogInformation(
+                "GVApi: not rolling back the rejected candidate — the cookie set moved on while the "
+                + "probe was in flight, so restoring our snapshot would undo whatever replaced it.");
+            return;
+        }
+
+        _areCookiesValid = previousValid;
+        if (previousSet != null)
+        {
+            _cookieSet = previousSet;
+            SwapAuthenticatedClients();
+        }
+    }
+
+    /// <summary>
+    /// Recovery rung 3: extract fresh cookies from the box's logged-in Chrome via CDP, VALIDATE them
+    /// against Google, and only then persist and adopt them. The extractor is optional; returns false
+    /// if it was never wired or extraction/validation fails.
     /// </summary>
     private async Task<bool> TryCdpRefreshAsync()
     {
         if (_cdpExtractor == null || _cookieStore == null)
+        {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
             return false;
+        }
 
         try
         {
             var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, "voice.google.com");
             if (!result.Success || result.Cookies == null)
             {
-                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}", result.Status, result.Error);
+                _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Unreachable;
+                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}",
+                    result.Status, result.Error);
                 return false;
             }
 
-            await _cookieStore.SaveAsync(result.Cookies);
-            return await ReloadCookiesAsync(); // adopt in-memory + re-validate against Google
+            // Taken only now, not around the CDP extraction: talking to Chrome swaps nothing, and
+            // holding the gate across it would block rotations for the extraction's duration too.
+            using var gate = await LockCookieMutationsAsync();
+
+            // Captured BEFORE the validation, which publishes the candidate into _cookieSet.
+            var previous = _cookieSet;
+
+            // VALIDATE BEFORE PERSISTING. A signed-out Chrome hands back a full, well-formed, completely
+            // dead cookie set; persisting that first destroys the last known-good copy on disk.
+            if (!await TryValidateCandidateAsync(result.Cookies))
+            {
+                _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Stale;
+                _logger.LogError(
+                    "GVApi: STALE BROWSER SESSION — Chrome returned {Count} cookies and Google rejected "
+                    + "them. The on-disk cookie set was NOT overwritten and the working credentials were "
+                    + "kept. The box's Chrome login is dead or signed out; ACTION: re-login at "
+                    + "voice.google.com. Browser session last validated: {LastValidated}.",
+                    result.CookieCount,
+                    _cookieSet?.BrowserSessionValidatedAtUtc?.ToString("O") ?? "never");
+                return false;
+            }
+
+            // Proven. Stamp the browser-session validation and persist — in that order.
+            // No SwapAuthenticatedClients needed: GvHttpClientHandler resolves _cookieSet through a
+            // closure on every request, and the stamp changes no wire-visible cookie.
+            var validated = StampAdoptedCandidate(result.Cookies, previous, "cdp");
+
+            // Persisted under its OWN guard, not the outer one. The outer catch marks the browser
+            // Unreachable — which would be a plain lie for a disk error, since Chrome answered and
+            // Google accepted what it handed over, and it would send the operator off to check whether
+            // Chrome is running. The rung still SUCCEEDS: auth is recovered in memory, and only the
+            // durable copy is missing.
+            try
+            {
+                await _cookieStore.SaveAsync(validated);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "GVApi: CDP cookies validated against Google but could NOT be written to {Path}. Auth "
+                    + "is recovered in memory; a restart will revert to the older set on disk. Chrome and "
+                    + "the Google login are both fine. ACTION: check disk space and permissions.",
+                    _config.CookieFilePath);
+            }
+
+            _cookieSet = validated;
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
+            _logger.LogInformation(
+                "GVApi: CDP cookie refresh validated against Google and persisted ({Count} cookies)",
+                result.CookieCount);
+            return true;
+        }
+        catch (ObjectDisposedException ex)
+        {
+            // ⚠ NOT "Chrome unreachable", which is what the general catch below would have called this.
+            // LockCookieMutationsAsync sits inside this try, and Dispose() disposes _cookieMutationGate
+            // while a rung may still be running — so a service teardown surfaces here as an
+            // ObjectDisposedException from WaitAsync. Reporting that as Unreachable sends the operator
+            // to check whether Chrome is running, for a fault that has nothing to do with Chrome and
+            // needs no action at all. Nothing here tested the Google login OR the browser.
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.TornDown;
+            _logger.LogWarning(ex,
+                "GVApi: CDP cookie refresh abandoned — the adapter was torn down mid-rung. Chrome was "
+                + "NOT found unreachable and the Google login was NOT tested. No action needed if the "
+                + "service was stopping.");
+            return false;
         }
         catch (Exception ex)
         {
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Unreachable;
             _logger.LogWarning(ex, "GVApi: CDP cookie refresh threw");
             return false;
         }
@@ -1040,6 +1617,12 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// </summary>
     private async Task<bool> TryRotateCookiesAsync()
     {
+        // ⚠ The gate is taken BEFORE _cookieSet is read. Reading it first would reintroduce the exact
+        // defect this closes: during a validate-and-persist window _cookieSet holds the UNVALIDATED
+        // candidate, so a rotation starting there would rotate from the candidate and then
+        // _cookieStore.SaveAsync a candidate-derived set over the known-good one on disk.
+        using var gate = await LockCookieMutationsAsync();
+
         var current = _cookieSet;
         if (current == null)
             return false;
@@ -1110,6 +1693,60 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     }
 
     /// <summary>
+    /// Floor for the first proactive refresh delay. Never zero, and the reason is subtle:
+    /// <see cref="RunProactiveCookieRefreshAsync"/> bails on <c>!IsAvailable</c> and then waits a FULL
+    /// period for its next tick. So a tick that fires before activation finishes is not merely wasted —
+    /// it is SKIPPED, and the next one is an interval away. That is the same "miss it and wait a whole
+    /// period" shape as the bug this method exists to fix.
+    /// </summary>
+    internal const int MinFirstRefreshDelayMs = 5_000;
+
+    /// <summary>
+    /// Test seam: the due time (ms) handed to the most recently created refresh timer.
+    /// <see cref="System.Threading.Timer"/> exposes no readable due time, so this is the only way a test
+    /// can assert the scheduling decision without waiting out a real interval.
+    /// </summary>
+    internal int? LastFirstRefreshDelayMs { get; private set; }
+
+    /// <summary>
+    /// Delay (ms) until the FIRST proactive PSIDTS refresh of this activation.
+    /// </summary>
+    /// <remarks>
+    /// A long-running process keeps its timer and its credential locked together — every rotation resets
+    /// the timer and mints in the same instant — so <c>dueTime == period</c> is invisible there.
+    /// ONLY A RESTART decouples them. A fresh process inherits a credential of arbitrary age and, before
+    /// this method existed, waited a full interval regardless. On 2026-09-08 it inherited a 55-second-old
+    /// PSIDTS, scheduled its first refresh 8m00s out, and the credential died at 8m03s — missed by 52
+    /// seconds, and an 83-minute guest-facing outage followed.
+    ///
+    /// An UNKNOWN age is deliberately treated as "refresh at the floor", not as "brand new". A credential
+    /// we cannot date is one we must not extend a full interval of credit to; assuming age-zero would
+    /// reproduce precisely the bug being fixed.
+    ///
+    /// Pure and static so a test can drive it directly — the adapter has no clock seam, and this needs
+    /// none.
+    /// </remarks>
+    internal static int ComputeFirstRefreshDelayMs(
+        int refreshIntervalMs, DateTime? psidtsMintedAtUtc, DateTime nowUtc)
+    {
+        var floorMs = Math.Min(MinFirstRefreshDelayMs, refreshIntervalMs);
+
+        if (psidtsMintedAtUtc is not { } minted)
+            return floorMs;
+
+        var remainingMs = refreshIntervalMs - (nowUtc - minted).TotalMilliseconds;
+
+        // Clamp high: a mint time in the future (clock skew, a hand-edited file, a restored backup)
+        // must never push the first refresh out beyond one interval.
+        if (remainingMs > refreshIntervalMs) return refreshIntervalMs;
+
+        // Clamp low: already past due, or so close that the tick would race activation.
+        if (remainingMs < floorMs) return floorMs;
+
+        return (int)remainingMs;
+    }
+
+    /// <summary>
     /// Install the periodic timers: the health watchdog and the proactive PSIDTS refresh. Extracted
     /// from <see cref="ActivateAsync"/> so the cadence wiring — including the
     /// <c>CookieRefreshIntervalMinutes: 0</c> kill switch — is unit-testable without a live
@@ -1125,7 +1762,22 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         if (_config.CookieRefreshIntervalMinutes > 0)
         {
             var refreshMs = _config.CookieRefreshIntervalMinutes * 60 * 1000;
-            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, refreshMs, refreshMs);
+
+            // dueTime is NOT the period. It is what remains of the interval for the credential we are
+            // actually holding — which, after a restart, is not a fresh one. See ComputeFirstRefreshDelayMs.
+            var firstMs = ComputeFirstRefreshDelayMs(refreshMs, _cookieSet?.PsidtsMintedAtUtc, DateTime.UtcNow);
+            LastFirstRefreshDelayMs = firstMs;
+
+            if (firstMs != refreshMs)
+            {
+                _logger.LogInformation(
+                    "GVApi: first proactive PSIDTS refresh in {FirstMs} ms of a {IntervalMs} ms interval — "
+                    + "anchored to the inherited credential's age ({MintedAt}), not to process start",
+                    firstMs, refreshMs,
+                    _cookieSet?.PsidtsMintedAtUtc?.ToString("O") ?? "unknown");
+            }
+
+            _cookieRefreshTimer = new Timer(OnCookieRefreshTimer, null, firstMs, refreshMs);
         }
     }
 
@@ -1159,6 +1811,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             if (IsRecoveryInFlight)
             {
                 _logger.LogDebug("GVApi: proactive PSIDTS refresh skipped — recovery already in flight");
+                return;
+            }
+
+            // A cookie-set swap is already in progress (a probe can hold the gate for up to 30 s).
+            // SKIP rather than queue: this path is best-effort by design — the comment below says so —
+            // and a timer callback that waits on a gate is the shape that piles up unboundedly. With
+            // this check at most one tick is ever in flight, so nothing can accumulate.
+            if (_cookieMutationGate.CurrentCount == 0)
+            {
+                _logger.LogDebug(
+                    "GVApi: proactive PSIDTS refresh skipped — a cookie-set mutation is in progress");
                 return;
             }
 
@@ -1254,6 +1917,9 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _healthCheckTimer?.Dispose();
         _cookieRefreshTimer?.Dispose();
         _httpClient?.Dispose();
+        // A probe may still be holding this. GateRelease swallows the ObjectDisposedException that
+        // its release would otherwise throw from a finally block during teardown.
+        _cookieMutationGate.Dispose();
         // Same leak class as F6: these were never released here. The transport's DisposeAsync is
         // fire-and-forget because Dispose() must not block on async work.
         _rotatorHttpClient?.Dispose();

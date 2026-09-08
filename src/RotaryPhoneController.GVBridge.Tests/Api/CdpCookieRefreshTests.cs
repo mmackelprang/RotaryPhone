@@ -159,6 +159,111 @@ public class CdpCookieRefreshTests
     Assert.Equal(9224, config.ChromeCdpPort);
   }
 
+  // --- the 502 used to claim "the browser session is stale" and "nothing was overwritten" for
+  // --- causes where NEITHER was true. One status code and one message for every cause is the same
+  // --- sin Task 7 removed from the exhausted-ladder message: state only what was actually tested.
+
+  private sealed class FakeCdpExtractor(CdpExtractionResult result) : ICdpCookieExtractor
+  {
+    public Task<CdpExtractionResult> ExtractAsync(int cdpPort, string targetUrl, CancellationToken ct = default)
+      => Task.FromResult(result);
+  }
+
+  private static GVBridgeController ControllerWithOutcome(SetCookiesOutcome outcome)
+  {
+    var cookieManager = CreateDefaultCookieManager();
+    cookieManager.Setup(m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()))
+      .ReturnsAsync(outcome);
+
+    var extracted = new GvCookieSet
+    {
+      Sapisid = "SAPISID-EXTRACTED", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
+    };
+
+    return CreateController(
+      cookieManager: cookieManager,
+      extractor: new FakeCdpExtractor(
+        new CdpExtractionResult(CdpExtractionStatus.Success, extracted, 20, null)));
+  }
+
+  [Fact]
+  public async Task RefreshFromBrowser_RejectedByGoogle_Returns502_AndTheStaleSessionClaimIsEarned()
+  {
+    // The ONE branch where "the browser session is stale" and "nothing was overwritten" are both true.
+    var result = await ControllerWithOutcome(SetCookiesOutcome.RejectedByGoogle)
+      .RefreshCookiesFromBrowser(null);
+
+    var status = Assert.IsType<ObjectResult>(result);
+    Assert.Equal(502, status.StatusCode);
+    var json = JsonSerializer.Serialize(status.Value);
+    Assert.Contains("TESTED, not inferred", json);
+    Assert.Contains("NOT overwritten", json);
+    Assert.Contains("re-login at voice.google.com", json);
+  }
+
+  [Fact]
+  public async Task RefreshFromBrowser_ColdSeedUnvalidated_DoesNotClaimGoogleRejectedThem()
+  {
+    // On the cold path the file WAS overwritten and nothing tested the Google login — yet this branch
+    // used to return the identical 502 saying Google refused the cookies and nothing was overwritten.
+    var result = await ControllerWithOutcome(SetCookiesOutcome.ColdSeedUnvalidated)
+      .RefreshCookiesFromBrowser(null);
+
+    var status = Assert.IsType<ObjectResult>(result);
+    Assert.Equal(202, status.StatusCode);
+    var json = JsonSerializer.Serialize(status.Value);
+    Assert.Contains("WAS overwritten", json);              // the truth this used to invert
+    Assert.DoesNotContain("nothing was overwritten", json);
+    Assert.DoesNotContain("session is stale", json);
+  }
+
+  [Fact]
+  public async Task RefreshFromBrowser_ActivationFailed_DoesNotAccuseTheGoogleLogin()
+  {
+    // A missing encryption key, a throwing registry or an IO error tests nothing about Google. Sending
+    // the operator to re-login for one of those is the unearned assertion Task 7 exists to prevent.
+    var result = await ControllerWithOutcome(SetCookiesOutcome.ActivationFailed)
+      .RefreshCookiesFromBrowser(null);
+
+    var status = Assert.IsType<ObjectResult>(result);
+    Assert.Equal(500, status.StatusCode);
+    var json = JsonSerializer.Serialize(status.Value);
+    Assert.Contains("Nothing here tested the Google login", json);
+    Assert.DoesNotContain("session is stale", json);
+    Assert.DoesNotContain("nothing was overwritten", json);
+  }
+
+  [Fact]
+  public async Task RefreshFromBrowser_AdoptedButNotPersisted_BlamesTheDisk_NotTheGoogleLogin()
+  {
+    // Google ACCEPTED these cookies on a live probe; only the write failed. Reporting that as a stale
+    // browser session would send the operator to re-login while the disk stays full.
+    var result = await ControllerWithOutcome(SetCookiesOutcome.AdoptedButNotPersisted)
+      .RefreshCookiesFromBrowser(null);
+
+    var status = Assert.IsType<ObjectResult>(result);
+    Assert.Equal(500, status.StatusCode);
+    var json = JsonSerializer.Serialize(status.Value);
+    Assert.Contains("Google login is fine", json);
+    Assert.Contains("disk space and permissions", json);
+    Assert.DoesNotContain("session is stale", json);
+  }
+
+  [Theory]
+  [InlineData(SetCookiesOutcome.Adopted)]
+  [InlineData(SetCookiesOutcome.AdoptedButActivationFailed)]
+  public async Task RefreshFromBrowser_CookiesWereAdopted_Returns200(SetCookiesOutcome outcome)
+  {
+    // AdoptedButActivationFailed is a SUCCESS for this endpoint: the cookies passed a live probe and
+    // are on disk, which is what it was asked to do. A failed re-activation is separately visible as
+    // sipRegistered:false on /status, and must not be reported as a refusal by Google.
+    var result = await ControllerWithOutcome(outcome).RefreshCookiesFromBrowser(null);
+
+    var ok = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(ok.Value);
+    Assert.Contains("efreshed", json);
+  }
+
   // --- Helpers ---
 
   private static HttpMessageHandler CreateMockHandler(string responseBody, HttpStatusCode statusCode)
@@ -187,7 +292,8 @@ public class CdpCookieRefreshTests
 
   private static GVBridgeController CreateController(
     IHttpClientFactory? httpClientFactory = null,
-    Mock<IGvCookieManager>? cookieManager = null)
+    Mock<IGvCookieManager>? cookieManager = null,
+    ICdpCookieExtractor? extractor = null)
   {
     var registry = new Mock<ICallAdapterRegistry>();
     registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
@@ -211,7 +317,8 @@ public class CdpCookieRefreshTests
       CreateMockHandler("[]", HttpStatusCode.OK));
     var logger = NullLogger<GVBridgeController>.Instance;
 
-    var cdpExtractor = new CdpCookieExtractor(factory, NullLogger<CdpCookieExtractor>.Instance);
+    var cdpExtractor = extractor
+      ?? new CdpCookieExtractor(factory, NullLogger<CdpCookieExtractor>.Instance);
 
     return new GVBridgeController(
       registry.Object,
@@ -233,7 +340,7 @@ public class CdpCookieRefreshTests
       CookieCount: null,
       SapisidPrefix: null));
     mock.Setup(m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()))
-      .ReturnsAsync(true);
+      .ReturnsAsync(SetCookiesOutcome.Adopted);
     return mock;
   }
 }

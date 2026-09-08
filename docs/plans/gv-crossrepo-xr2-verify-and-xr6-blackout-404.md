@@ -680,10 +680,16 @@ deployment question the owner should see before anything merges.
 
 ## 4. Test Plan (for a Tester, against a running service)
 
-The service listens on **`http://<host>:5555`** (`Properties/launchSettings.json:8`). Radio Console's
-transcripts say `localhost:5004`; that is `HT801RtpPort` (`appsettings.json:69`), a different thing.
-**Confirm the real port before starting** — `systemctl show -p ExecStart rotary-phone`, or the
-`Now listening on:` line in the journal.
+The service listens on **`http://<host>:5004`** in production
+(`deploy/rotary-phone.service:12`, `ASPNETCORE_URLS`). `5555` is the **Development** profile only
+(`Properties/launchSettings.json:8`) and is not what runs on the box.
+
+⚠ Do not "correct" this back. `5004` is *also* `GVBridge:HT801RtpPort`
+(`Models/GVBridgeConfig.cs:13`), an unrelated setting that happens to share the number — that
+coincidence is what produced the original error, which sent a Tester to `5555` against a service that
+has never listened there in production. **Confirm before starting** anyway:
+`systemctl show -p Environment rotary-phone`. Verified on the box 2026-09-08:
+`Environment=ASPNETCORE_ENVIRONMENT=Production ASPNETCORE_URLS=http://0.0.0.0:5004 …`.
 
 ⚠ **Bound every journald read with `--since` and never tail.** Heavy journald reads on this N100
 box correlate with audio distortion.
@@ -691,7 +697,7 @@ box correlate with audio distortion.
 ### Part A — XR-2 regression (verification only; no code changed in this batch)
 
 **A0 — window awareness.** Post-PR #72 the blackout is much narrower, but check anyway before
-trusting a negative: `curl -s http://<host>:5555/api/gvbridge/status` and confirm
+trusting a negative: `curl -s http://<host>:5004/api/gvbridge/status` and confirm
 `degraded:false` / `authBlackout:false`. If degraded, wait for recovery — otherwise an XR-2
 failure and an XR-6 failure are indistinguishable at the UI.
 
@@ -702,7 +708,7 @@ merely happen to be the MMS threads. Every case below is chosen on the slash.
 **A1 — get the real ids.**
 
 ```bash
-curl -s 'http://<host>:5555/api/gvbridge/sms/threads?count=20' | jq -r '.threads[].threadId'
+curl -s 'http://<host>:5004/api/gvbridge/sms/threads?count=20' | jq -r '.threads[].threadId'
 ```
 
 Pick one id **containing a `/`** (expected shape `g.Group Message.d5Mri/NrDUQgXNXNQehOfw`) and one
@@ -714,8 +720,8 @@ cannot be run — say so rather than reporting a pass.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code} ' \
-  'http://<host>:5555/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw'
-curl -s 'http://<host>:5555/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw' \
+  'http://<host>:5004/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw'
+curl -s 'http://<host>:5004/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw' \
   | jq '.messages | length'
 ```
 
@@ -730,7 +736,7 @@ separates "the fix regressed" from "the account is quiet".
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' -d '{"isRead":true}' \
-  'http://<host>:5555/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw/read'
+  'http://<host>:5004/api/gvbridge/sms/threads/g.Group%20Message.d5Mri%2FNrDUQgXNXNQehOfw/read'
 ```
 
 **PASS:** `200`. **FAIL:** `404` — the pre-fix behaviour (the thread lookup missed).
@@ -751,8 +757,8 @@ pre-`3103662` code. Report that as a deployment finding, not a code regression.
 **A6 — idempotency, both `+` spellings.** The decode must not corrupt ids that already worked:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code} ' 'http://<host>:5555/api/gvbridge/sms/threads/t.%2B18019208129'
-curl -s -o /dev/null -w '%{http_code}\n' 'http://<host>:5555/api/gvbridge/sms/threads/t.+18019208129'
+curl -s -o /dev/null -w '%{http_code} ' 'http://<host>:5004/api/gvbridge/sms/threads/t.%2B18019208129'
+curl -s -o /dev/null -w '%{http_code}\n' 'http://<host>:5004/api/gvbridge/sms/threads/t.+18019208129'
 ```
 
 **PASS:** both `200`, and both return the same messages. `Uri.UnescapeDataString` is not form
@@ -763,7 +769,7 @@ through to `MapFallbackToFile` (`Program.cs:405`), returning `index.html` with H
 
 ```bash
 curl -s -w '\n%{http_code} %{content_type}\n' \
-  'http://<host>:5555/api/gvbridge/sms/threads/g.Group Message.d5Mri/NrDUQgXNXNQehOfw' | tail -2
+  'http://<host>:5004/api/gvbridge/sms/threads/g.Group Message.d5Mri/NrDUQgXNXNQehOfw' | tail -2
 ```
 
 **EXPECTED (unchanged, and correct):** `200 text/html`. This is *not* a regression — it documents
@@ -777,10 +783,10 @@ fall through to `index.html`.
 (`status` shows `degraded:false`):
 
 ```bash
-curl -s 'http://<host>:5555/api/gvbridge/voicemail?count=5' | jq -r '.items[].id'
+curl -s 'http://<host>:5004/api/gvbridge/voicemail?count=5' | jq -r '.items[].id'
 ID=<one id from above>
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' \
-  "http://<host>:5555/api/gvbridge/voicemail/$ID/audio"
+  "http://<host>:5004/api/gvbridge/voicemail/$ID/audio"
 ```
 
 **PASS:** `200 audio/mpeg`. Also confirm `Accept-Ranges: bytes` is present
@@ -791,9 +797,9 @@ change.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://<host>:5555/api/gvbridge/voicemail/vm.definitely-not-real/audio'
+  'http://<host>:5004/api/gvbridge/voicemail/vm.definitely-not-real/audio'
 curl -s -o /dev/null -w '%{http_code}\n' \
-  'http://<host>:5555/api/gvbridge/voicemail/vm.definitely-not-real'
+  'http://<host>:5004/api/gvbridge/voicemail/vm.definitely-not-real'
 ```
 
 **PASS:** both `404`. **FAIL:** `502` — the fix was applied too broadly and every miss now reads as
@@ -809,8 +815,8 @@ PR #72, so **induce it rather than wait**. In order of preference:
    wall-clock time and the `psidtsAgeSeconds` value with the result.
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' "http://<host>:5555/api/gvbridge/voicemail/$ID/audio"
-curl -s "http://<host>:5555/api/gvbridge/voicemail/$ID/audio" | jq .
+curl -s -o /dev/null -w '%{http_code}\n' "http://<host>:5004/api/gvbridge/voicemail/$ID/audio"
+curl -s "http://<host>:5004/api/gvbridge/voicemail/$ID/audio" | jq .
 ```
 
 **PASS:** `502`, body `{"error":"Failed to fetch voicemail list from Google"}`.
@@ -819,10 +825,10 @@ curl -s "http://<host>:5555/api/gvbridge/voicemail/$ID/audio" | jq .
 **B4 — `GetItem` and `MarkRead` under the same induced blackout.** Same condition as B3:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' "http://<host>:5555/api/gvbridge/voicemail/$ID"
+curl -s -o /dev/null -w '%{http_code}\n' "http://<host>:5004/api/gvbridge/voicemail/$ID"
 curl -s -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' -d '{"isRead":true}' \
-  "http://<host>:5555/api/gvbridge/voicemail/$ID/read"
+  "http://<host>:5004/api/gvbridge/voicemail/$ID/read"
 ```
 
 **PASS:** both `502`. `409` on the second means `EnableMarkRead` is false — record as not run.

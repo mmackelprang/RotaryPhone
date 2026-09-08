@@ -46,8 +46,18 @@ public class GvCookieManagerTests : IDisposable
   }
 
   [Fact]
-  public async Task SetCookies_ValidPayload_SavesAndReactivates()
+  public async Task SetCookies_ValidPayload_SavesAndReactivates_ButReportsUnvalidated()
   {
+    // ⚠ The return value changed deliberately on 2026-09-08. It used to mean "SwitchModeAsync did not
+    // throw"; it now means "the cookies actually WORK". ActivateCoreAsync handles a failed probe with
+    // SetAvailable(false) and a plain return rather than an exception, so the old meaning reported
+    // success through every dead-cookie activation — that is how the box's 20-minute cron logged
+    // "extracted and activated" at INF for two days while the bridge was completely down.
+    //
+    // Here the registry is a MOCK: SwitchModeAsync does nothing, so the adapter never activates and
+    // AreCookiesValid stays false. False is now the honest answer. Everything this test is actually
+    // named for — the save, the generated key, the single mode switch — still holds and is still
+    // asserted below.
     var (manager, _, registry) = CreateManager();
     registry
       .Setup(r => r.SwitchModeAsync(CallAdapterMode.GVApi, It.IsAny<CancellationToken>()))
@@ -64,7 +74,9 @@ public class GvCookieManagerTests : IDisposable
 
     var result = await manager.SetCookiesAsync(cookies);
 
-    Assert.True(result);
+    // was True: the adapter never activated, so nothing validated these. ColdSeedUnvalidated names the
+    // cause exactly — the seed reached disk, and nothing here tested the Google login.
+    Assert.Equal(SetCookiesOutcome.ColdSeedUnvalidated, result);
     Assert.True(File.Exists(_cookieFile), "Cookie file should be created");
     Assert.True(File.Exists(_keyFile), "Key file should be auto-generated");
     registry.Verify(
@@ -161,7 +173,9 @@ public class GvCookieManagerTests : IDisposable
       Sapisid = "test", Sid = "s", Hsid = "h", Ssid = "ss", Apisid = "a"
     });
 
-    Assert.False(result);
+    // A throwing registry is ActivationFailed, and pinning that is the point: it must NOT be reported
+    // as "Google rejected your cookies", which is what a bare false used to become one file over.
+    Assert.Equal(SetCookiesOutcome.ActivationFailed, result);
     // But the cookie file should still have been saved
     Assert.True(File.Exists(_cookieFile));
   }
