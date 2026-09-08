@@ -40,7 +40,17 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private bool _disposed;
     private bool _areCookiesValid;
 
-    // When the rotating freshness cookies (PSIDTS) were last loaded/refreshed (UTC).
+    // When this process last LOADED OR MINTED the rotating freshness cookies (PSIDTS), in UTC.
+    //
+    // ⚠ The name says "refreshed"; the value is stamped on a mere LOAD as well, so it resets to ~0 on
+    // every restart and every reload for a credential that may be days old. That is a defect
+    // (docs/KNOWN-ISSUES.md finding L2) and it is FROZEN DELIBERATELY — PsidtsAgeSeconds, which reads
+    // this field, is a published cross-repo contract and correcting it in place would silently change
+    // values a consumer already binds to. Do not "fix" this without a conscious contract decision;
+    // GVApiAdapterCookieLineageTests.PsidtsAgeSeconds_IsFrozen_AndStillRestampsOnEveryLoad guards it.
+    //
+    // The honest credential lineage is PsidtsMintedAtUtc, which is derived straight from the cookie
+    // set and has no write site at all.
     private DateTime? _psidtsRefreshedAt;
 
     // Last time the adapter was fully healthy (cookies valid AND SIP registered), set by the watchdog.
@@ -163,16 +173,41 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public string? ThrottleReason => _sipTransport?.ThrottleReason;
 
     /// <summary>
-    /// Age (seconds) of the current rotating freshness cookies (__Secure-1PSIDTS/3PSIDTS)
-    /// based on when they were last loaded or refreshed. Null if no cookie set is loaded.
-    /// Google rotates PSIDTS on its own cadence (minutes–hours); a large age is a hint that
-    /// the next request may 401 with SESSION_COOKIE_INVALID even if the periodic health
-    /// check last passed. Used to make /api/gvbridge/status's cookiesValid less misleading.
+    /// ⚠ DEPRECATED — reports the age of the last cookie LOAD, not the age of the credential.
+    /// Prefer <see cref="PsidtsMintedAtUtc"/>.
     /// </summary>
+    /// <remarks>
+    /// Seconds since this process last loaded OR minted the rotating freshness cookies
+    /// (__Secure-1PSIDTS/3PSIDTS). Because a mere LOAD restamps it, it resets to ~0 on every restart and
+    /// on every reload — so it reads reassuringly low for a credential that is in fact days old. That is
+    /// how a two-day Google session death went unnoticed from 2026-09-06 to 2026-09-08, and it is
+    /// recorded as finding L2 in docs/KNOWN-ISSUES.md.
+    ///
+    /// The behaviour is FROZEN, deliberately: this field is a published cross-repo contract and
+    /// correcting it in place would silently change values a consumer already binds to. The honest
+    /// value is the new <see cref="PsidtsMintedAtUtc"/> timestamp; this field is retained only for
+    /// compatibility and should not be used for new work.
+    /// </remarks>
     public long? PsidtsAgeSeconds =>
         _psidtsRefreshedAt is { } refreshed
             ? (long)Math.Max(0, (DateTime.UtcNow - refreshed).TotalSeconds)
             : null;
+
+    /// <summary>
+    /// UTC instant Google actually MINTED the PSIDTS this adapter currently holds, as carried by the
+    /// cookie set itself and persisted across restarts. <c>null</c> means UNKNOWN — a cookie file
+    /// written before this field existed, a hand-pasted set, or one extracted from the browser (Chrome's
+    /// jar carries no readable issue time).
+    /// </summary>
+    /// <remarks>
+    /// This is the honest credential lineage, and it is deliberately a TIMESTAMP rather than an age: an
+    /// age is computed at serialisation time and so is only true at the instant of the response, and an
+    /// age derived from a lying clock is indistinguishable on the wire from one derived from a truthful
+    /// one. A mint time cannot be faked by a reload — which is precisely the defect this corrects.
+    /// ⚠ <c>null</c> means UNKNOWN, and unknown is NOT healthy. Do not render it as "fresh".
+    /// Google's PSIDTS lives ~11 minutes (measured 2026-07-31).
+    /// </remarks>
+    public DateTime? PsidtsMintedAtUtc => _cookieSet?.PsidtsMintedAtUtc;
 
     /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
