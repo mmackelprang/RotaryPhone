@@ -90,6 +90,7 @@ regression.
 | `INVITE target endpoint: udp:<ip>:5060` | journal | **The address the datagram actually went to.** Authoritative |
 | `Learned registrar binding: <aor> -> <ip>:5060` | journal | Where the device says it is, from the source address of its REGISTER |
 | `GET /api/diagnostics/sip-registrations` | REST | The current learned bindings — i.e. where INVITEs will actually go |
+| `GET /api/phone/system-status` → `ht801IpAddress` | REST | **Since 2026-09-08 only:** the **resolved** address the background reachability probe was aimed at. Cached, so up to ~30 s old, and `null` before the first probe — see the caveats below |
 
 ```bash
 sudo journalctl -u rotary-phone.service -f
@@ -102,15 +103,31 @@ The **absence** of `Phone default is already registered` at startup. That line m
 phone entry was being silently discarded — the original bug (§7). Since PR1 a duplicate Id is fatal
 rather than warned about, so the line should never appear again.
 
-### NOT VALID — `/api/phone/system-status` → `ht801IpAddress`
+### VALID SINCE 2026-09-08, WITH CAVEATS — `/api/phone/system-status` → `ht801IpAddress`
 
-> **This field reports the configured projection, not the INVITE target.** It reads
-> `HT801ConfigService` (last-wins over `Phones`), while the INVITE resolves its target separately.
-> The two are different values and can disagree.
+> **This section used to read "NOT VALID". The field changed; the warning has not simply been
+> deleted, because the reason for it is the most important thing in this document.**
 >
-> **During the 2026-07 outage this field reported the correct `.240` for months while every single
-> INVITE went to `.22`.** It is the reason the bug survived so long. Do not use it to verify
-> addressing — use the four signals above.
+> **What it was.** The field reported the *configured projection* — `HT801ConfigService`, a last-wins
+> read over `Phones` — while the INVITE resolved its target separately. Two different values, free to
+> disagree. **During the 2026-07 outage it reported the correct `.240` for months while every single
+> INVITE went to `.22`**, which is the reason that bug survived so long: the one signal everybody
+> checked was the one signal that could not see the fault.
+>
+> **What it is now.** As of **2026-09-08** the endpoint reports the **resolved** address — the same
+> `ResolveHt801Address` result the 30-second background reachability probe was aimed at, and the same
+> value the `SystemStatusChanged` hub event carries. It is a valid addressing signal, and it can no
+> longer name an address that INVITEs are not going to.
+>
+> **Two caveats that keep it second-choice:**
+>
+> - It is a **cached** value, up to ~30 s old (worst case ~34 s: the interval re-arms when a probe
+>   starts, and the monitor loop ticks once a second). It is not a live read.
+> - It is **`null` before the first probe completes**, and `null` indefinitely if no address can be
+>   resolved at all. Null means *unknown*, never *offline* and never *unconfigured*.
+>
+> For anything time-sensitive, or when you need to see the bindings themselves, still prefer
+> `INVITE target endpoint` in the journal and `/api/diagnostics/sip-registrations`.
 
 ### What a configured/learned mismatch looks like
 

@@ -20,9 +20,28 @@ public enum BellFailureReason
 }
 
 /// <summary>
-/// The most recent bell-ring failure for one phone. Survives the 60-second ringing window and a
-/// browser reload (served from GET /api/phone/status) — the original bug was that nobody was
-/// looking at the screen during the only 60 seconds the failure was visible.
+/// The most recent bell-ring failure for one phone.
+///
+/// <para>
+/// Survives the 60-second ringing window, a browser reload (served from GET /api/phone/status), and
+/// — since 2026-09 — a service restart, a process crash and a deploy, via
+/// <see cref="IBellFailureStore"/>. The original bug was that nobody was looking at the screen during
+/// the only 60 seconds the failure was visible; the restart half was added because the consuming
+/// kiosk restarts nightly, so an in-memory dismissal would have quietly undismissed itself every
+/// night. See <see cref="BellFailureTracker"/> for why that outweighs the D5 argument against
+/// persisting it.
+///
+/// <para>
+/// Those three are the guaranteed cases, and the list stops there deliberately. The store writes to
+/// a temp file and renames, which is atomic but not fsync'd, so survival across a POWER LOSS is
+/// best-effort rather than promised — see <see cref="JsonBellFailureStore"/>.
+/// </para>
+/// </para>
+///
+/// <para>
+/// It is a HISTORICAL note, stamped with <see cref="OccurredAtUtc"/> — not a claim about the bell's
+/// current health. Live health is Ht801Reachable on SystemStatus.
+/// </para>
 /// </summary>
 public sealed record BellFailureRecord(
     DateTime OccurredAtUtc,

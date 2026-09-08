@@ -3,7 +3,6 @@ using RotaryPhoneController.Core;
 using RotaryPhoneController.Core.Audio;
 using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
-using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Core.HT801;
 
 namespace RotaryPhoneController.Server.Controllers;
@@ -17,8 +16,11 @@ public class PhoneController : ControllerBase
     private readonly IBluetoothHfpAdapter _bluetoothAdapter;
     private readonly ISipAdapter _sipAdapter;
     private readonly AppConfiguration _config;
+    // Still needed by ValidateHT801, which legitimately acts on the CONFIGURED device record.
+    // GetSystemStatus deliberately no longer touches it — see the remarks on that method.
     private readonly IHT801ConfigService _ht801Service;
     private readonly IBellFailureTracker _bellFailureTracker;
+    private readonly IHt801ReachabilityCache _ht801Cache;
 
     public PhoneController(
         PhoneManagerService phoneManager,
@@ -27,6 +29,7 @@ public class PhoneController : ControllerBase
         ISipAdapter sipAdapter,
         AppConfiguration config,
         IHT801ConfigService ht801Service,
+        IHt801ReachabilityCache ht801Cache,
         IBellFailureTracker bellFailureTracker)
     {
         _phoneManager = phoneManager;
@@ -35,6 +38,7 @@ public class PhoneController : ControllerBase
         _sipAdapter = sipAdapter;
         _config = config;
         _ht801Service = ht801Service;
+        _ht801Cache = ht801Cache;
         _bellFailureTracker = bellFailureTracker;
     }
 
@@ -151,51 +155,59 @@ public class PhoneController : ControllerBase
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>This endpoint reports the CONFIGURED HT801 address, not the INVITE target.</b> The two are
-    /// different values and can disagree: the configured address is a projection of
-    /// RotaryPhone:Phones[].HT801IpAddress, while INVITEs go to the address learned from the
-    /// device's own REGISTER when one is fresh.
+    /// <b>The three HT801 fields here are the SAME cached background probe the
+    /// <c>SystemStatusChanged</c> hub event carries.</b> One probe, one meaning, whichever transport
+    /// you read it over. It reports the <b>RESOLVED</b> registrar binding — the address an INVITE
+    /// actually goes to — not the configured address.
     /// </para>
     /// <para>
-    /// It reported the CORRECT address throughout the entire 2026-07 outage while every INVITE went
-    /// to a stale one, so it is NOT a valid verification signal for addressing. Use
-    /// <c>GET /api/diagnostics/sip-registrations</c> instead.
+    /// It used to report the configured address, pinged synchronously inside the request. That is
+    /// why this remark once said the opposite: the configured address stayed CORRECT throughout the
+    /// entire 2026-07 outage while every INVITE went to a stale one, which made this endpoint a
+    /// confidently green signal during the exact failure it was being consulted about. It
+    /// deliberately no longer reports it. For the raw registration table, see
+    /// <c>GET /api/diagnostics/sip-registrations</c>.
     /// </para>
     /// <para>
-    /// Ht801Reachable is null when the probe did not run or could not determine an answer — render
-    /// that as "Unknown", never "Offline". Ht801LastCheckedUtc is set only when a probe actually ran.
+    /// <b>The value is roughly 30 seconds stale by design</b> — the probe runs on that cadence in
+    /// the background, and nothing is pinged in this request. The true bound is a little over 30 s:
+    /// the interval is re-armed when a probe is KICKED OFF rather than when it finishes, and the
+    /// monitor loop only tests for due-ness once a second, so the worst case is ~30 s + the probe's
+    /// own duration (≤3 s) + up to 1 s of loop tick — call it ~34 s. Ht801LastCheckedUtc is a
+    /// genuine probe age: it is when the probe RAN, not when you asked, so it is safe to build a
+    /// "last checked" or stale-data affordance on it.
+    /// </para>
+    /// <para>
+    /// <b>The cold-start window is one ping, not one interval.</b> The next-probe deadline starts at
+    /// DateTime.MinValue and the monitor loop tests it on its FIRST iteration, so the first probe
+    /// fires at start-up rather than 30 seconds into it. All three fields are null only for as long
+    /// as that one ping takes: ~3 ms against a healthy device, and at most 3 s
+    /// (SendPingAsync(ip, 3000)) against one that does not answer.
+    /// </para>
+    /// <para>
+    /// <b>...or indefinitely, if no HT801 address can be resolved at all.</b> If <c>Phones</c> is
+    /// empty, or nothing resolves and the configured address is blank or 0.0.0.0, the probe returns
+    /// without writing to the cache and all three fields stay null for the process lifetime. That is
+    /// a CONFIGURATION fault presenting as "Unknown", which is the honest rendering of it.
+    /// </para>
+    /// <para>
+    /// Null means NOT YET PROBED, never "offline" — render it as "Unknown"
+    /// (see <see cref="SystemStatus.Ht801Reachable"/>). Note that null is the cold-start and
+    /// no-address contract specifically. Once a probe has succeeded, a LATER probe that cannot reach
+    /// a conclusion does not necessarily null the fields: a probe that throws writes null, but the
+    /// no-usable-address path leaves the previous snapshot in place rather than wiping it.
     /// </para>
     /// </remarks>
     [HttpGet("system-status")]
-    public async Task<IActionResult> GetSystemStatus()
+    public IActionResult GetSystemStatus()
     {
-        var status = new SystemStatus
-        {
-            Platform = PlatformDetector.CurrentPlatform.ToString(),
-            IsRaspberryPi = PlatformDetector.IsRaspberryPi,
-            BluetoothEnabled = _config.UseActualBluetoothHfp,
-            BluetoothConnected = _bluetoothAdapter.IsConnected,
-            BluetoothDeviceAddress = _bluetoothAdapter.ConnectedDeviceAddress,
-            SipListening = _sipAdapter.IsListening,
-            SipListenAddress = _config.SipListenAddress,
-            SipPort = _config.SipPort
-        };
+        // One read, into a local: three reads could straddle a probe and mix two of them together.
+        var probe = _ht801Cache.Current;
 
-        // Check HT801 status
-        // We'll use the default phone's config for now
-        var defaultPhoneId = _config.Phones.FirstOrDefault()?.Id ?? "default";
-        var ht801Config = _ht801Service.GetConfig(defaultPhoneId);
-        
-        status.Ht801IpAddress = ht801Config.IpAddress;
-        
-        // Only check reachability if we have a valid IP. When we don't probe, BOTH Ht801Reachable
-        // and Ht801LastCheckedUtc stay null — that pair means "genuinely unknown", not "offline".
-        if (!string.IsNullOrEmpty(ht801Config.IpAddress) && ht801Config.IpAddress != "0.0.0.0")
-        {
-            var result = await _ht801Service.TestConnectionAsync(ht801Config.IpAddress);
-            status.Ht801Reachable = result.Success;
-            status.Ht801LastCheckedUtc = DateTime.UtcNow;
-        }
+        // Built through the SHARED factory, which is the same call SignalRNotifierService makes for
+        // the SystemStatusChanged event. The two payloads are therefore identical by construction
+        // rather than by two code paths that happen to agree.
+        var status = SystemStatusFactory.Create(_config, _bluetoothAdapter, _sipAdapter, probe);
 
         _logger.LogDebug("System status requested: Platform={Platform}, Bluetooth={BluetoothConnected}, SIP={SipListening}, HT801={Ht801Reachable}",
             status.Platform, status.BluetoothConnected, status.SipListening, status.Ht801Reachable);

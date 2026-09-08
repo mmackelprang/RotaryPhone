@@ -381,7 +381,8 @@ F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plan
 registrar-binding PR (`feat/ht801-registrar-binding`).
 **Symptom (was):** An inbound call showed **Ringing** in the Radio.Web UI for the full 60-second window
 while the physical rotary phone bell stayed silent. Nothing on screen, in the API, or in the logs said
-anything was wrong. `/api/phone/system-status` reported the *correct* HT801 address throughout.
+anything was wrong. `/api/phone/system-status` reported the *correct* HT801 address throughout — that
+being the endpoint's behaviour at the time; it was changed on 2026-09-08 (see **Verify** below).
 **Impact (was):** Every inbound call. The condition persisted for months undetected because the only
 obvious verification signal was the one signal that could not see it.
 **Root cause:** `AppConfiguration.Phones` was pre-seeded with one element carrying a hardcoded
@@ -393,6 +394,7 @@ first-wins, so it kept the hardcoded one and discarded the real entry with a sin
 configuration file could fix it**, because the stale value was in the binary, not the config.
 Meanwhile `/api/phone/system-status` read a *different*, last-wins projection (`HT801ConfigService`)
 and truthfully reported the configured `.240` — a value that had nothing to do with the INVITE target.
+(That projection was removed from the endpoint on 2026-09-08; it now reports the resolved address.)
 **Fix:**
 - **PR #67 (bell restoration):** `Phones` starts empty; `Program.cs` fails fast via a new
   `AppConfigurationValidator` instead of re-seeding a default phone; `PhoneManagerService` throws on a
@@ -403,10 +405,15 @@ and truthfully reported the configured `.240` — a value that had nothing to do
   address of its SIP REGISTER and prefers that fresh binding over configuration, so a DHCP move
   self-heals within one registration interval; `GVBridge:HT801Ip` deleted so there is exactly one
   address key; new `GET /api/diagnostics/sip-registrations` reports where INVITEs will actually go.
-**Verify (and how NOT to):** use `INVITE target endpoint: udp:<ip>:5060` in the journal, the
-`Learned registrar binding:` line, and `/api/diagnostics/sip-registrations`. **Do not use
-`/api/phone/system-status` → `ht801IpAddress`** — it reports the configured projection, not the INVITE
-target, and reported the correct address for the entire duration of this bug.
+**Verify:** use `INVITE target endpoint: udp:<ip>:5060` in the journal, the
+`Learned registrar binding:` line, and `/api/diagnostics/sip-registrations`.
+**Updated 2026-09-08 — `/api/phone/system-status` → `ht801IpAddress` is no longer a trap.** For the
+duration of this bug it reported the *configured* projection rather than the INVITE target, which is
+why it showed the correct address throughout and why this line used to say "do not use it". The
+endpoint has since been converged onto the background reachability probe of the **resolved** binding,
+so it now agrees with the three signals above. Two caveats keep it second-choice: it is cached (up to
+~30 s old) and it is `null` until the first probe completes, where `null` means *unknown*, not
+*offline*.
 **See:** [`docs/HT801-ADDRESS.md`](HT801-ADDRESS.md) (address locations, change procedure, verification),
 [`docs/plans/ht801-address-resolution-and-config-binder-fix.md`](plans/ht801-address-resolution-and-config-binder-fix.md)
 (full analysis, including the empirical binder repro).

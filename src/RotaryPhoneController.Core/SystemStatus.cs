@@ -46,7 +46,19 @@ public class SystemStatus
     public int SipPort { get; set; }
 
     /// <summary>
-    /// Configured IP address of the HT801 device
+    /// The address the reachability probe was aimed at: the <b>RESOLVED</b> registrar binding —
+    /// where an INVITE would actually go — and never the configured address.
+    /// <para>
+    /// Those are different values and they can disagree. The configured address reported correct for
+    /// the entire 2026-07 outage while every INVITE went somewhere else, which is why this field
+    /// deliberately no longer carries it (changed 2026-09-08).
+    /// </para>
+    /// <para>
+    /// <c>null</c> means NOT YET PROBED — the same tri-state as <see cref="Ht801Reachable"/> and
+    /// <see cref="Ht801LastCheckedUtc"/> below, and it moves with them: all three are null together
+    /// before the first probe resolves an address, and all three are populated together afterwards.
+    /// Render null as "Unknown", never as "no HT801 configured".
+    /// </para>
     /// </summary>
     public string? Ht801IpAddress { get; set; }
 

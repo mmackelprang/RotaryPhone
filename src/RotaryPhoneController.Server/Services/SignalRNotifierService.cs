@@ -6,7 +6,6 @@ using RotaryPhoneController.Core.Bell;
 using RotaryPhoneController.Core.Configuration;
 using RotaryPhoneController.Core.Diagnostics;
 using RotaryPhoneController.Core.HT801;
-using RotaryPhoneController.Core.Platform;
 using RotaryPhoneController.Server.Hubs;
 
 namespace RotaryPhoneController.Server.Services;
@@ -23,15 +22,19 @@ public class SignalRNotifierService : IHostedService
     private readonly SipDiagnosticService _diagnostics;
     private readonly IBellFailureTracker _bellFailureTracker;
     private readonly IHT801ConfigService _ht801Service;
+    private readonly IHt801ReachabilityCache _ht801Cache;
     private bool _lastBluetoothConnected;
 
-    // Cached HT801 reachability. The probe is kicked off on a slow cadence from the existing 1s
-    // monitor loop but runs OFF it, so neither the loop nor a status broadcast is ever blocked on a
-    // network timeout — BroadcastSystemStatusAsync just reads these fields.
+    // The probe is kicked off on a slow cadence from the existing 1s monitor loop but runs OFF it,
+    // so neither the loop nor a status broadcast is ever blocked on a network timeout — the result
+    // goes into _ht801Cache and BroadcastSystemStatusAsync just reads it.
+    //
+    // The result lives in a shared singleton rather than in fields here because this service is no
+    // longer its only reader: PhoneController.GetSystemStatus reads the same cache, so REST and
+    // SignalR report one probe with one meaning instead of two that disagreed. See the cache's own
+    // comment for why a single volatile snapshot, and not three fields, is what makes a
+    // cross-thread read of it safe.
     private static readonly TimeSpan Ht801ProbeInterval = TimeSpan.FromSeconds(30);
-    private bool? _ht801Reachable;
-    private DateTime? _ht801LastCheckedUtc;
-    private string? _ht801ProbedAddress;
     private DateTime _ht801NextProbeUtc = DateTime.MinValue;
 
     // 0 = no probe running, 1 = one in flight. Claimed with Interlocked so the fire-and-forget
@@ -63,6 +66,7 @@ public class SignalRNotifierService : IHostedService
         SipDiagnosticService diagnostics,
         IBellFailureTracker bellFailureTracker,
         IHT801ConfigService ht801Service,
+        IHt801ReachabilityCache ht801Cache,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -74,6 +78,7 @@ public class SignalRNotifierService : IHostedService
         _diagnostics = diagnostics;
         _bellFailureTracker = bellFailureTracker;
         _ht801Service = ht801Service;
+        _ht801Cache = ht801Cache;
         _deviceManager = deviceManager;
     }
 
@@ -345,8 +350,20 @@ public class SignalRNotifierService : IHostedService
             ? null
             : _sipAdapter.ResolveHt801Address(phone.HT801Extension, phone.HT801IpAddress, logDiagnostics: false);
 
-        // No usable address is a CONFIGURATION problem, not an offline device. Leave the reachable
-        // value null ("Unknown") rather than reporting a device we never asked about as down.
+        // No usable address is a CONFIGURATION problem, not an offline device, so we must not report
+        // a device we never asked about as down. We do that by NOT TOUCHING THE CACHE at all — which
+        // is not quite the same as "leave the reachable value null", as this comment used to claim.
+        // From cold start it amounts to the same thing (the cache is already all-null, and stays
+        // null for the process lifetime). But if a probe previously SUCCEEDED and the address later
+        // became unresolvable, this path leaves the last good snapshot standing rather than
+        // downgrading it to Unknown.
+        //
+        // That is benign only because both inputs are fixed at start-up: _config.Phones is bound
+        // once, and the fallback configured address with it. The resolver's learned binding can go
+        // stale, but it cannot turn a resolvable address into an unresolvable one. If either input
+        // ever becomes dynamic, this becomes a live "confidently green during an outage" bug — the
+        // exact failure mode this convergence work exists to remove — and this path would then have
+        // to expire the snapshot instead of silently keeping it.
         if (string.IsNullOrWhiteSpace(address) || address == "0.0.0.0")
         {
             return;
@@ -365,11 +382,7 @@ public class SignalRNotifierService : IHostedService
             reachable = null;
         }
 
-        var changed = reachable != _ht801Reachable || address != _ht801ProbedAddress;
-
-        _ht801Reachable = reachable;
-        _ht801LastCheckedUtc = DateTime.UtcNow;
-        _ht801ProbedAddress = address;
+        var changed = _ht801Cache.Update(reachable, address, DateTime.UtcNow);
 
         if (changed)
         {
@@ -381,22 +394,14 @@ public class SignalRNotifierService : IHostedService
 
     private async Task BroadcastSystemStatusAsync()
     {
-        var status = new SystemStatus
-        {
-            Platform = PlatformDetector.CurrentPlatform.ToString(),
-            IsRaspberryPi = PlatformDetector.IsRaspberryPi,
-            BluetoothEnabled = _config.UseActualBluetoothHfp,
-            BluetoothConnected = _bluetoothAdapter.IsConnected,
-            BluetoothDeviceAddress = _bluetoothAdapter.ConnectedDeviceAddress,
-            SipListening = _sipAdapter.IsListening,
-            SipListenAddress = _config.SipListenAddress,
-            SipPort = _config.SipPort,
-            // Read the cached probe result — never probe synchronously here, or every status
-            // broadcast would block on a network timeout.
-            Ht801IpAddress = _ht801ProbedAddress,
-            Ht801Reachable = _ht801Reachable,
-            Ht801LastCheckedUtc = _ht801LastCheckedUtc
-        };
+        // One read of the cache, into a local. Reading it three times could straddle a probe and
+        // build a status out of two different ones — see Ht801ReachabilityCache.
+        var probe = _ht801Cache.Current;
+
+        // Built through the SHARED factory, which is the same call PhoneController.GetSystemStatus
+        // makes for the REST payload. That is what stops this event and that endpoint from drifting
+        // apart again — they no longer have two projections that must be kept in step by hand.
+        var status = SystemStatusFactory.Create(_config, _bluetoothAdapter, _sipAdapter, probe);
 
         _logger.LogDebug("Broadcasting system status: Bluetooth={Connected}, SIP={Listening}",
             status.BluetoothConnected, status.SipListening);
