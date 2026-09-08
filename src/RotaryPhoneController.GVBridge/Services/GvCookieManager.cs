@@ -207,7 +207,31 @@ public class GvCookieManager : IGvCookieManager
       // churned on the cron's cadence (that is the F6/F7 regression), while an absent or unregistered
       // one is precisely what needs rebuilding. The set on disk has already passed a live probe at
       // this point, so re-activation is loading a set we just proved.
-      if (!_adapter.IsSipRegistered)
+      //
+      // ⚠ ...AND NOT WHILE THROTTLED, which is the second half of the gate and not optional. A 603
+      // cooldown makes the transport UNREGISTERED BY DESIGN — RegisterAsync is suppressed so Google's
+      // account-level throttle can cool (the 2026-06-19 mitigation). Re-activating on that state
+      // disposes the throttled transport together with its _consecutiveThrottles and _throttledUntilUtc,
+      // and the replacement REGISTERs immediately with the escalation reset to zero: the 900 s and
+      // 1800 s rungs of [60, 300, 900, 1800] become unreachable and the quiet period never happens.
+      // RunProactiveCookieRefreshAsync and RunHealthCheckAsync both already check this; this path was
+      // the only one that did not.
+      //
+      // The throttle test carries !IsSipRegistered with it rather than standing alone, so the warning
+      // below can only be emitted in the state its text actually describes.
+      if (!_adapter.IsSipRegistered && _adapter.ThrottledUntil is { } throttledUntil)
+      {
+        // Logged rather than silent: throttled-AND-stranded is a real dead end (calls stay down until
+        // the cooldown lapses and the NEXT cron fire re-activates), and an operator reading the log
+        // must be able to see that the re-activation was deliberately WITHHELD, not forgotten.
+        _logger.LogWarning(
+          "Adopted new cookies and SIP is not registered, but a 603/403 REGISTER-throttle cooldown is "
+          + "active until {ThrottledUntil:O} — NOT re-activating. Re-activation would dispose the "
+          + "cooldown along with the transport and REGISTER straight back into Google's throttle. The "
+          + "cookies are validated and on disk; a later cron fire will re-activate once the cooldown "
+          + "has lapsed. CALLS WILL NOT WORK until then.", throttledUntil);
+      }
+      else if (!_adapter.IsSipRegistered)
       {
         try
         {

@@ -149,6 +149,48 @@ public class GvCookieManagerValidationTests
     }
 
     [Fact]
+    public async Task SetCookiesAsync_StrandedAndThrottled_AdoptsButDoesNotReactivate()
+    {
+        // ⛔ MEDIUM-A. The stranded-adapter recovery above must not defeat the 603 throttle cooldown.
+        //
+        // Shape: Google 603-throttles the account, GvSipTransport enters its escalating cooldown
+        // ([60, 300, 900, 1800] s, ReconnectOptions.cs) and SUPPRESSES REGISTER — the 2026-06-19
+        // incident mitigation. A throttled transport is, by definition, NOT registered, so twenty
+        // minutes later the cron adopts fresh cookies, sees !IsSipRegistered and re-activates.
+        // TearDownGenerationAsync then disposes the throttled transport ALONG WITH
+        // _consecutiveThrottles and _throttledUntilUtc; the replacement has IsThrottled == false and
+        // REGISTERs immediately with the escalation reset to zero. The 900 s and 1800 s rungs become
+        // unreachable and Google never gets its quiet period.
+        //
+        // Without the fix this test fails on the Times.Never verification below.
+        var (transport, _) = GVApiAdapterRecoveryTests.NewFakeTransport();
+        GVApiAdapterRecoveryTests.Throttle(transport);
+        var (manager, adapter, store, registry, path) = NewStrandedManager(sipTransport: transport);
+        await store.SaveAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD"));
+
+        // The two preconditions together: unregistered (so the recovery above WOULD fire) AND
+        // throttled (so it must not).
+        Assert.False(adapter.IsSipRegistered);
+        Assert.NotNull(adapter.ThrottledUntil);
+
+        var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"));
+
+        // The refresh itself still SUCCEEDED — the cookies were proven against Google and persisted.
+        // Skipping the re-activation is not a Google refusal and must never be reported as one.
+        Assert.Equal(SetCookiesOutcome.Adopted, saved);
+        var onDisk = await store.LoadAsync();
+        Assert.Equal("SAPISID-FRESH", onDisk!.Sapisid);
+
+        // ...and the adapter was NOT churned, so the cooldown and its escalation count survive.
+        registry.Verify(
+            r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+
+        await transport.DisposeAsync();
+        File.Delete(path);
+    }
+
+    [Fact]
     public async Task SetCookiesAsync_HotPathSaveThrows_ReportsTheDisk_AndDoesNotReactivate()
     {
         // MEDIUM-3: neither this method nor TryAdoptAndPersistCookiesAsync had an exception guard, so an
