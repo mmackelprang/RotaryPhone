@@ -177,6 +177,13 @@ builder.Services.AddSingleton<ICallAdapterRegistry>(sp =>
     return registry;
 });
 
+// HT801 reachability. Singleton, and it MUST be — SignalRNotifierService writes the background
+// probe result into it and PhoneController.GetSystemStatus reads it, which is the whole point:
+// REST and SignalR report one probe rather than two that disagreed. A scoped or transient
+// registration would hand the controller its own permanently-empty cache, and the endpoint would
+// report "Unknown" forever while the hub reported the truth.
+builder.Services.AddSingleton<IHt801ReachabilityCache, Ht801ReachabilityCache>();
+
 // Bell-failure state. Singleton and the SINGLE convergence point for "the bell did not ring":
 // the immediate socket-level failure (CallManager) and the delayed INVITE outcome
 // (SipDiagnosticService: timeout / 4xx) both feed it, and exactly one hub event is emitted from it.

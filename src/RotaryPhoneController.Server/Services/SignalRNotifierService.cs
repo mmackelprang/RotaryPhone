@@ -23,15 +23,19 @@ public class SignalRNotifierService : IHostedService
     private readonly SipDiagnosticService _diagnostics;
     private readonly IBellFailureTracker _bellFailureTracker;
     private readonly IHT801ConfigService _ht801Service;
+    private readonly IHt801ReachabilityCache _ht801Cache;
     private bool _lastBluetoothConnected;
 
-    // Cached HT801 reachability. The probe is kicked off on a slow cadence from the existing 1s
-    // monitor loop but runs OFF it, so neither the loop nor a status broadcast is ever blocked on a
-    // network timeout — BroadcastSystemStatusAsync just reads these fields.
+    // The probe is kicked off on a slow cadence from the existing 1s monitor loop but runs OFF it,
+    // so neither the loop nor a status broadcast is ever blocked on a network timeout — the result
+    // goes into _ht801Cache and BroadcastSystemStatusAsync just reads it.
+    //
+    // The result lives in a shared singleton rather than in fields here because this service is no
+    // longer its only reader: PhoneController.GetSystemStatus reads the same cache, so REST and
+    // SignalR report one probe with one meaning instead of two that disagreed. See the cache's own
+    // comment for why a single volatile snapshot, and not three fields, is what makes a
+    // cross-thread read of it safe.
     private static readonly TimeSpan Ht801ProbeInterval = TimeSpan.FromSeconds(30);
-    private bool? _ht801Reachable;
-    private DateTime? _ht801LastCheckedUtc;
-    private string? _ht801ProbedAddress;
     private DateTime _ht801NextProbeUtc = DateTime.MinValue;
 
     // 0 = no probe running, 1 = one in flight. Claimed with Interlocked so the fire-and-forget
@@ -63,6 +67,7 @@ public class SignalRNotifierService : IHostedService
         SipDiagnosticService diagnostics,
         IBellFailureTracker bellFailureTracker,
         IHT801ConfigService ht801Service,
+        IHt801ReachabilityCache ht801Cache,
         IBluetoothDeviceManager? deviceManager = null)
     {
         _phoneManager = phoneManager;
@@ -74,6 +79,7 @@ public class SignalRNotifierService : IHostedService
         _diagnostics = diagnostics;
         _bellFailureTracker = bellFailureTracker;
         _ht801Service = ht801Service;
+        _ht801Cache = ht801Cache;
         _deviceManager = deviceManager;
     }
 
@@ -365,11 +371,7 @@ public class SignalRNotifierService : IHostedService
             reachable = null;
         }
 
-        var changed = reachable != _ht801Reachable || address != _ht801ProbedAddress;
-
-        _ht801Reachable = reachable;
-        _ht801LastCheckedUtc = DateTime.UtcNow;
-        _ht801ProbedAddress = address;
+        var changed = _ht801Cache.Update(reachable, address, DateTime.UtcNow);
 
         if (changed)
         {
@@ -381,6 +383,10 @@ public class SignalRNotifierService : IHostedService
 
     private async Task BroadcastSystemStatusAsync()
     {
+        // One read of the cache, into a local. Reading it three times could straddle a probe and
+        // build a status out of two different ones — see Ht801ReachabilityCache.
+        var probe = _ht801Cache.Current;
+
         var status = new SystemStatus
         {
             Platform = PlatformDetector.CurrentPlatform.ToString(),
@@ -393,9 +399,9 @@ public class SignalRNotifierService : IHostedService
             SipPort = _config.SipPort,
             // Read the cached probe result — never probe synchronously here, or every status
             // broadcast would block on a network timeout.
-            Ht801IpAddress = _ht801ProbedAddress,
-            Ht801Reachable = _ht801Reachable,
-            Ht801LastCheckedUtc = _ht801LastCheckedUtc
+            Ht801IpAddress = probe.ProbedAddress,
+            Ht801Reachable = probe.Reachable,
+            Ht801LastCheckedUtc = probe.LastCheckedUtc
         };
 
         _logger.LogDebug("Broadcasting system status: Bluetooth={Connected}, SIP={Listening}",
