@@ -49,6 +49,15 @@ public class GvVoicemailController : ControllerBase
         return Ok(new VoicemailListDto(items, result.NextPageToken, DateTime.UtcNow));
     }
 
+    /// <summary>
+    /// Fetch one voicemail by id.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Bounded at the 100 most recent voicemails. This route resolves through
+    /// <see cref="FindNodeAsync"/>, which requests <c>count: 100</c> with no page token — see the
+    /// LIMITATION note on that method. A <c>404</c> from here means "not in the 100 most recent", NOT
+    /// "does not exist". Do not harden anything on 404 meaning permanently gone until paging is verified.
+    /// </remarks>
     [HttpGet("{id}")]
     public async Task<IActionResult> GetItem(string id, CancellationToken ct = default)
     {
@@ -59,6 +68,17 @@ public class GvVoicemailController : ControllerBase
         return Ok(ToDto(node));
     }
 
+    /// <summary>
+    /// Stream a voicemail recording by id.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Bounded at the 100 most recent voicemails — see <see cref="FindNodeAsync"/>'s LIMITATION note.
+    /// A <c>404</c> here means "not in the 100 most recent", NOT "does not exist". RadioConsole maps
+    /// this route's 404 to <c>GvMediaUnavailableException.IsPermanent</c> — "retrying will not help" —
+    /// so the overclaim is guest-visible: a caller is told a recording is permanently gone when it is
+    /// merely old. <c>GvVoicemailClient</c> now logs a WARNING whenever a list comes back saturated,
+    /// which is how we will learn whether this ceiling is ever actually reached.
+    /// </remarks>
     [HttpGet("{id}/audio")]
     public async Task<IActionResult> GetAudio(string id, CancellationToken ct = default)
     {
@@ -81,6 +101,15 @@ public class GvVoicemailController : ControllerBase
         return new PhysicalFileResult(path, "audio/mpeg") { EnableRangeProcessing = true };
     }
 
+    /// <summary>
+    /// Set the read-state of one voicemail by id.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Bounded at the 100 most recent voicemails. This route resolves through
+    /// <see cref="FindNodeAsync"/>, which requests <c>count: 100</c> with no page token — see the
+    /// LIMITATION note on that method. A <c>404</c> from here means "not in the 100 most recent", NOT
+    /// "does not exist". Do not harden anything on 404 meaning permanently gone until paging is verified.
+    /// </remarks>
     [HttpPost("{id}/read")]
     public async Task<IActionResult> MarkRead(
         string id, [FromBody] MarkReadRequest request, CancellationToken ct = default)
