@@ -10,6 +10,8 @@ System-design records for cross-PR / cross-service decisions. Single-PR feature 
 |------|-----|--------|
 | 2026-06-20 | [GV Voicemail + SMS on RadioConsole (cross-service API)](decisions/2026-06-20-gv-voicemail-sms-radioconsole.md) | Proposed (spike — owner review pending) |
 | 2026-07-29 | [HT801 address resolution — learned registrar bindings](decisions/2026-07-29-ht801-learned-registrar-binding.md) | Accepted (implemented in PR2) |
+| 2026-09-08 | [Bell-health contract (`XR-5`) — ratification + the transport-split defect](decisions/2026-09-08-bell-health-contract-ratification.md) | Accepted (contract already SHIPPED; one fix authorized) |
+| 2026-09-08 | [`gv-bridge-ensure.sh` exit code — stays 0, not a health signal](decisions/2026-09-08-gv-bridge-ensure-exit-code.md) | Accepted (closes the boundary-doc open question) |
 
 ## Related source-of-truth (not ADRs, but read alongside)
 
