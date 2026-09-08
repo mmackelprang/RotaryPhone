@@ -43,7 +43,32 @@ public record GvBridgeStatusDto(
   // would make the adapter refuse its own recovery retry). See spec §4.3.
   [property: JsonPropertyName("authBlackout")] bool AuthBlackout = false,
   [property: JsonPropertyName("lastApiSuccessAt")] DateTime? LastApiSuccessAt = null,
-  [property: JsonPropertyName("lastApiAuthFailureAt")] DateTime? LastApiAuthFailureAt = null);
+  [property: JsonPropertyName("lastApiAuthFailureAt")] DateTime? LastApiAuthFailureAt = null,
+  // Added by the 2026-09-08 first-refresh-anchor work.
+  //
+  // psidtsMintedAtUtc is the HONEST replacement for the deprecated psidtsAgeSeconds above. That field
+  // is stamped on every cookie LOAD, not on every mint, so it resets to ~0 on each restart and reload
+  // and reads reassuringly low for a credential that is days old — which is how a two-day Google
+  // session death went unnoticed from 2026-09-06 to 2026-09-08. psidtsAgeSeconds keeps its position
+  // and its exact semantics because it is a published cross-repo contract; correcting it in place
+  // would silently change values a consumer already binds to. Prefer this field for new work.
+  //
+  // A TIMESTAMP rather than an age, deliberately: an age is computed at serialisation time and is only
+  // true at the instant of the response, while a mint time cannot be faked by a reload — precisely the
+  // defect being corrected. Consumers derive whatever precision each surface needs with no server
+  // change. NULL MEANS UNKNOWN, not fresh: a cookie file written before the field existed, a
+  // hand-pasted set, or one extracted from the browser, whose jar carries no readable issue time.
+  //
+  // browserSessionAgeSeconds is the signal whose absence let a dead Chrome session run unnoticed for
+  // two days: the service can regenerate its own PSIDTS lineage indefinitely while the browser it
+  // bootstraps from is dead. browserSessionStale distinguishes "Chrome is up but signed out" from
+  // "we could not reach Chrome at all".
+  //
+  // Appended with defaults, which is what preserves the existing field contract.
+  [property: JsonPropertyName("psidtsMintedAtUtc")] DateTime? PsidtsMintedAtUtc = null,
+  [property: JsonPropertyName("browserSessionValidatedAt")] DateTime? BrowserSessionValidatedAt = null,
+  [property: JsonPropertyName("browserSessionAgeSeconds")] long? BrowserSessionAgeSeconds = null,
+  [property: JsonPropertyName("browserSessionStale")] bool BrowserSessionStale = false);
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

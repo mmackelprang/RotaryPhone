@@ -82,6 +82,63 @@ public class GVBridgeControllerTests
   }
 
   [Fact]
+  public void GetStatus_IncludesTheCookieLineageFields()
+  {
+    var controller = CreateController();
+
+    var result = controller.GetStatus();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    // 2026-09-08 first-refresh-anchor fields, appended so the existing contract is untouched.
+    Assert.True(root.TryGetProperty("psidtsMintedAtUtc", out var mintedAt));
+    Assert.True(root.TryGetProperty("browserSessionValidatedAt", out var validatedAt));
+    Assert.True(root.TryGetProperty("browserSessionAgeSeconds", out var browserAge));
+    Assert.True(root.TryGetProperty("browserSessionStale", out var stale));
+
+    // Defaults on an inactive adapter. NULL MEANS UNKNOWN, and unknown is not healthy — it must not
+    // serialise as 0 or be omitted, or a consumer cannot tell "no data" from "brand new".
+    Assert.Equal(JsonValueKind.Null, mintedAt.ValueKind);
+    Assert.Equal(JsonValueKind.Null, validatedAt.ValueKind);
+    Assert.Equal(JsonValueKind.Null, browserAge.ValueKind);
+    Assert.False(stale.GetBoolean());
+  }
+
+  [Fact]
+  public void GetStatus_PsidtsAgeSeconds_KeepsItsNameAndItsPlace()
+  {
+    // ⛔ CONTRACT PIN. psidtsAgeSeconds is a live cross-repo field: Radio Console binds published
+    // bands to it (<660 healthy, 660-1200 blackout) and RotaryPhone promised in writing that it
+    // "stays exactly as it is". It was NOT corrected in place, was NOT renamed, and was NOT moved
+    // behind the new fields — the honest value ships alongside it as psidtsMintedAtUtc.
+    //
+    // If this fails you are changing a contract, not fixing a bug. Take it to the consuming repo first.
+    var controller = CreateController();
+
+    var result = controller.GetStatus();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+
+    var names = doc.RootElement.EnumerateObject().Select(p => p.Name).ToList();
+
+    Assert.Contains("psidtsAgeSeconds", names);
+    Assert.Contains("psidtsMintedAtUtc", names);
+
+    // Still ahead of every field appended after it, so the payload order a consumer may have
+    // eyeballed is unchanged.
+    Assert.True(names.IndexOf("psidtsAgeSeconds") < names.IndexOf("psidtsMintedAtUtc"));
+    Assert.True(names.IndexOf("psidtsAgeSeconds") < names.IndexOf("authBlackout"));
+
+    // Nullable, exactly as before — an un-activated adapter holds no cookie set.
+    Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("psidtsAgeSeconds").ValueKind);
+  }
+
+  [Fact]
   public void GetStatus_IncludesAuthBlackoutFields()
   {
     var controller = CreateController();

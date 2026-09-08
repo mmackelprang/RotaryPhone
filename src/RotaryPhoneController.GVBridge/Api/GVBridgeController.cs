@@ -55,7 +55,11 @@ public class GVBridgeController : ControllerBase
             ThrottleReason: _adapter.ThrottleReason,
             AuthBlackout: _adapter.AuthBlackout,
             LastApiSuccessAt: _adapter.LastApiSuccessAt,
-            LastApiAuthFailureAt: _adapter.LastApiAuthFailureAt));
+            LastApiAuthFailureAt: _adapter.LastApiAuthFailureAt,
+            PsidtsMintedAtUtc: _adapter.PsidtsMintedAtUtc,
+            BrowserSessionValidatedAt: _adapter.BrowserSessionValidatedAt,
+            BrowserSessionAgeSeconds: _adapter.BrowserSessionAgeSeconds,
+            BrowserSessionStale: _adapter.BrowserSessionStale));
     }
 
     [HttpGet("adapter/mode")]
