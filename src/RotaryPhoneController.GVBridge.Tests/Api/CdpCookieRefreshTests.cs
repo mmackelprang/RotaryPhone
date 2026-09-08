@@ -233,6 +233,22 @@ public class CdpCookieRefreshTests
     Assert.DoesNotContain("nothing was overwritten", json);
   }
 
+  [Fact]
+  public async Task RefreshFromBrowser_AdoptedButNotPersisted_BlamesTheDisk_NotTheGoogleLogin()
+  {
+    // Google ACCEPTED these cookies on a live probe; only the write failed. Reporting that as a stale
+    // browser session would send the operator to re-login while the disk stays full.
+    var result = await ControllerWithOutcome(SetCookiesOutcome.AdoptedButNotPersisted)
+      .RefreshCookiesFromBrowser(null);
+
+    var status = Assert.IsType<ObjectResult>(result);
+    Assert.Equal(500, status.StatusCode);
+    var json = JsonSerializer.Serialize(status.Value);
+    Assert.Contains("Google login is fine", json);
+    Assert.Contains("disk space and permissions", json);
+    Assert.DoesNotContain("session is stale", json);
+  }
+
   [Theory]
   [InlineData(SetCookiesOutcome.Adopted)]
   [InlineData(SetCookiesOutcome.AdoptedButActivationFailed)]

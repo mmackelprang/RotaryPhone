@@ -367,8 +367,10 @@ public class GVApiAdapterCookieLineageTests
 
         // Chrome hands back the very same rotating cookies — the normal case, since PSIDTS rotates every
         // ~11 minutes and the cron runs every 20 with an 8-minute proactive rotation in between.
-        Assert.True(await adapter.TryAdoptAndPersistCookiesAsync(
-            FromChrome(held.RawCookieHeader!), "refresh-from-browser"));
+        Assert.Equal(
+            GVApiAdapter.CookieAdoptionOutcome.Adopted,
+            await adapter.TryAdoptAndPersistCookiesAsync(
+                FromChrome(held.RawCookieHeader!), "refresh-from-browser"));
 
         // THE assertion. Without the carry-forward both of these are null after every cron fire.
         Assert.NotNull(adapter.PsidtsMintedAtUtc);
@@ -401,8 +403,10 @@ public class GVApiAdapterCookieLineageTests
         var rotatedByGoogle = GvCookieSet.SpliceCookie(
             held.RawCookieHeader!, "__Secure-1PSIDTS", "psidts-1-BRAND-NEW");
 
-        Assert.True(await adapter.TryAdoptAndPersistCookiesAsync(
-            FromChrome(rotatedByGoogle), "refresh-from-browser"));
+        Assert.Equal(
+            GVApiAdapter.CookieAdoptionOutcome.Adopted,
+            await adapter.TryAdoptAndPersistCookiesAsync(
+                FromChrome(rotatedByGoogle), "refresh-from-browser"));
 
         Assert.Null(adapter.PsidtsMintedAtUtc);
         var onDisk = await store.LoadAsync();
@@ -431,6 +435,50 @@ public class GVApiAdapterCookieLineageTests
         Assert.Equal(minted, onDisk!.PsidtsMintedAtUtc);
 
         File.Delete(path);
+    }
+
+    // ------------- a failing SaveAsync must not escape, and must not be reported as a Google refusal
+
+    /// <summary>
+    /// A cookie path whose PARENT is a regular file, so <c>Directory.CreateDirectory</c> — and with it
+    /// <c>GvCookieStore.SaveAsync</c> — throws. Stands in for a full disk, a read-only mount, or a
+    /// permissions change.
+    /// </summary>
+    internal static string NewUnwritableCookiePath()
+    {
+        var blocker = Path.Combine(Path.GetTempPath(), "gv-unwritable-" + Guid.NewGuid().ToString("n"));
+        File.WriteAllText(blocker, "this is a file, not a directory");
+        return Path.Combine(blocker, "cookies.enc");
+    }
+
+    [Fact]
+    public async Task Adoption_WhenTheSaveThrows_ReportsPersistFailed_AndKeepsTheProvenSetInMemory()
+    {
+        // The exception used to escape as an unhandled 500 AFTER _cookieSet had been mutated but BEFORE
+        // the outcome and availability were set — a half-committed state described by no response at
+        // all. And a bool return would have collapsed a DISK fault into "Google rejected your cookies".
+        var unwritable = NewUnwritableCookiePath();
+        var held = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+
+        using var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);   // Google ACCEPTS the candidate
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore",
+            new GvCookieStore(unwritable, Convert.ToBase64String(new byte[32])));
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", held);
+
+        var outcome = await adapter.TryAdoptAndPersistCookiesAsync(
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"), "refresh-from-browser");
+
+        // Not RejectedByGoogle — Google said yes. The disk said no.
+        Assert.Equal(GVApiAdapter.CookieAdoptionOutcome.PersistFailed, outcome);
+
+        // The candidate PASSED, so it stays in use: the adapter keeps working on proven credentials.
+        Assert.Equal("SAPISID-FRESH", adapter.CurrentCookieSet!.Sapisid);
+
+        // ...and nothing claimed the browser session was stale, because nothing suggested it was.
+        Assert.False(adapter.BrowserSessionStale);
+
+        File.Delete(Path.GetDirectoryName(unwritable)!);
     }
 
     // ------------- the validation window: a rollback must not undo a concurrent recovery
@@ -494,7 +542,7 @@ public class GVApiAdapterCookieLineageTests
         await store.SaveAsync(recovered);
 
         release.SetResult(false);                 // ...and only now does Google reject the candidate
-        Assert.False(await adopting);
+        Assert.Equal(GVApiAdapter.CookieAdoptionOutcome.RejectedByGoogle, await adopting);
 
         // THE assertion. Without the compare-and-swap this reads SAPISID-GOOD: the stale snapshot was
         // restored over a live, working recovery.
@@ -536,7 +584,7 @@ public class GVApiAdapterCookieLineageTests
         Assert.Equal(0, rotator.Calls);   // it has not even READ _cookieSet yet
 
         release.SetResult(false);
-        Assert.False(await adopting);
+        Assert.Equal(GVApiAdapter.CookieAdoptionOutcome.RejectedByGoogle, await adopting);
         await rotating;
 
         // It ran only after the rollback, so it rotated from the GOOD set — never from the rejected

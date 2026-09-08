@@ -149,6 +149,73 @@ public class GvCookieManagerValidationTests
     }
 
     [Fact]
+    public async Task SetCookiesAsync_HotPathSaveThrows_ReportsTheDisk_AndDoesNotReactivate()
+    {
+        // MEDIUM-3: neither this method nor TryAdoptAndPersistCookiesAsync had an exception guard, so an
+        // IO error escaped as an unhandled 500 from the endpoint the box's cron hits every 20 minutes.
+        var unwritable = GVApiAdapterCookieLineageTests.NewUnwritableCookiePath();
+        var config = GVApiAdapterRecoveryTests.NewConfig();
+        config.CookieFilePath = unwritable;
+        config.CookieEncryptionKey = Convert.ToBase64String(new byte[32]);
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(config: config);
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);      // Google ACCEPTS them
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore",
+            new GvCookieStore(unwritable, config.CookieEncryptionKey));
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD"));
+
+        var registry = new Mock<ICallAdapterRegistry>();
+        registry.Setup(r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var manager = new GvCookieManager(
+            Options.Create(config), adapter, registry.Object, NullLogger<GvCookieManager>.Instance);
+
+        var outcome = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"));
+
+        // Names the DISK, not the Google login — the operator action is completely different.
+        Assert.Equal(SetCookiesOutcome.AdoptedButNotPersisted, outcome);
+
+        // ⚠ And it must NOT re-activate. The cookies are good in memory but the disk still holds the
+        // OLDER set, and re-activation reloads FROM DISK — it would replace proven-good credentials
+        // with the very ones we were called to replace.
+        registry.Verify(
+            r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+
+        File.Delete(Path.GetDirectoryName(unwritable)!);
+    }
+
+    [Fact]
+    public async Task SetCookiesAsync_ColdPathSaveThrows_ReportsFailure_InsteadOfEscapingAsA500()
+    {
+        // The cold path's key generation and save both sat OUTSIDE the try. On a full or read-only disk
+        // they escaped unhandled — and the seed did NOT reach disk, which the message has to say rather
+        // than imply the opposite.
+        var unwritable = GVApiAdapterCookieLineageTests.NewUnwritableCookiePath();
+        var config = GVApiAdapterRecoveryTests.NewConfig();
+        config.CookieFilePath = unwritable;
+        config.CookieEncryptionKey = Convert.ToBase64String(new byte[32]);
+
+        // A never-activated adapter: CurrentCookieSet is null, so the cold path is taken.
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(config: config);
+        var registry = new Mock<ICallAdapterRegistry>();
+        var manager = new GvCookieManager(
+            Options.Create(config), adapter, registry.Object, NullLogger<GvCookieManager>.Instance);
+
+        var outcome = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-SEED"));
+
+        Assert.Equal(SetCookiesOutcome.ActivationFailed, outcome);
+
+        // Nothing was written, so nothing may have been activated either.
+        registry.Verify(
+            r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+
+        File.Delete(Path.GetDirectoryName(unwritable)!);
+    }
+
+    [Fact]
     public async Task SetCookiesAsync_GoodCookiesHeld_DeadOnesOffered_ReturnsFalseAndKeepsTheGoodSet()
     {
         // The 20-minute cron's exact shape. On main this returns TRUE — SwitchModeAsync does not throw

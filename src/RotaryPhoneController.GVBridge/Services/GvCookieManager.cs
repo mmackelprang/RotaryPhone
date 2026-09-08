@@ -49,6 +49,12 @@ public enum SetCookiesOutcome
   /// </summary>
   AdoptedButActivationFailed,
 
+  /// <summary>
+  /// The cookies passed a live probe and are in use, but writing them to disk failed. The refresh
+  /// worked; a restart will revert to the older set. Google is not the problem — the disk is.
+  /// </summary>
+  AdoptedButNotPersisted,
+
   /// <summary>Validated against Google, persisted, and in use.</summary>
   Adopted,
 }
@@ -129,18 +135,63 @@ public class GvCookieManager : IGvCookieManager
     // from 2026-09-06 to 2026-09-08 it spent two days overwriting a working set with a dead one and
     // reporting success, because the old code saved first and returned true if nothing threw.
     // Both are set together in ActivateCoreAsync and cleared together in teardown, so this is one
-    // condition expressed twice — checked explicitly anyway, because TryAdoptAndPersistCookiesAsync
-    // returns false for "never activated" as well as for "rejected", and conflating those two would
-    // send a cold start down the hot path and silently refuse to seed.
+    // condition expressed twice — checked explicitly anyway, because a NotActivated adoption and a
+    // rejected one call for opposite handling, and conflating them would send a cold start down the
+    // hot path and silently refuse to seed.
     if (_adapter.CurrentCookieSet != null && _adapter.CookieStore != null)
     {
-      var adopted = await _adapter.TryAdoptAndPersistCookiesAsync(cookies, "refresh-from-browser", ct);
-      if (!adopted)
+      // ⚠ GUARDED. Nothing in here may escape as an unhandled 500: this is the endpoint the box's cron
+      // hits every 20 minutes, and an unhandled fault leaves the caller with a response that describes
+      // neither what was tested nor what was written.
+      try
       {
-        _logger.LogWarning(
-          "Rejected an incoming cookie set: it failed a live health probe. Existing credentials kept, "
-          + "{Path} not overwritten.", _config.CookieFilePath);
-        return SetCookiesOutcome.RejectedByGoogle;
+        return await AdoptOnHotPathAsync(cookies, ct);
+      }
+      catch (Exception ex)
+      {
+        _logger.LogError(ex,
+          "Unexpected failure while adopting a cookie set on the hot path. Nothing here tested the "
+          + "Google login — do NOT assume it is dead.");
+        return SetCookiesOutcome.ActivationFailed;
+      }
+    }
+
+    return await SeedOnColdPathAsync(cookies, ct);
+  }
+
+  /// <summary>
+  /// The hot path: the adapter is live and holding credentials that may still be good, so the incoming
+  /// set has to be proven before it is allowed anywhere near disk.
+  /// </summary>
+  private async Task<SetCookiesOutcome> AdoptOnHotPathAsync(GvCookieSet cookies, CancellationToken ct)
+  {
+      var adoption = await _adapter.TryAdoptAndPersistCookiesAsync(cookies, "refresh-from-browser", ct);
+
+      switch (adoption)
+      {
+        case GVApiAdapter.CookieAdoptionOutcome.RejectedByGoogle:
+          _logger.LogWarning(
+            "Rejected an incoming cookie set: it failed a live health probe. Existing credentials kept, "
+            + "{Path} not overwritten.", _config.CookieFilePath);
+          return SetCookiesOutcome.RejectedByGoogle;
+
+        case GVApiAdapter.CookieAdoptionOutcome.PersistFailed:
+          // Deliberately does NOT re-activate. The cookies are good IN MEMORY but the disk still holds
+          // the older set, and re-activation reloads FROM DISK — so it would replace proven-good
+          // credentials with whatever is on disk, possibly the dead ones we were called to replace.
+          _logger.LogError(
+            "Cookies passed a live probe but could not be written to {Path}. They are in use now; a "
+            + "restart will revert to the older set. Google is not the problem — the disk is.",
+            _config.CookieFilePath);
+          return SetCookiesOutcome.AdoptedButNotPersisted;
+
+        case GVApiAdapter.CookieAdoptionOutcome.NotActivated:
+          // Only reachable if a teardown raced the guard above. Seeding blindly here would overwrite
+          // a set we never proved, which is the whole thing this path exists to prevent.
+          _logger.LogError(
+            "The adapter was torn down between the hot-path check and the adoption. Nothing was "
+            + "written and nothing tested the Google login.");
+          return SetCookiesOutcome.ActivationFailed;
       }
 
       // ⚠ THE STRANDED-ADAPTER RECOVERY. Adopting credentials is not the same as having a working
@@ -180,15 +231,34 @@ public class GvCookieManager : IGvCookieManager
       }
 
       return SetCookiesOutcome.Adopted;
-    }
+  }
 
-    // COLD PATH — no validated credentials exist to protect (first boot, or the adapter never activated).
-    // Saving an unproven set is acceptable here precisely because there is nothing better to lose.
-    var keyBase64 = await EnsureEncryptionKeyAsync();
-    var store = new GvCookieStore(_config.CookieFilePath, keyBase64);
-    await store.SaveAsync(cookies);
-    _logger.LogInformation(
-      "Cookies saved to {Path} (cold start — no validated set to protect)", _config.CookieFilePath);
+  /// <summary>
+  /// The cold path: no validated credentials exist to protect (first boot, or the adapter never
+  /// activated). Saving an unproven set is acceptable here precisely because there is nothing better
+  /// to lose.
+  /// </summary>
+  private async Task<SetCookiesOutcome> SeedOnColdPathAsync(GvCookieSet cookies, CancellationToken ct)
+  {
+    // Guarded: key generation writes a file and the save writes another, so both can throw on a full
+    // or read-only disk. Outside a try these escaped as an unhandled 500 — and, crucially, the seed
+    // did NOT reach disk in that case, which the message has to say rather than imply the opposite.
+    try
+    {
+      var keyBase64 = await EnsureEncryptionKeyAsync();
+      var store = new GvCookieStore(_config.CookieFilePath, keyBase64);
+      await store.SaveAsync(cookies);
+      _logger.LogInformation(
+        "Cookies saved to {Path} (cold start — no validated set to protect)", _config.CookieFilePath);
+    }
+    catch (Exception ex)
+    {
+      _logger.LogError(ex,
+        "Cold-start seed could NOT be written to {Path} (nor could its key). Nothing reached disk and "
+        + "nothing tested the Google login. ACTION: check disk space and permissions.",
+        _config.CookieFilePath);
+      return SetCookiesOutcome.ActivationFailed;
+    }
 
     try
     {

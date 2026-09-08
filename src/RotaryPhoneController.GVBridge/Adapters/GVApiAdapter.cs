@@ -855,27 +855,57 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     }
 
     /// <summary>
-    /// Adopt an externally-supplied cookie set — the CDP refresh-from-browser endpoint, or a hand-pasted
-    /// set — prove it against Google, and persist it ONLY if it works. Returns false, leaving both the
-    /// in-memory and the on-disk set untouched, when the candidate is rejected.
+    /// What happened to a candidate handed to <see cref="TryAdoptAndPersistCookiesAsync"/>.
     /// </summary>
     /// <remarks>
-    /// Returns false when the adapter has never activated: there is then no validated set to protect and
-    /// no store to write to, so the caller must use its own cold-start path.
+    /// ⚠ These are not interchangeable failures. Collapsing them to a bool made the caller report a
+    /// disk error as "Google rejected your cookies", which is the same untested assertion Task 7
+    /// removed from the exhausted-ladder message. The zero value is deliberately a failure.
     /// </remarks>
-    public async Task<bool> TryAdoptAndPersistCookiesAsync(
+    public enum CookieAdoptionOutcome
+    {
+        /// <summary>
+        /// The adapter has never activated: there is no validated set to protect and no store to write
+        /// to, so the caller must use its own cold-start path. Nothing was tested.
+        /// </summary>
+        NotActivated = 0,
+
+        /// <summary>
+        /// A live probe against Google refused the candidate. Nothing was written and the in-memory set
+        /// was rolled back. TESTED, not inferred.
+        /// </summary>
+        RejectedByGoogle,
+
+        /// <summary>
+        /// The candidate PASSED a live probe and is in use in memory, but writing it to disk threw. The
+        /// previous set is still what is on disk, so a restart reverts to it.
+        /// </summary>
+        PersistFailed,
+
+        /// <summary>Validated against Google, persisted, and in use.</summary>
+        Adopted,
+    }
+
+    /// <summary>
+    /// Adopt an externally-supplied cookie set — the CDP refresh-from-browser endpoint, or a hand-pasted
+    /// set — prove it against Google, and persist it ONLY if it works. Leaves both the in-memory and the
+    /// on-disk set untouched when the candidate is rejected.
+    /// </summary>
+    public async Task<CookieAdoptionOutcome> TryAdoptAndPersistCookiesAsync(
         GvCookieSet candidate, string source, CancellationToken ct = default)
     {
         if (_cookieStore == null || _cookieSet == null)
-            return false;
+            return CookieAdoptionOutcome.NotActivated;
 
         // Held across the WHOLE validate-and-persist section: the probe inside
         // TryValidateCandidateAsync runs with the candidate published into _cookieSet, and nothing else
         // may swap the cookie set — or write one to disk — until we have finished deciding.
         using var gate = await LockCookieMutationsAsync(ct);
 
-        // Captured BEFORE the validation, which publishes the candidate into _cookieSet.
+        // Captured BEFORE the validation, which publishes the candidate into _cookieSet. The store is
+        // captured too, so a concurrent teardown nulling the field cannot turn the save into an NRE.
         var previous = _cookieSet;
+        var store = _cookieStore;
 
         if (!await TryValidateCandidateAsync(candidate, ct))
         {
@@ -884,18 +914,39 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 "GVApi: REJECTED a cookie set from {Source} — Google refused it. The working on-disk set "
                 + "was NOT overwritten. If the source is the box's Chrome, that session is dead: ACTION: "
                 + "re-login at voice.google.com.", source);
-            return false;
+            return CookieAdoptionOutcome.RejectedByGoogle;
         }
 
-        var validated = StampAdoptedCandidate(candidate, previous, source);
+        // ⚠ SAVE FIRST, THEN PUBLISH. SaveAsync can throw — a full or read-only disk, a permissions
+        // change, a store nulled by a concurrent teardown. Unguarded, that escaped as an unhandled 500
+        // AFTER _cookieSet had been mutated but BEFORE the outcome and availability were set: a
+        // half-committed state whose HTTP response said nothing true about either half. Assigning only
+        // after a successful write means memory and disk cannot disagree about the stamped set.
+        GvCookieSet validated;
+        try
+        {
+            validated = StampAdoptedCandidate(candidate, previous, source);
+            await store.SaveAsync(validated);
+        }
+        catch (Exception ex)
+        {
+            // The candidate itself PASSED, and TryValidateCandidateAsync has already published it, so
+            // the adapter keeps working on proven credentials. Only the durable copy is missing.
+            _logger.LogError(ex,
+                "GVApi: a cookie set from {Source} passed a live probe but could NOT be written to "
+                + "{Path}. It is in use in memory; the OLD set is still on disk, so a restart reverts to "
+                + "it. Google is not the problem here. ACTION: check disk space and permissions.",
+                source, _config.CookieFilePath);
+            return CookieAdoptionOutcome.PersistFailed;
+        }
+
         _cookieSet = validated;
-        await _cookieStore.SaveAsync(validated);
         _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
         MarkAvailableIfTransportExists(source);
 
         _logger.LogInformation(
             "GVApi: adopted and persisted a cookie set from {Source} after it passed a live probe", source);
-        return true;
+        return CookieAdoptionOutcome.Adopted;
     }
 
     /// <summary>
@@ -1378,9 +1429,26 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             // No SwapAuthenticatedClients needed: GvHttpClientHandler resolves _cookieSet through a
             // closure on every request, and the stamp changes no wire-visible cookie.
             var validated = StampAdoptedCandidate(result.Cookies, previous, "cdp");
-            _cookieSet = validated;
-            await _cookieStore.SaveAsync(validated);
 
+            // Persisted under its OWN guard, not the outer one. The outer catch marks the browser
+            // Unreachable — which would be a plain lie for a disk error, since Chrome answered and
+            // Google accepted what it handed over, and it would send the operator off to check whether
+            // Chrome is running. The rung still SUCCEEDS: auth is recovered in memory, and only the
+            // durable copy is missing.
+            try
+            {
+                await _cookieStore.SaveAsync(validated);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "GVApi: CDP cookies validated against Google but could NOT be written to {Path}. Auth "
+                    + "is recovered in memory; a restart will revert to the older set on disk. Chrome and "
+                    + "the Google login are both fine. ACTION: check disk space and permissions.",
+                    _config.CookieFilePath);
+            }
+
+            _cookieSet = validated;
             _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
             _logger.LogInformation(
                 "GVApi: CDP cookie refresh validated against Google and persisted ({Count} cookies)",

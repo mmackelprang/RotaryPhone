@@ -219,9 +219,18 @@ public class GVBridgeController : ControllerBase
             case SetCookiesOutcome.ActivationFailed:
                 return StatusCode(500, new
                 {
-                    error = "Cookies were extracted from Chrome and written to disk, but re-activating "
-                          + "the GV adapter threw. Nothing here tested the Google login — do NOT assume "
-                          + "it is dead. ACTION: check the service log."
+                    error = "Cookies were extracted from Chrome, but the write or the re-activation "
+                          + "threw. Nothing here tested the Google login — do NOT assume it is dead. "
+                          + "ACTION: check the service log, which says which step failed."
+                });
+
+            case SetCookiesOutcome.AdoptedButNotPersisted:
+                return StatusCode(500, new
+                {
+                    error = "Cookies were extracted from Chrome and Google ACCEPTED them on a live "
+                          + "probe — they are in use now — but they could not be written to disk, so a "
+                          + "restart will revert to the older set. The Google login is fine; the disk "
+                          + "is not. ACTION: check disk space and permissions."
                 });
 
             case SetCookiesOutcome.AdoptedButActivationFailed:
