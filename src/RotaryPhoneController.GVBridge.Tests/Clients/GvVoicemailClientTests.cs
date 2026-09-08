@@ -169,6 +169,38 @@ public class GvVoicemailClientTests
         Assert.Single(log.AtLevel(LogLevel.Warning));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ListVoicemailsAsync_NonPositiveCount_LogsNoSaturationWarning(int count)
+    {
+        // GvVoicemailController.GetList takes [FromQuery] int count = 20 with NO clamp, so ?count=0
+        // reaches here — and `rawThreads >= 0` is true for every response, including an empty folder.
+        // The result was the alarming, self-contradictory "FULL page: 0 threads for a requested count
+        // of 0" on a completely idle box. A non-positive count expresses no ceiling, so there is no
+        // ceiling to be near.
+        var (client, log) = NewLoggingClient(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new StringContent(VoicemailThreads(0)) });
+
+        await client.ListVoicemailsAsync(count: count);
+
+        Assert.Empty(log.AtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
+    public async Task ListVoicemailsAsync_NonPositiveCountWithRealThreads_StillLogsNoSaturation()
+    {
+        // ...and it is the COUNT that is meaningless, not the threads. Threads came back; there is still
+        // no requested ceiling for them to have reached.
+        var (client, log) = NewLoggingClient(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new StringContent(VoicemailThreads(5)) });
+
+        var result = await client.ListVoicemailsAsync(count: 0);
+
+        Assert.Equal(5, result.Items.Count);
+        Assert.Empty(log.AtLevel(LogLevel.Warning));
+    }
+
     private class MockHandler(Func<HttpRequestMessage, HttpResponseMessage> handler) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)

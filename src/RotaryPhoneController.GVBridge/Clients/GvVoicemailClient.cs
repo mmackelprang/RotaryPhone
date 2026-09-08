@@ -67,7 +67,12 @@ public class GvVoicemailClient
         // multi-message threads and MISS real saturation whenever a full page happens to hold sparse
         // ones. Comparing against `count` rather than a literal 100 also covers GvThreadPoller's
         // count: 50 with no constant to drift.
-        if (rawThreads >= count)
+        // ⚠ `count > 0` is not redundant. GvVoicemailController.GetList takes [FromQuery] int count = 20
+        // with no clamp, so ?count=0 (or a negative) reaches here — and `rawThreads >= 0` is true for
+        // EVERY response, including an empty folder. That logged the alarming and self-contradictory
+        // "FULL page: 0 threads for a requested count of 0" on a completely idle box. A non-positive
+        // count expresses no ceiling, so there is no ceiling to be near.
+        if (count > 0 && rawThreads >= count)
         {
             _logger.LogWarning(
                 "Voicemail list returned a FULL page: {RawThreads} threads for a requested count of "

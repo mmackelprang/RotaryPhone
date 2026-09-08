@@ -68,7 +68,11 @@ public class GVApiAdapterCookieLineageTests
         // THE RESTART SIMULATION, end to end through the production wiring.
         // A brand-new adapter instance stands in for a brand-new process: it knows nothing about the
         // credential except what the cookie set carries.
-        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+        //
+        // `using`: StartPeriodicTimers ARMS real System.Threading.Timers. Undisposed they stay armed for
+        // the whole test run and can fire OnCookieRefreshTimer into a half-built adapter from another
+        // test's thread — Dispose() is the only thing that stops them.
+        using var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
             config: GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 8));
 
         GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", new GvCookieSet
@@ -91,7 +95,7 @@ public class GVApiAdapterCookieLineageTests
     public void StartPeriodicTimers_FreshCredential_StillUsesTheFullInterval()
     {
         // The paired negative: the fix must not turn every activation into an immediate rotation.
-        var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+        using var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
             config: GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 8));
 
         GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", new GvCookieSet
@@ -103,6 +107,34 @@ public class GVApiAdapterCookieLineageTests
         GVApiAdapterRecoveryTests.Invoke(adapter, "StartPeriodicTimers");
 
         Assert.InRange(adapter.LastFirstRefreshDelayMs!.Value, 475_000, 480_000);
+    }
+
+    [Fact]
+    public void StartPeriodicTimers_RefreshIntervalZero_ArmsNoRefreshTimer()
+    {
+        // The CookieRefreshIntervalMinutes: 0 kill switch. StartPeriodicTimers' own doc comment says the
+        // extraction exists "so the cadence wiring — including the CookieRefreshIntervalMinutes: 0 kill
+        // switch — is unit-testable", and then nothing tested it. If the guard were ever dropped, a 0
+        // interval would arm a Timer with dueTime 0 and period 0: an immediate one-shot rotation, on a
+        // box explicitly configured never to rotate.
+        using var adapter = GVApiAdapterRecoveryTests.CreateAdapter(
+            config: GVApiAdapterRecoveryTests.NewConfig(refreshIntervalMinutes: 0));
+
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            GVApiAdapterRecoveryTests.NewCookies());
+
+        GVApiAdapterRecoveryTests.Invoke(adapter, "StartPeriodicTimers");
+
+        Assert.Null(GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_cookieRefreshTimer"));
+
+        // The scheduling decision was never even made — LastFirstRefreshDelayMs is only written inside
+        // the guarded branch, so a null here proves the branch was skipped rather than merely that the
+        // field was cleared afterwards.
+        Assert.Null(adapter.LastFirstRefreshDelayMs);
+
+        // ...while the health watchdog IS still armed: the kill switch turns off proactive ROTATION,
+        // not monitoring. Disabling both would remove the backstop as well as the thing being disabled.
+        Assert.NotNull(GVApiAdapterRecoveryTests.GetField<Timer>(adapter, "_healthCheckTimer"));
     }
 
     // ------------------------------------------- §2.2 the persisted mint time survives a restart

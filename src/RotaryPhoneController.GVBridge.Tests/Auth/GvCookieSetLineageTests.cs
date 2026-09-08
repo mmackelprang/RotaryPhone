@@ -1,3 +1,4 @@
+using System.Reflection;
 using RotaryPhoneController.GVBridge.Auth;
 using Xunit;
 
@@ -156,6 +157,81 @@ public class GvCookieSetLineageTests
             "Apisid", "BrowserSessionValidatedAtUtc", "Hsid", "PsidtsMintedAtUtc", "RawCookieHeader",
             "Sapisid", "Secure1Psid", "Secure3Psid", "Sid", "Ssid",
         }, props);
+    }
+
+    [Fact]
+    public void CopyWith_RoundTripsEveryPropertyThroughBothCopyingHelpers()
+    {
+        // ⛔ THE REAL TRIPWIRE. CopyWith_CoursEveryProperty above compares a NAME LIST, so it can be
+        // silenced the wrong way: add a property, add its name to the list, never touch CopyWith — the
+        // test goes green and the property is silently reset on every rotation, which is precisely the
+        // failure CopyWith's own remark warns about. This one cannot be satisfied that way. It seeds
+        // EVERY property with a non-default value by reflection and asserts, per property, that the copy
+        // still carries it — so a property missing from CopyWith fails here no matter what any list says.
+        var props = typeof(GvCookieSet)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .ToArray();
+
+        var seeded = SeedEveryProperty(props);
+        var mintedAt = new DateTime(2026, 9, 8, 18, 1, 0, DateTimeKind.Utc);
+        var validatedAt = new DateTime(2026, 9, 8, 18, 30, 0, DateTimeKind.Utc);
+
+        // Each helper's INTENDED changes are named explicitly; everything else must survive untouched.
+        var cases = new (string Helper, GvCookieSet Copy, string[] IntentionallyChanged)[]
+        {
+            ("WithRefreshedPsidts",
+             seeded.WithRefreshedPsidts("new-1", "new-3", mintedAt),
+             ["RawCookieHeader", "PsidtsMintedAtUtc"]),
+
+            ("WithBrowserSessionValidatedAt",
+             seeded.WithBrowserSessionValidatedAt(validatedAt),
+             ["BrowserSessionValidatedAtUtc"]),
+
+            ("WithPsidtsMintedAt",
+             seeded.WithPsidtsMintedAt(mintedAt),
+             ["PsidtsMintedAtUtc"]),
+        };
+
+        foreach (var (helper, copy, changed) in cases)
+        {
+            foreach (var p in props)
+            {
+                if (changed.Contains(p.Name)) continue;
+
+                Assert.True(
+                    Equals(p.GetValue(seeded), p.GetValue(copy)),
+                    $"{helper} dropped {p.Name}: expected '{p.GetValue(seeded)}', got '{p.GetValue(copy)}'. "
+                    + "Add it to GvCookieSet.CopyWith.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every public property set to a distinct, non-default value — so a property CopyWith forgets comes
+    /// back as null/default and is unmistakable. Init-only setters are settable through reflection; the
+    /// <c>init</c> restriction is enforced by the C# compiler, not by the runtime.
+    /// </summary>
+    private static GvCookieSet SeedEveryProperty(PropertyInfo[] props)
+    {
+        var set = new GvCookieSet { Sapisid = "s", Sid = "sid", Hsid = "h", Ssid = "ss", Apisid = "a" };
+        var clock = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        for (var i = 0; i < props.Length; i++)
+        {
+            var p = props[i];
+            object value = p.PropertyType switch
+            {
+                var t when t == typeof(string) || t == typeof(string) => $"seed-{p.Name}",
+                var t when t == typeof(DateTime?) || t == typeof(DateTime) => clock.AddMinutes(i + 1),
+                _ => throw new InvalidOperationException(
+                    $"GvCookieSet.{p.Name} is a {p.PropertyType.Name}, which this seeder cannot produce. "
+                    + "Teach it that type — do NOT skip the property, or the tripwire stops covering it."),
+            };
+            p.SetValue(set, value);
+        }
+
+        return set;
     }
 
     [Fact]
