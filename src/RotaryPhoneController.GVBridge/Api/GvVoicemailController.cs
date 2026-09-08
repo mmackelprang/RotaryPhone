@@ -118,12 +118,24 @@ public class GvVoicemailController : ControllerBase
         return Ok(dto);
     }
 
-    // Voicemail is a thread/message subtype — there is no per-id GET on GV; we list and filter.
-    // Lists are small (tens of items); a future optimization could cache the last list.
-    private async Task<GvVoicemailNode?> FindNodeAsync(string id, CancellationToken ct)
+    /// <summary>
+    /// Resolve one voicemail node by message id. Voicemail is a thread/message subtype — there is no
+    /// per-id GET on GV, so we list and filter. Lists are small (tens of items); a future
+    /// optimization could cache the last list.
+    ///
+    /// Returns the LIST's Succeeded flag alongside the node, because a bare null cannot tell the two
+    /// failure modes apart. A list that FAILED (auth blackout, GV 5xx, wire-shape drift) yields an
+    /// empty item set, so FirstOrDefault returns null for a voicemail that exists — and the caller,
+    /// seeing only null, answers 404. RadioConsole reads 404 as "retrying will not help" and tells a
+    /// guest the recording is permanently gone. Callers MUST answer 502 on !Succeeded and reserve
+    /// 404 for a SUCCESSFUL list that did not contain the id — the same distinction
+    /// <see cref="GetList"/> has drawn since it shipped (see the comment above its guard).
+    /// </summary>
+    private async Task<(bool Succeeded, GvVoicemailNode? Node)> FindNodeAsync(
+        string id, CancellationToken ct)
     {
         var result = await _voicemailClient.ListVoicemailsAsync(count: 100, pageToken: null, ct);
-        return result.Items.FirstOrDefault(v => v.MessageId == id);
+        return (result.Succeeded, result.Items.FirstOrDefault(v => v.MessageId == id));
     }
 
     private static VoicemailItemDto ToDto(GvVoicemailNode n) => new(
