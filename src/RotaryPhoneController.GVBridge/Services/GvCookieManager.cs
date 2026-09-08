@@ -10,12 +10,56 @@ using RotaryPhoneController.GVBridge.Models;
 namespace RotaryPhoneController.GVBridge.Services;
 
 /// <summary>
+/// What actually happened to a cookie set handed to <see cref="IGvCookieManager.SetCookiesAsync"/>.
+/// </summary>
+/// <remarks>
+/// ⚠ A BOOLEAN HERE IS A LIE, and the lie has a history. <c>false</c> was returned for a stale browser
+/// session, for an unrelated earlier data-plane 401 (<c>AreCookiesValid</c> is
+/// <c>_areCookiesValid &amp;&amp; !AuthBlackout</c>), and for a missing encryption key or an IO error —
+/// and the caller then reported all three as "Google rejected them, nothing was overwritten", which on
+/// the cold path is doubly wrong because the file WAS overwritten and nothing tested the Google login.
+/// That is exactly the sin Task 7 removed from the exhausted-ladder message one file over: STATE ONLY
+/// WHAT WAS ACTUALLY TESTED. Each value below names a cause with a DIFFERENT operator action.
+/// <para>
+/// ⚠ The zero value is deliberately a FAILURE. <c>default(SetCookiesOutcome)</c> — which is what an
+/// unstubbed mock returns — must never read as success.
+/// </para>
+/// </remarks>
+public enum SetCookiesOutcome
+{
+  /// <summary>Re-activation threw. The cookies may be on disk; nothing here tested the Google login.</summary>
+  ActivationFailed = 0,
+
+  /// <summary>
+  /// A live probe against Google refused the candidate. TESTED, not inferred — and nothing was
+  /// overwritten, because the validated set on disk was never touched.
+  /// </summary>
+  RejectedByGoogle,
+
+  /// <summary>
+  /// Cold start: there was no validated set to protect, so the incoming set was written UNPROVEN and
+  /// the file WAS overwritten. Afterwards the adapter did not report valid cookies — which may mean
+  /// the new set is dead, or merely that an earlier unrelated auth failure is still in effect.
+  /// </summary>
+  ColdSeedUnvalidated,
+
+  /// <summary>
+  /// The cookies passed a live probe and were persisted, but re-activating the adapter failed. The
+  /// refresh SUCCEEDED; the call path may still be down. Do not send the operator to re-login for this.
+  /// </summary>
+  AdoptedButActivationFailed,
+
+  /// <summary>Validated against Google, persisted, and in use.</summary>
+  Adopted,
+}
+
+/// <summary>
 /// Manages cookie lifecycle for the GV API adapter: status queries,
 /// saving new cookies, and triggering adapter reload.
 /// </summary>
 public interface IGvCookieManager
 {
-  Task<bool> SetCookiesAsync(GvCookieSet cookies, CancellationToken ct = default);
+  Task<SetCookiesOutcome> SetCookiesAsync(GvCookieSet cookies, CancellationToken ct = default);
   GvCookieStatusDto GetStatus();
 }
 
@@ -78,7 +122,7 @@ public class GvCookieManager : IGvCookieManager
       SapisidPrefix: sapisidPrefix);
   }
 
-  public async Task<bool> SetCookiesAsync(GvCookieSet cookies, CancellationToken ct = default)
+  public async Task<SetCookiesOutcome> SetCookiesAsync(GvCookieSet cookies, CancellationToken ct = default)
   {
     // HOT PATH — the adapter is live and holding credentials that may still be good. Prove the incoming
     // set before it is allowed anywhere near disk. The box-side cron drives this every 20 minutes, and
@@ -96,7 +140,7 @@ public class GvCookieManager : IGvCookieManager
         _logger.LogWarning(
           "Rejected an incoming cookie set: it failed a live health probe. Existing credentials kept, "
           + "{Path} not overwritten.", _config.CookieFilePath);
-        return false;
+        return SetCookiesOutcome.RejectedByGoogle;
       }
 
       // ⚠ THE STRANDED-ADAPTER RECOVERY. Adopting credentials is not the same as having a working
@@ -131,10 +175,11 @@ public class GvCookieManager : IGvCookieManager
             "Cookies were validated and persisted, but re-activating the GV adapter failed. SMS and "
             + "voicemail should work; CALLS WILL NOT until the adapter activates. ACTION: check the "
             + "service log above this line, then GET /api/gvbridge/status.");
+          return SetCookiesOutcome.AdoptedButActivationFailed;
         }
       }
 
-      return true;
+      return SetCookiesOutcome.Adopted;
     }
 
     // COLD PATH — no validated credentials exist to protect (first boot, or the adapter never activated).
@@ -151,20 +196,33 @@ public class GvCookieManager : IGvCookieManager
       // Report whether the cookies actually WORK, not merely that activation did not throw.
       // ActivateCoreAsync handles a failed probe with SetAvailable(false) and a plain return, so the
       // old `return true` here reported success through every dead-cookie activation.
+      //
+      // ⚠ But NOT "Google rejected them", which is what this used to say. AreCookiesValid is
+      // `_areCookiesValid && !AuthBlackout`, so an unrelated earlier data-plane 401 makes it false even
+      // when the new cookies probed perfectly — and on this path the file was ALREADY overwritten
+      // several lines above. Claiming a dead browser session here sends the operator to re-login for a
+      // fault that may have nothing to do with their Google session.
       if (!_adapter.AreCookiesValid)
       {
         _logger.LogError(
-          "GV adapter re-activated but Google rejected the new cookies — the browser session is dead. "
-          + "ACTION: re-login at voice.google.com.");
-        return false;
+          "Cold-start seed written to {Path} (there was no validated set to protect), but the adapter "
+          + "does NOT report valid cookies afterwards. That is either a dead incoming set OR an earlier, "
+          + "unrelated auth failure still in effect — this path did not distinguish them. ACTION: read "
+          + "GET /api/gvbridge/status (authBlackout, lastApiAuthFailureAt) BEFORE assuming the Google "
+          + "login is dead.", _config.CookieFilePath);
+        return SetCookiesOutcome.ColdSeedUnvalidated;
       }
       _logger.LogInformation("GV adapter re-activated with new, validated cookies");
-      return true;
+      return SetCookiesOutcome.Adopted;
     }
     catch (Exception ex)
     {
-      _logger.LogError(ex, "Failed to re-activate GV adapter after cookie update");
-      return false;
+      // Missing encryption key, a throwing registry, an IO error — none of which tested the Google
+      // login, and all of which used to be reported as "Google rejected your cookies".
+      _logger.LogError(ex,
+        "Failed to re-activate GV adapter after cookie update. The seed WAS written to {Path}; nothing "
+        + "here tested the Google login.", _config.CookieFilePath);
+      return SetCookiesOutcome.ActivationFailed;
     }
   }
 

@@ -105,7 +105,7 @@ public class GvCookieManagerValidationTests
         var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"));
 
         // The refresh itself succeeded — the cookies were proven and persisted.
-        Assert.True(saved);
+        Assert.Equal(SetCookiesOutcome.Adopted, saved);
         var onDisk = await store.LoadAsync();
         Assert.Equal("SAPISID-FRESH", onDisk!.Sapisid);
 
@@ -136,7 +136,7 @@ public class GvCookieManagerValidationTests
 
         var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"));
 
-        Assert.True(saved);
+        Assert.Equal(SetCookiesOutcome.Adopted, saved);
         registry.Verify(
             r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()),
             Times.Never);
@@ -159,7 +159,9 @@ public class GvCookieManagerValidationTests
 
         var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"));
 
-        Assert.False(saved);                                              // fails on main: returns true
+        // Stronger than the old Assert.False: it now pins the CAUSE, so a save that failed for an
+        // unrelated reason can no longer satisfy this test.
+        Assert.Equal(SetCookiesOutcome.RejectedByGoogle, saved);          // fails on main: returns true
         Assert.Equal("SAPISID-GOOD", adapter.CurrentCookieSet!.Sapisid);  // in-memory set rolled back
         var onDisk = await store.LoadAsync();
         Assert.Equal("SAPISID-GOOD", onDisk!.Sapisid);                    // fails on main: SAPISID-DEAD
@@ -176,7 +178,7 @@ public class GvCookieManagerValidationTests
 
         var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"));
 
-        Assert.True(saved);
+        Assert.Equal(SetCookiesOutcome.Adopted, saved);
         Assert.Equal("SAPISID-FRESH", adapter.CurrentCookieSet!.Sapisid);
         var onDisk = await store.LoadAsync();
         Assert.Equal("SAPISID-FRESH", onDisk!.Sapisid);
@@ -241,7 +243,10 @@ public class GvCookieManagerValidationTests
 
         var saved = await manager.SetCookiesAsync(GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"));
 
-        Assert.False(saved);   // fails on main: returns true for a cookie set Google rejected
+        // fails on main: returns true for a cookie set Google rejected. And it is ColdSeedUnvalidated,
+        // NOT RejectedByGoogle: on the cold path the file WAS overwritten and AreCookiesValid being
+        // false does not by itself mean Google refused anything.
+        Assert.Equal(SetCookiesOutcome.ColdSeedUnvalidated, saved);
 
         File.Delete(path);
     }

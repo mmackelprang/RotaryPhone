@@ -74,7 +74,9 @@ public class GvCookieManagerTests : IDisposable
 
     var result = await manager.SetCookiesAsync(cookies);
 
-    Assert.False(result);   // was True: the adapter never activated, so nothing validated these
+    // was True: the adapter never activated, so nothing validated these. ColdSeedUnvalidated names the
+    // cause exactly — the seed reached disk, and nothing here tested the Google login.
+    Assert.Equal(SetCookiesOutcome.ColdSeedUnvalidated, result);
     Assert.True(File.Exists(_cookieFile), "Cookie file should be created");
     Assert.True(File.Exists(_keyFile), "Key file should be auto-generated");
     registry.Verify(
@@ -171,7 +173,9 @@ public class GvCookieManagerTests : IDisposable
       Sapisid = "test", Sid = "s", Hsid = "h", Ssid = "ss", Apisid = "a"
     });
 
-    Assert.False(result);
+    // A throwing registry is ActivationFailed, and pinning that is the point: it must NOT be reported
+    // as "Google rejected your cookies", which is what a bare false used to become one file over.
+    Assert.Equal(SetCookiesOutcome.ActivationFailed, result);
     // But the cookie file should still have been saved
     Assert.True(File.Exists(_cookieFile));
   }

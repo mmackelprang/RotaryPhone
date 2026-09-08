@@ -224,7 +224,7 @@ public class GVBridgeControllerTests
     var cookieManager = new Mock<IGvCookieManager>();
     cookieManager
       .Setup(m => m.SetCookiesAsync(It.IsAny<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(), It.IsAny<CancellationToken>()))
-      .ReturnsAsync(true);
+      .ReturnsAsync(SetCookiesOutcome.Adopted);
     var controller = CreateController(cookieManager: cookieManager);
 
     var rawHeader = "SAPISID=abc123def456; SID=mysid; HSID=myhsid; SSID=myssid; APISID=myapisid; __Secure-1PSID=sec1; other=ignored";
@@ -250,7 +250,7 @@ public class GVBridgeControllerTests
     var cookieManager = new Mock<IGvCookieManager>();
     cookieManager
       .Setup(m => m.SetCookiesAsync(It.IsAny<RotaryPhoneController.GVBridge.Auth.GvCookieSet>(), It.IsAny<CancellationToken>()))
-      .ReturnsAsync(true);
+      .ReturnsAsync(SetCookiesOutcome.Adopted);
     var controller = CreateController(cookieManager: cookieManager);
 
     var request = new SetCookiesRequest(
