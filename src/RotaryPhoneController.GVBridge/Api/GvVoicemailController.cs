@@ -97,7 +97,11 @@ public class GvVoicemailController : ControllerBase
             return BadRequest(new { error = "unread_unsupported" });
 
         // 2. Find the node (also needed to build the response DTO — same list+filter the read routes do).
-        var node = await FindNodeAsync(id, ct);
+        var (listSucceeded, node) = await FindNodeAsync(id, ct);
+        // Same blackout hazard as GetAudio: an unread list yields null and we would 404 a voicemail
+        // that exists, before any write is attempted.
+        if (!listSucceeded)
+            return StatusCode(502, new { error = "Failed to fetch voicemail list from Google" });
         if (node is null) return NotFound(new { error = $"Voicemail {id} not found" });
 
         // 3. Idempotent no-op (ADR §4.3): already in the target state → 200 with the true DTO, no GV call.
@@ -115,7 +119,15 @@ public class GvVoicemailController : ControllerBase
 
         // 5. Re-read so the response DTO reflects GV's truth (ADR §4.4). Fall back to the optimistic node
         //    if the re-read can't find it (rare race) — but with the applied IsRead.
-        var fresh = await FindNodeAsync(id, ct) ?? node;
+        //
+        //    The re-read's Succeeded flag is DELIBERATELY DISCARDED. Step 4 already wrote successfully
+        //    to Google; returning 502 now would tell RadioConsole the mark-read did not happen when it
+        //    did, and it would reconcile away a change that is real — a worse lie than a marginally
+        //    stale DTO. The `with { IsRead = ... }` below already carries the applied truth, so the
+        //    fallback node is correct on the field that matters. This is the one call site where
+        //    !Succeeded must NOT become a 502.
+        var (_, freshNode) = await FindNodeAsync(id, ct);
+        var fresh = freshNode ?? node;
         var dto = ToDto(fresh) with { IsRead = request.IsRead };
 
         // 6. Broadcast path-a ReadStateChanged (ADR §5). Unconditional; RadioConsole de-dupes.
