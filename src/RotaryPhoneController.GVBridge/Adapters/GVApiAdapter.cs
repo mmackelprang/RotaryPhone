@@ -1023,17 +1023,53 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// <c>available:true, cookiesValid:true, sipRegistered:false</c> for ever: SMS and voicemail would
     /// recover while <see cref="PlaceCallAsync"/> kept dereferencing a null <c>_sipTransport!</c>.
     /// Refusing the claim is what keeps that dead end VISIBLE, so the caller re-activates instead of
-    /// believing it is done.
+    /// believing it is done. That closing loop is what earns the refusal: <c>GvCookieManager</c> reads
+    /// the state this leaves behind and re-activates. Where no caller does that, refusing buys nothing
+    /// and costs the read path — see <see cref="MarkAvailableAfterRecovery"/>.
     /// </remarks>
     private void MarkAvailableIfTransportExists(string source)
+        => MarkAvailable(source, refuseWithoutTransport: true);
+
+    /// <summary>
+    /// The one implementation of "should this adapter now claim to be available", so the transport
+    /// check cannot drift into two divergent copies.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ THE TWO CALLERS DELIBERATELY DISAGREE ABOUT A MISSING TRANSPORT, and the disagreement is
+    /// forced by <see cref="IsAvailable"/> being ONE boolean gating TWO different things:
+    /// <c>GetAuthenticatedClient()</c> (the SMS/voicemail READ path) and <see cref="PlaceCallAsync"/>
+    /// (the CALL path). With no transport those two want opposite answers, so there is no single
+    /// correct value and the choice has to be made per caller:
+    /// <list type="bullet">
+    /// <item><c>refuseWithoutTransport: true</c> — the cron adoption. A caller
+    /// (<c>GvCookieManager</c>) inspects the result and RE-ACTIVATES, so refusing the claim converts
+    /// the dead end into a repair.</item>
+    /// <item><c>refuseWithoutTransport: false</c> — the recovery ladder. Nothing re-activates on its
+    /// behalf, so refusing would repair nothing and would strand the read path returning null until
+    /// the next 30-minute health tick (the PR1 HIGH-2 window). The missing transport is LOGGED
+    /// instead, which is the visibility the refusal was really for.</item>
+    /// </list>
+    /// Collapsing these two into one policy is a behaviour change, not a cleanup: it re-opens HIGH-2,
+    /// and <c>TryRecoverAuthAsync_Success_SetsAvailable</c> fails when it is attempted.
+    /// </remarks>
+    private void MarkAvailable(string source, bool refuseWithoutTransport)
     {
         if (_sipTransport == null)
         {
+            if (refuseWithoutTransport)
+            {
+                _logger.LogWarning(
+                    "GVApi: adopted a validated cookie set from {Source}, but there is NO SIP transport "
+                    + "— NOT marking the adapter available. Credentials are good; calls cannot be placed "
+                    + "until the adapter re-activates and rebuilds the transport.", source);
+                return;
+            }
+
             _logger.LogWarning(
-                "GVApi: adopted a validated cookie set from {Source}, but there is NO SIP transport — "
-                + "NOT marking the adapter available. Credentials are good; calls cannot be placed "
-                + "until the adapter re-activates and rebuilds the transport.", source);
-            return;
+                "GVApi: {Source} recovered auth, but there is NO SIP transport. Marking available so the "
+                + "SMS/voicemail read path works again — CALLS CANNOT BE PLACED until the adapter "
+                + "re-activates. available:true here means the API client is usable, NOT that the call "
+                + "path is; read sipRegistered before trusting it.", source);
         }
 
         if (!IsAvailable) SetAvailable(true);
@@ -1189,7 +1225,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: RotateCookies refreshed PSIDTS");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 1 (RotateCookies)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
@@ -1199,7 +1235,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: reloaded cookies from disk");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 2 (reload from disk)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
@@ -1211,7 +1247,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _logger.LogInformation("GVApi: refreshed cookies from browser via CDP");
                 succeeded = true;
-                MarkAvailableAfterRecovery();
+                MarkAvailableAfterRecovery("recovery rung 3 (CDP browser refresh)");
                 await ReRegisterUnlessThrottledAsync();
                 return true;
             }
@@ -1275,10 +1311,24 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// the next 30-min health tick — the PR1 review HIGH-2 window (arc tracker, open decision #6) —
     /// which would silently defeat the read-path retry this work adds.
     /// </summary>
-    private void MarkAvailableAfterRecovery()
-    {
-        if (!IsAvailable) SetAvailable(true);
-    }
+    /// <remarks>
+    /// ⚠ Goes through <see cref="MarkAvailable"/> — the same implementation the cron adoption uses —
+    /// but with <c>refuseWithoutTransport: false</c>. This used to be a bare
+    /// <c>if (!IsAvailable) SetAvailable(true);</c>, the same shape HIGH-1 removed one method over,
+    /// and the review asked for it to be routed through <see cref="MarkAvailableIfTransportExists"/>
+    /// "so there is one rule, not two".
+    /// <para>
+    /// There is now one IMPLEMENTATION, but there cannot be one RULE, and that is not an oversight.
+    /// HIGH-1's refusal is earned by a caller that re-activates in response to it; the recovery ladder
+    /// has no such caller, so refusing here repairs nothing and instead leaves
+    /// <c>GetAuthenticatedClient()</c> returning null until the next 30-minute health tick — precisely
+    /// the HIGH-2 window this method exists to close. Routing it through the refusing variant makes
+    /// <c>TryRecoverAuthAsync_Success_SetsAvailable</c> fail, which is that regression caught.
+    /// The missing transport is logged here instead, so the dead end is still visible.
+    /// </para>
+    /// </remarks>
+    private void MarkAvailableAfterRecovery(string rung)
+        => MarkAvailable(rung, refuseWithoutTransport: false);
 
     /// <summary>Why the last browser (CDP) refresh attempt ended the way it did. Feeds status + alarms.</summary>
     internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded }
