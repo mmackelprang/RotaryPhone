@@ -58,7 +58,8 @@ public class GVBridgeController : ControllerBase
             PsidtsMintedAtUtc: _adapter.PsidtsMintedAtUtc,
             BrowserSessionValidatedAt: _adapter.BrowserSessionValidatedAt,
             BrowserSessionAgeSeconds: _adapter.BrowserSessionAgeSeconds,
-            BrowserSessionStale: _adapter.BrowserSessionStale));
+            BrowserSessionStale: _adapter.BrowserSessionStale,
+            BrowserRefreshOutcome: _adapter.BrowserRefreshOutcomeName));
     }
 
     [HttpGet("adapter/mode")]
