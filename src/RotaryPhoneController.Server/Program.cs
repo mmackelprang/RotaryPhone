@@ -103,13 +103,13 @@ builder.Services.AddCors(options =>
               .AllowAnyHeader()
               .AllowCredentials();
     });
-    // Permissive policy for GV Bridge HTTP event endpoint (extension content scripts)
-    options.AddPolicy("GVBridge", policy =>
-    {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
-    });
+    // A second policy, "GVBridge", used to be registered here with AllowAnyOrigin() — a wildcard —
+    // described as "permissive policy for GV Bridge HTTP event endpoint (extension content scripts)".
+    // Removed 2026-09-09 with the rest of the /api/gvbridge/event carve-outs. It was never applied:
+    // no UseCors("GVBridge"), no [EnableCors("GVBridge")], anywhere. Dead since the relay it named was
+    // deleted in March 2026, but sitting under an inviting name — the next person needing CORS on a GV
+    // endpoint could have attached it and silently granted wildcard-origin access to a live route.
+    // AllowClients above already lists https://voice.google.com, so the legitimate case is covered.
 });
 
 // Register configuration as singleton
