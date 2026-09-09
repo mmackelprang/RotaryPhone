@@ -1,0 +1,18 @@
+[Unit]
+Description=GV session alarm — transport an existing signal to a human
+Documentation=file:///opt/rotary-phone/docs/plans/gv-session-alarm.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/gv-session-alarm.sh
+
+# ⛔ DELIBERATELY NO EnvironmentFile=. The script SOURCES ~/.rotaryphone-env
+# itself and exits NON-ZERO when it is missing. `EnvironmentFile=-%h/...` would
+# make a missing file a silent no-op — which is the aitrader 2026-08-14 failure
+# exactly: the alarm ran, notified nobody, and reported success. A user timer
+# inherits no login-shell environment, so the sourcing must be explicit and its
+# absence must be loud.
+
+# A failed run must be VISIBLE in `systemctl --user status`, so no Restart=.
+# Retrying would blur the signal the exit code carries, and the 5-minute timer
+# is the retry.

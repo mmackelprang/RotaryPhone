@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the GV session alarm every 5 minutes
+
+[Timer]
+# 5 minutes is generous on purpose: the condition persists for HOURS and changes
+# only when the 20-minute cron or the recovery ladder attempts a refresh. We are
+# not catching a transient.
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+# ⚠ Persistent=false. A missed window must not fire a burst of catch-up runs at
+# boot — each would be a fresh poll of the same unchanged state. The gateway's
+# 30-minute grace is what covers a gap, not a replay.
+Persistent=false
+
+Unit=gv-session-alarm.service
+
+[Install]
+WantedBy=timers.target
