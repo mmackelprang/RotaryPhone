@@ -6,7 +6,8 @@
 #   - gv-bridge-watchdog.timer                      every 2 minutes (liveness)
 #   - ~/.config/autostart/gv-bridge-chrome.desktop  at GNOME login
 #   - gv-bridge-restart.sh                          after the nightly kill
-#   - the deploy's post-install gate                --print-config, side-effect free
+#   - NOT WIRED YET: the deploy's post-install gate --print-config, side-effect free
+#     (the flag works; nothing calls it today -- see the Self-report note below)
 #
 # Idempotent by contract: the watchdog runs this every 2 minutes, so an
 # invocation made while the bridge is already up does nothing and exits 0.
@@ -78,10 +79,16 @@ CHROME_ARGS+=(
 )
 
 # --- Self-report -------------------------------------------------------------
-# The deploy calls this on the INSTALLED copy after setup-gvbridge.sh runs, so
-# the gate tests what the installed thing DOES rather than what a file contains:
-# a checksum cannot catch a bad mode, a partial copy, or the wrong file under the
-# right name.
+# NOT CALLED BY THE DEPLOY TODAY. --print-config exists and is genuinely
+# side-effect free, but nothing invokes it: the string "--print-config" appears
+# nowhere in Deploy-ToLinux.ps1, which says as much itself ("Today setup-gvbridge.sh
+# is shipped but never executed by the deploy"). Wiring it is plan Task 10, not
+# started. Do not read the paragraph below as a description of current behaviour.
+#
+# THE INTENT, once Task 10 lands: the deploy calls this on the INSTALLED copy after
+# setup-gvbridge.sh runs, so the gate tests what the installed thing DOES rather
+# than what a file contains -- a checksum cannot catch a bad mode, a partial copy,
+# or the wrong file under the right name.
 #
 # Deliberately NOT a --version constant. A hand-maintained version string is a
 # second source of truth that goes stale silently — which is the whole disease

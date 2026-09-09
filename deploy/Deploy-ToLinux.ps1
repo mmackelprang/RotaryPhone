@@ -230,7 +230,11 @@ if (-not $synced) {
     #     silently dropped. Harmless right now -- all 24 empty directories in
     #     publish/linux-x64 are under .playwright, which is pruned anyway, and there
     #     are 0 outside it. It becomes a silent-loss mode the day the publish output
-    #     gains one. deploy/tests/repro-tar-clobber.sh case D asserts this stays true.
+    #     gains one. deploy/tests/repro-tar-clobber.sh case D asserts THE LIMITATION IS
+    #     REAL (an empty dir does not survive the archive). It does NOT assert the
+    #     safety condition -- it uses its own fixture, not the publish tree, so it
+    #     would keep passing on the day publish/linux-x64 gains a load-bearing empty
+    #     directory. Guarding that needs an assertion against the real publish output.
     #   * Directories tar AUTO-CREATES take their mode from the remote umask rather
     #     than from the archive (measured: source 700 extracted as 775 under umask
     #     0002, which is what this box runs -- see setup-gvbridge.sh). No live impact,
