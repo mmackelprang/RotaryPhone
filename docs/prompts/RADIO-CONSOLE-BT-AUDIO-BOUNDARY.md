@@ -521,6 +521,35 @@ agreeing proved nothing, because they shared a scope. Two investigations agreein
 because they shared nothing but the conclusion. **Counting agreements measures the wrong thing** — the
 question is always what the agreeing sources could not have seen.
 
+### ⛔ A fact does not stay a fact — the staleness failure is about TIME, not reasoning
+
+Every other failure shape recorded here is a reasoning error: a wrong scope, a wrong mechanism, an
+instrument that cannot discriminate. **This one is different, and it deserves its own line.** A claim can
+be measured correctly, recorded honestly, and become false later because the thing it describes changed —
+with nothing anywhere re-deriving it.
+
+**Two instances, one day apart, and they are the same shape:**
+
+| Claim | True when written | Falsified by | Believed until |
+|---|---|---|---|
+| `psidtsAgeSeconds` reports credential age | yes | the field became an age-of-last-*load* clock | it read **608** during an 83-minute outage |
+| "A config clobber resets `BluetoothAdapter` and **crosses into Radio Console's audio**" | yes — template was `hci0` at `f222613` | `1b56224` set the template to `hci1` | measured 2026-09-09; template and box now **match**, so a clobber changes nothing |
+
+⚠ **The second one propagated into four documents** — `KNOWN-ISSUES.md`, the deploy scope, the plan, and a
+builder's own first draft — and was put at the **top of a cross-repo deploy handoff** as the reason the
+other service should take extra care. Radio Console changed how they ran a deploy because of it.
+
+⭐ **Nothing in either repo re-derives a written claim when the thing it describes changes, and nothing
+ever will.** The only defence is procedural: **a claim load-bearing enough to lead a handoff is worth
+re-measuring at the moment you lean on it, not at the moment you wrote it.** Age is not the test — a
+claim written this morning can already be stale, and one written in June can still hold. What matters is
+whether anything since could have moved the thing underneath it.
+
+⚠ **And a check built on a stale claim inherits the staleness invisibly.** Radio Console verified
+`BluetoothAdapter` was still `hci1` after their deploy and reported it as reassurance. **That check was
+structurally incapable of failing**, because the template carries `hci1` too — a green result from an
+instrument that could only ever be green. Their words: *a check that cannot fail is not evidence.*
+
 ### Scope of claim is a separate discipline from scope of search
 
 A narrow search honestly reported is fine. **The defect is a broad claim resting on it.** Radio Console
