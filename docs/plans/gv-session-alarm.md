@@ -2246,7 +2246,7 @@ at death; a healthy one runs for days. **A plausible-looking number here is wors
 the alarm's whole credibility rests on it: too low and the owner mutes it, too high and it never fires.
 **The threshold is chosen by the owner, after reading this task's report.**
 
-Create `deploy/sample-browser-session-age.sh` and run it **on the box** for at least **72 hours**:
+Create `deploy/tools/sample-browser-session-age.sh` and run it **on the box** for at least **72 hours**:
 
 ```bash
 #!/usr/bin/env bash
