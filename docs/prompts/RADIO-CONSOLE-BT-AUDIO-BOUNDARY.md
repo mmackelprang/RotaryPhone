@@ -550,6 +550,93 @@ whether anything since could have moved the thing underneath it.
 structurally incapable of failing**, because the template carries `hci1` too — a green result from an
 instrument that could only ever be green. Their words: *a check that cannot fail is not evidence.*
 
+### ⭐ Verifying a MECHANISM is not verifying its OUTCOME
+
+*Phrased by the Radio Console session, 2026-09-09, at RotaryPhone's invitation; instances 5–7 and the
+instrument clause contributed by RotaryPhone. Kept adjacent to the staleness entry above deliberately —
+see the pairing note at the end.*
+
+The mechanism runs. You check that it runs. It runs. And it achieves nothing, because **"it executed"
+and "it did its job" are different claims, and only the first is cheap to check.**
+
+Seven instances, 2026-09-09, both repos, all in one afternoon:
+
+1. Verified the 20-minute cookie cron **fires** — eight firings, clean cadence — and inferred it
+   **works**. Google was rejecting every harvest.
+2. Verified the repo copy of `gv-bridge-ensure.sh` **contains** the right launch args and inferred
+   **the box executes it**. The box runs a three-week-old copy the deploy never installs.
+3. Verified `browserSessionStale` **exists** as an honest signal and inferred **someone would see it**.
+   It read `true` for 2h10m with nobody watching.
+4. Read the rejection line through `cut -c1-170` and reported *"Google refused it"* as the finding. The
+   line continues: *"...ACTION: re-login at voice.google.com."* ⛔ **The alert contained its own remedy
+   and the instrument cut it off.**
+5. Read the running Chrome argv through `pgrep -af | cut -c1-260` and reported the command line
+   *"matches"* — a claim the truncated output could not support. ⭐ **It happened to be true**,
+   discovered later only by re-reading the file in full for an unrelated reason. **A truncated
+   instrument that agrees with reality teaches you nothing and leaves you confident.**
+6. ⭐ **And once in the opposite direction.** After the owner re-logged in, three signals still read
+   *not fixed*: the `workspace.google.com` tab still in the CDP list, `browserSessionValidatedAt`
+   unmoved, `browserSessionStale` still `true`. **All three were artefacts of not-yet-consumed, not of
+   not-fixed** — the login had already worked. The `workspace.google.com` tab never re-renders, so it is
+   evidence in **one direction only**, and `validatedAt` cannot move until something calls
+   `refresh-from-browser`. The same gap produces false **reds** as well as false greens, and the red is
+   nastier: it invites you to go break something that is already fixed.
+7. ⛔ **And the sharpest, because the record already existed.** Instance 2 — that a RotaryPhone deploy
+   never runs `setup-gvbridge.sh` and leaves the installed copy untouched — **was already written in
+   this document**, in *"Merged ≠ deployed ≠ INSTALLED"* below, table and all. Both sessions
+   rediscovered it by measurement. The documentation was correct, in the right file, in the shared
+   contract both sides maintain, and neither of us had read it.
+8. ⛔ **And one written false, by an author with the evidence in hand.** This document's companion
+   spec (`docs/superpowers/specs/2026-09-09-gv-session-alarm-design.md`) claimed in its §7 that the
+   atomic-install work "already landed." It had not — it was on the unmerged `fix/deploy-honest-status`
+   (PR #84), and `grep -c "type f" deploy/Deploy-ToLinux.ps1` on main returns **0**. Written from
+   memory of the same day's work in the same repo, without running the one command that would have
+   checked it, **inside the document cataloguing this failure class.** Recorded rather than quietly
+   corrected: the entry is worth less if its own author's instance is edited out.
+9. ⛔ **`Get-Command rsync` — Radio Console, 2026-09-09, cost ~12 minutes of dark console.** The
+   deploy picks its transport on whether rsync *exists*. An rsync shim installed that morning for an
+   unrelated purpose silently flipped the deploy onto a branch that had **never executed once**, and
+   it failed — after the step that had already stopped the services.
+10. ⛔ **`$LASTEXITCODE` in RotaryPhone's deploy, found within minutes of #9 and by looking for it.**
+    `Deploy-ToLinux.ps1:126-130` (main) builds a remote chain `cp …; tar -xzf - --unlink-first …;
+    … ; chmod +x …` — semicolons, no `set -e` — so `ssh` returns **chmod's** status. The check at
+    `:135-137` is real, runs, and cannot detect a tar failure. `:113-114` claims the opposite in a
+    comment. A failed transfer can restart the service on an unchanged tree while reporting success.
+
+⭐ **What makes this class hard: the mechanism GENUINELY WAS WORKING in nearly all of them.** The
+cron really did fire. `Get-Command` really did find rsync. `$LASTEXITCODE` really did report chmod's
+success. Re-checking confirms each one again, every time. There is no wrong claim to falsify — the
+gap is between a mechanism **running** and a mechanism **mattering**, and no amount of re-verifying
+the first ever closes it. (#8 is the exception and the ugliest for it: there the mechanism was an
+author who did not look.)
+
+⛔ **Four neighbours, of which the staleness entry above is the first. Keep them together — they are
+one family, and they all produce a green light:**
+
+| Neighbour | Shape | Instances |
+|---|---|---|
+| **stale claim** | a check that **cannot fail** | the `hci1` check, `psidtsAgeSeconds` |
+| **unread signal** | a check that **nobody reads** | 1–7 |
+| **unrun check** | a check **never run**, by someone who could have run it in one command | 8 |
+| **wrong question** | a check that **ran, passed, and answered a different question than the one being asked** | 9, 10 |
+
+⭐ The fourth is the subtlest and was the last to be named (Radio Console, 2026-09-09, after the
+OPS-12 outage). `Get-Command rsync` truthfully reported that rsync **exists**; it was read as *"rsync
+works here."* `$LASTEXITCODE` truthfully reported that **chmod** succeeded; it was read as *"the sync
+succeeded."* Both answers were correct. Neither was an answer to the question being asked. ⚠ **A
+truthful instrument pointed at the wrong quantity is not a weaker version of a broken one — it is
+harder to catch, because every audit of the instrument passes.**
+
+⚠ And note the asymmetry in what these cost, because it should shape which you hunt first: #9 failed
+**loudly** and took an appliance down for 12 minutes. #10 fails **quietly** and would leave the old
+binary running while reporting success. The loud one is worse to experience; the quiet one is worse
+to have.
+
+**THE TEST.** For any signal you rely on, name the human or the system that consumes it, and say when
+it was last consumed. If you cannot, **you have detection and no alarm.** And check that your
+instrument shows you the whole signal — twice in one day the alert was faultless and the *reader* cut
+off the half that mattered.
+
 ### Scope of claim is a separate discipline from scope of search
 
 A narrow search honestly reported is fine. **The defect is a broad claim resting on it.** Radio Console
