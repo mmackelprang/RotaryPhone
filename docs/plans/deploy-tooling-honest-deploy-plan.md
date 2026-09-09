@@ -2,8 +2,30 @@
 
 **Scope doc:** [`deploy-tooling-honest-deploy.md`](deploy-tooling-honest-deploy.md) — read it first; the two
 design decisions in it are settled and are not re-opened here.
-**Date:** 2026-09-09. **Status:** planned, not started.
-**Branch:** `fix/deploy-honest-tar-and-gvbridge-install`.
+**Date:** 2026-09-09. **Status:** local phases built; box phases unstarted.
+**Branch:** `fix/deploy-honest-status`.
+
+> ## Build status — 2026-09-09
+>
+> | Task | State | Note |
+> |---|---|---|
+> | 1 repro script | ✅ built | all cases run; **case B's mechanism was falsified and split into B1/B2** — see the correction under Task 1 |
+> | 2 KNOWN-ISSUES correction | ✅ built | additive; entry stays `🔴 OPEN` |
+> | 3 `--exclude` + delete the dance | ✅ built | |
+> | 4 files-only archive + honest status | ✅ built | lane **W** run locally against Git Bash rather than deferred |
+> | 4b check every native call | ✅ built | before/after demonstrated locally with stub `ssh` |
+> | 5 csproj `CopyToPublishDirectory=Never` | ✅ built | |
+> | 6 print the post-deploy `BluetoothAdapter` | ⛔ **not started** | writable locally, but its acceptance (*"the deploy prints a line containing `hci1`"*) needs a live deploy to demonstrate, and a check nobody has watched fire is not a check |
+> | 7 atomic install | ✅ built | |
+> | 8 `--password-store` gate | ✅ built | all three cases incl. both negative controls |
+> | 9 `--print-config` | ✅ built | verified side-effect free |
+> | 10 run the installer + gate | ⛔ **not started** | needs the box. Q1 is answered but only in the idle state — see the caveat in §6 Q1 |
+> | 11 watchdog-timer decision | ⛔ **not started** | Q3 settled as **B, leave the timer running**. B is the status quo plus Task 7's atomicity, so it needs no code change; its only local artefact is a comment above `daemon-reload`, deliberately left for whoever builds Task 10 alongside it |
+> | 12 owner-run on-box UAT | ⛔ **not started** | needs the box |
+> | 13 backup accrual | ✅ built | |
+> | 14 annotate the scope doc | ✅ built | additive; Defect 4 added |
+>
+> ⚠ **New, and it sits underneath all of the above: [Q4](#q4--new-found-2026-09-09-by-task-4bs-negative-control--which-bash-runs-the-sync-script) — on this machine the tar fallback cannot run at all**, because `bash` resolves to WSL rather than Git Bash. Pre-existing, loud rather than silent, and left unfixed because the remedy is an owner decision.
 
 ⚠ **Sequencing:** not on the coordinated-deploy critical path. Radio Console's `KIOSK-3` install and the
 #78/#79 deploy come first. This fixes the tooling that runs *next* time, and every task below is written
