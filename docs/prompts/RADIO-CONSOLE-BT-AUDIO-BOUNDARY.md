@@ -544,6 +544,50 @@ manual step is still required. Today it copies the installer next to the box's s
 says nothing — which reads as success. Tracked here rather than fixed inline because it is deploy
 tooling, and the same PR should address the `appsettings.Production.json` clobber above.
 
+**Measured 2026-09-09 — the drift is three weeks and ~5×, confirmed from the artefacts:**
+
+| Copy | Size | Date |
+|---|---|---|
+| **installed** `~/bin/gv-bridge-ensure.sh` (the one that runs) | 1044 B, 13 lines | Aug 18 |
+| **shipped** `/opt/rotary-phone/deploy/gv-bridge-ensure.sh` | 4981 B | Sep 8 |
+
+The installed copy is a flat script with hardcoded paths and **predates the entire GV auth arc**. Radio
+Console's `KIOSK-2` consumes it and **could not have noticed**: the stale copy still exits 0 on both
+paths, and their contract is invoke-and-probe on the exit code, so *their probe cannot distinguish the
+two scripts*. Three weeks of drift, a live consumer, and no signal on either side — **not disagreement,
+mutual absence of looking.**
+
+⛔ **CONSTRAINT ON THE FIX — do not introduce `--password-store=basic`.** Radio Console checked both
+copies (`grep -c password-store` → **0** and **0**, clean) precisely because that flag on a profile
+already holding v11 cookies makes the keyring-derived key unobtainable and **Chrome discards them** —
+measured live at 45 v11 → 16 v10, destroying the Google Voice session.
+`~/.config/gv-bridge-chrome` is that profile. **Any PR that makes the deploy actually install this
+script must assert the flag's absence**, because that PR converts a dormant file into the executed one.
+
+### The launcher fix is NOT gated on our deploy — which is what makes the ordering safe
+
+Verified on both sides: `cookiesValid` and `lastApiSuccessAt` are present in the box's **current**
+pre-deploy payload (Radio Console, measured 14:14Z) **and** in the post-#79 DTO
+(`GvBridgeDtos.cs:30`, `:45`). **So a launcher repointed at those fields works against the old build and
+the new one.** Radio Console can install their fix at any time without waiting for us, and the agreed
+ordering — theirs first, then ours — is safe because of this overlap rather than by luck.
+
+⚠ **The reverse is not true.** Deploying #79 before their launcher is installed breaks it, because
+`psidtsAgeSeconds` disappears from the payload. **The ordering is not a preference; it is one-way.**
+
+**Baseline measured by the owner, 2026-09-09, on the installed launcher — the pre-state the gate is
+compared against:**
+
+```
+grep -c psidtsAgeSeconds /usr/local/bin/radio-console-open   ->  3   (gate expects 0)
+grep -c lastApiSuccessAt /usr/local/bin/radio-console-open   ->  0   (gate expects >= 1)
+```
+
+**The old launcher is installed, exactly as predicted.** Nothing is broken today: the box still runs the
+pre-#78 build, which still serves `psidtsAgeSeconds`, so old launcher and old payload are consistent.
+⭐ **Note this measurement was run by the owner directly, not by either session** — so the install half
+of the gate *can* be dual-verified on request even while this session has no box access.
+
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
 **Default: ONE file per side per day.** Immediate delivery is the exception and must earn itself.
