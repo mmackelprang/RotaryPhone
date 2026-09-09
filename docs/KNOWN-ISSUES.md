@@ -64,6 +64,38 @@ path**, and the box-side cron fires it **every 20 minutes**.
 > expired; the cron is now the mechanism most likely to *destroy* working credentials. Retiring it should
 > be prioritized accordingly. It remains a box-side change needing its own rollback story.
 
+> ⛔ **SUPERSEDED 2026-09-09 — DO NOT ACT ON THE PARAGRAPH ABOVE. Retiring the cron today would remove
+> the only mechanism ever observed doing this job.** Kept visible rather than deleted, because it was
+> correct when written and the reason it stopped being correct is the point.
+>
+> **Two things changed on 2026-09-09, both measured:**
+>
+> 1. **The hardening deployed.** The "✅ IMPLEMENTED 2026-09-08" gate below went live on the box at
+>    **15:28:50Z**. `refresh-from-browser` now validates the candidate against Google *before* adopting:
+>    on refusal it logs *"REJECTED a cookie set from {Source} — Google refused it. The working on-disk
+>    set was NOT overwritten"* (`GVApiAdapter.cs:900`) and returns without touching the good set.
+>    **The downgrade path the paragraph above describes is closed.** The cron can no longer overwrite
+>    working credentials with dead ones.
+>
+> 2. **The cron is load-bearing, and was doing real work all day.** Radio Console traced the journal:
+>    `*/20 * * * * /opt/rotary-phone/refresh-gv-cookies.sh` fired on the 20-minute boundary **all day**
+>    (05:40, 06:00, … 11:20, 11:40), plus once off-cadence at 11:28:56 for the service restart. The
+>    15:40:02Z event that cleared a `browserSessionStale: true` was **that cron slot** — not the
+>    in-process recovery ladder, and not the operator restart that coincided with it.
+>
+> ⚠ **The recovery ladder that is supposed to replace the cron has still NEVER been observed
+> revalidating a stale browser session unattended.** Removing the cron would swap a mechanism proven to
+> work for one proven only to exist.
+>
+> ⚠ **And note what the 19 pre-deploy cron runs actually were.** Between 05:40 and 11:20 the box ran the
+> *unhardened* build, so each of those adoptions was the blind downgrade path. None caused harm because
+> Chrome's session stayed healthy — **that is luck, not design**, and it is the strongest argument for
+> the hardening rather than against the cron.
+>
+> **Revised M1: do not retire the cron. Re-evaluate it only once the in-process ladder has been observed
+> revalidating a stale session unattended** — which is a thing to *measure*, not assume. Until then the
+> cron is a validated, load-bearing mechanism, and this entry's original framing is stale.
+
 **Proposed hardening — ✅ IMPLEMENTED 2026-09-08**, five weeks after it was proposed here and **one day
 after the delay cost an 83-minute guest-facing outage.** All three rules below now hold, in both of the
 two places that persist cookies:
@@ -131,18 +163,113 @@ The box's copy is **authoritative** (see `docs/HT801-ADDRESS.md`) and carries va
 does not: `EnableMarkRead`, the GV number (`GvPhoneNumber: +1XXXXXXXXXX` — redacted; this repo is public),
 and the HT801 address, in addition to the BT keys above.
 
+> ### ⛔ Correction 2026-09-09 — step 3's mechanism is wrong; the defect is not. Entry stays OPEN.
+>
+> **Falsified twice: locally** (`deploy/tests/repro-tar-clobber.sh` case A) **and by a live deploy on the
+> box.** Step 3 above says `set -e -o pipefail` aborts the chain before the restore `mv` runs. That
+> `set -e` is in the **local** PowerShell-invoked script (`Deploy-ToLinux.ps1:125`). Backup → extract →
+> restore is a `;`-separated string executed by the **remote** shell, which does not inherit it, and
+> `pipefail` can only abort the local script after the remote work has finished. **The restore runs.**
+>
+> The live deploy proved the sequence with three facts rather than assuming it: the config's sha256 was
+> **unchanged**, its mtime **moved**, and `/tmp/rp-prod.bak` was **gone**. tar overwrote the file and the
+> restore put it back.
+>
+> What step 3 got right: `--unlink-first` really does fail on the archive's directory members and tar
+> really does exit 2 — on **every** run, because `tar -czf - .` always carries a `./` member.
+>
+> **The mechanism that actually clobbers — and there are two of them, not one.** Both ends of the dance
+> are best-effort (`2>/dev/null || true`), so *either* end can fail silently and each produces a
+> different bad outcome. Measured 2026-09-09:
+>
+> - **Backup-side failure** (`repro-tar-clobber.sh` case **B1**). `cp -f … /tmp/rp-prod.bak` fails — no
+>   config on the box yet on a first deploy, `/tmp` unwritable, disk full — and is swallowed. The
+>   `[ -f ]` guard is nonetheless **true**, because a `rp-prod.bak` from an earlier run is still sitting
+>   in `/tmp`, and the restore installs that **stale** content. ⛔ **This is the worst case:** the box
+>   does not get the repo template, which is at least a reviewable file in version control — it gets
+>   arbitrary config from a previous deploy, and the chain exits 0.
+> - **Restore-side failure** (case **B2**). The backup **succeeds**, and the restore `mv` is what fails —
+>   a sticky `/tmp` holding an `rp-prod.bak` this uid cannot unlink, for instance. tar's template stays
+>   on the box and the backup is stranded in `/tmp`. **This is exactly the state PR #72 UAT found**
+>   (finding L3): clobbered config, backup still present.
+>
+> ⚠ **A note on how nearly this correction repeated the original error.** The implementation plan for
+> this fix proposed a single case B, using a read-only parent directory, and attributed it to the
+> **backup** side. Measured, that fixture's `cp -f` exits **0** and it is the `mv` that fails — writing
+> to an already-existing writable file needs no write permission on the containing directory, only
+> unlinking it does. The assertions passed either way. A green check with a wrong stated mechanism is the
+> same defect as the one this entry records, one level up, so the fixture was kept as B2 and correctly
+> labelled rather than quietly re-explained.
+>
+> **A second, worse thing came out of the same measurement.** The remote chain's exit status is
+> `chmod`'s, so it reports **0** while tar has failed. The comment at `Deploy-ToLinux.ps1:113-114`
+> claiming the exit-code check prevents a silent stale deploy is therefore **false on the tar path** —
+> the check is real but structurally blind. Tracked as Defect 4 in
+> [`docs/plans/deploy-tooling-honest-deploy-plan.md`](plans/deploy-tooling-honest-deploy-plan.md).
+>
+> ⚠ **And this is not a rare path.** `rsync` is absent from the deploying machine's PowerShell `PATH`, so
+> `Get-Command rsync` finds nothing and **every deploy from that machine takes the tar path.** Installing
+> rsync changes the default; it does not fix the fallback.
+>
+> ⭐ **The lesson, which is the part worth keeping.** The recorded explanation was written after the
+> defect was correctly observed, and it was wrong. It stayed plausible for five weeks because it named a
+> real flag (`set -e`) doing a real thing (aborting a chain) in the wrong shell. Fixing what it described
+> — making the restore unconditional, or wrapping it in a `trap` — would have changed nothing and looked
+> like a fix. The chosen fix instead removes the file from the tar stream, so the property holds
+> whichever way the dance fails.
+>
+> ### ⛔ Second correction, same date — the BLAST RADIUS above is also wrong now
+>
+> This entry's headline, and the sentence *"the clobbered values include **`BluetoothAdapter: hci1`**
+> and `UseActualBluetoothHfp` … **This crosses the Radio Console audio boundary**"*, is **no longer
+> true**, and it is the reason this entry is called the most dangerous item on the list.
+>
+> **Measured 2026-09-09 against the current tree:** `src/RotaryPhoneController.Server/appsettings.Production.json`
+> carries `"UseActualBluetoothHfp": true` and `"BluetoothAdapter": "hci1"` — **identical to what the box
+> needs**. A template clobber does not change the adapter at all. It *was* true when written: `f222613`
+> ("use hci0 adapter in production config") set the template to `hci0`, and `1b56224` set it back to
+> `hci1` and silently falsified this paragraph.
+>
+> **What a clobber actually costs:** `GvPhoneNumber`, `EnableMarkRead` and the box's real HT801 address
+> — a silent GV/SMS outage, not an audio-boundary break. And if the config is missing *entirely*, the app
+> falls back to `appsettings.json`, which sets `UseActualBluetoothHfp: false`; that short-circuits
+> `BluetoothAdapterFactory.Create` before any adapter is chosen, so `hci0` is never touched. The service
+> then starts, `systemctl status` reports active, and the phone runs silently on
+> `MockBluetoothHfpAdapter` — a dead phone reported as a healthy deploy, which is harder to diagnose,
+> not easier.
+>
+> ⚠ **Kept as a correction rather than an edit, because the failure mode is the point:** anyone triaging
+> a future clobber from the text above would go looking at BlueZ and WirePlumber and find nothing wrong.
+> The fix is right either way — the file must stay box-owned because the template **can** drift back to
+> `hci0`, not because it currently has.
+>
+> ### 📌 On merge: flip this entry
+>
+> The status line below stays `🔴 OPEN` on the branch, deliberately — the defect is real until the fix
+> lands. **When `fix/deploy-honest-status` merges, this entry should move to RESOLVED and the "mandatory
+> manual step on every deploy" instruction must go with it**, since the deploy no longer touches the
+> file. Nothing automates that; it is a merge-checklist item.
+
 **Proposed fix (not done in PR #72 — deploy tooling, needs its own change + rollback story):**
 
 - **Primary:** add `--exclude=./appsettings.Production.json` to the `tar -C … -czf -` invocation in
   `deploy/Deploy-ToLinux.ps1`, matching what the rsync path already does. Then the file is never in the
   stream and the fragile backup/restore dance stops being load-bearing.
+  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 3. The dance is deleted, not repaired.
 - **Belt and braces:** drop it from the publish output entirely — in
   `src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj`, exclude
   `appsettings.Production.json` from `Content` (or set `CopyToPublishDirectory=Never`), so no artifact
   can carry a config that only the box should own.
+  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 5.
 - **Either way:** make the restore unconditional (run it in a `trap`/`||` rather than after a `set -e`
   command that can abort), and have the deploy **print** the post-deploy `BluetoothAdapter` value so a
   clobber is loud instead of silent.
+  > ⛔ **First half superseded** — the restore already runs; see the correction above. Making it
+  > unconditional would have changed nothing, because in case B2 the `mv` runs and *fails*, and in case
+  > B1 it runs and installs the wrong file. There is no version of "run the restore harder" that fixes
+  > either.
+  > 📌 **Second half still open** — printing the post-deploy `BluetoothAdapter` value is Task 6 of the
+  > plan and is **not** in `fix/deploy-honest-status`; its acceptance needs a live deploy to demonstrate.
 
 **Until it is fixed — mandatory manual step on every deploy:** back up
 `/opt/rotary-phone/appsettings.Production.json` **before** the sync and verify it **after**, explicitly

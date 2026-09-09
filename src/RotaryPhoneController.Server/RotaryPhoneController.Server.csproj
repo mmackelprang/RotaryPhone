@@ -34,4 +34,30 @@
     <ProjectReference Include="..\RotaryPhoneController.GVBridge\RotaryPhoneController.GVBridge.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The box's appsettings.Production.json is authoritative (docs/HT801-ADDRESS.md):
+         it carries GvPhoneNumber, EnableMarkRead and the real HT801 address, none of
+         which are in the template. The SDK's default appsettings*.json Content glob
+         would otherwise ship the repo TEMPLATE inside the publish artifact, so every
+         sync path has to remember to exclude it. This makes no artifact able to carry
+         it at all.
+
+         Note the BT keys are NOT the reason, despite what docs/KNOWN-ISSUES.md said
+         until 2026-09-09: the template currently carries the same hci1 the box needs,
+         so a clobber does not change the adapter. The reason this file must stay
+         box-owned is that the template CAN drift back (it was hci0 at f222613), not
+         that it currently has.
+
+         This does NOT make the sync-path excludes redundant, and they stay.
+         Measured on SDK 10.0.400, and the behaviour is narrower than it looks:
+         publishing over an output directory REMOVED the copy a previous publish
+         had put there (the SDK tracks what it wrote and cleans it up), but a
+         file it did not place itself SURVIVES untouched. So a stray copy from a
+         hand edit, an older SDK, or a checkout without this line still reaches
+         the stream. Two independent guards, deliberately; see the rsync exclude
+         in Step 3 of deploy/Deploy-ToLinux.ps1 and the tar exclude in its
+         fallback. -->
+    <Content Update="appsettings.Production.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
 </Project>

@@ -2,8 +2,30 @@
 
 **Scope doc:** [`deploy-tooling-honest-deploy.md`](deploy-tooling-honest-deploy.md) — read it first; the two
 design decisions in it are settled and are not re-opened here.
-**Date:** 2026-09-09. **Status:** planned, not started.
-**Branch:** `fix/deploy-honest-tar-and-gvbridge-install`.
+**Date:** 2026-09-09. **Status:** local phases built; box phases unstarted.
+**Branch:** `fix/deploy-honest-status`.
+
+> ## Build status — 2026-09-09
+>
+> | Task | State | Note |
+> |---|---|---|
+> | 1 repro script | ✅ built | all cases run; **case B's mechanism was falsified and split into B1/B2** — see the correction under Task 1 |
+> | 2 KNOWN-ISSUES correction | ✅ built | additive; entry stays `🔴 OPEN` |
+> | 3 `--exclude` + delete the dance | ✅ built | |
+> | 4 files-only archive + honest status | ✅ built | lane **W** run locally against Git Bash rather than deferred |
+> | 4b check every native call | ✅ built | before/after demonstrated locally with stub `ssh` |
+> | 5 csproj `CopyToPublishDirectory=Never` | ✅ built | |
+> | 6 print the post-deploy `BluetoothAdapter` | ⛔ **not started** | writable locally, but its acceptance (*"the deploy prints a line containing `hci1`"*) needs a live deploy to demonstrate, and a check nobody has watched fire is not a check |
+> | 7 atomic install | ✅ built | |
+> | 8 `--password-store` gate | ✅ built | all three cases incl. both negative controls |
+> | 9 `--print-config` | ✅ built | verified side-effect free |
+> | 10 run the installer + gate | ⛔ **not started** | needs the box. Q1 is answered but only in the idle state — see the caveat in §6 Q1 |
+> | 11 watchdog-timer decision | ⛔ **not started** | Q3 settled as **B, leave the timer running**. B is the status quo plus Task 7's atomicity, so it needs no code change; its only local artefact is a comment above `daemon-reload`, deliberately left for whoever builds Task 10 alongside it |
+> | 12 owner-run on-box UAT | ⛔ **not started** | needs the box |
+> | 13 backup accrual | ✅ built | |
+> | 14 annotate the scope doc | ✅ built | additive; Defect 4 added |
+>
+> ⚠ **New, and it sits underneath all of the above: [Q4](#q4--new-found-2026-09-09-by-task-4bs-negative-control--which-bash-runs-the-sync-script) — on this machine the tar fallback cannot run at all**, because `bash` resolves to WSL rather than Git Bash. Pre-existing, loud rather than silent, and left unfixed because the remedy is an owner decision.
 
 ⚠ **Sequencing:** not on the coordinated-deploy critical path. Radio Console's `KIOSK-3` install and the
 #78/#79 deploy come first. This fixes the tooling that runs *next* time, and every task below is written
@@ -376,6 +398,35 @@ tar -tzf "$WORK/fixed.tgz" | grep -q appsettings.Production.json && { echo "C: F
 - **C: PASS** — the archive has no `appsettings.Production.json` member, the destination sha256 is
   unchanged, and the new binary still landed.
 
+> ### ⛔ Correction 2026-09-09, made while building this task — case B's stated mechanism is wrong
+>
+> All three cases behave as written above. **Case B's explanation does not.** The comment in the script
+> block says *"cp -f fails and is swallowed; `[ -f ]` then sees the STALE file"*. Measured against that
+> exact fixture:
+>
+> ```
+> cp -f src ro/rp-prod.bak     -> exit 0, backup content becomes BOX-AUTHORITATIVE
+> mv -f ro/rp-prod.bak dst/…   -> mv: cannot move …: Permission denied, exit 1
+> ```
+>
+> Writing to an **already-existing, writable** file needs no write permission on the containing
+> directory — only *unlinking* it does. So in that fixture the backup **succeeds** and it is the
+> **restore** that fails. The assertions (`config=TEMPLATE-FROM-REPO`, `backup=survives`) pass either
+> way, which is precisely why this was worth catching: a green check whose stated mechanism is wrong is
+> the defect this PR exists to fix, one level up.
+>
+> **The shipped script therefore splits case B in two**, both measured, neither hypothetical:
+>
+> | Case | Fixture | What fails | Result |
+> |---|---|---|---|
+> | **B1** | first deploy (no config on the box) + a stale `/tmp/rp-prod.bak` | the **backup** `cp -f` (source absent) | `[ -f ]` is true and the restore installs **stale content from an earlier run**. ⛔ Worse than the template — arbitrary config, chain exits 0 |
+> | **B2** | this plan's original read-only-directory fixture, kept and relabelled | the **restore** `mv` | the repo **template** stays on the box and the backup is stranded in `/tmp` — exactly the state PR #72 UAT found |
+>
+> **Nothing downstream is invalidated.** Task 3's fix is mechanism-independent by design (§0.2: *"removes
+> the state rather than protecting it"*), so it closes both. The script adds **C-B1** and **C-B2** —
+> both fixtures re-run against the fixed chain — which is what Task 3's strengthened acceptance
+> criterion actually asks for and which the block above did not implement.
+
 ---
 
 #### Task 2 — Correct `docs/KNOWN-ISSUES.md` by annotation · lane **L**
@@ -581,6 +632,32 @@ measured by a **sibling repo on PowerShell 7.6.5**, not by us. Two things could 
   mandatory regardless**, and the borrowed measurement is not even applicable.
 
 Either way the pattern below is correct; only the *reason* changes.
+
+##### ✅ Step 0 MEASURED 2026-09-09 — the second hypothesis is the right one, and the shortcut is a no-op
+
+Run on the deploying machine, both shells present on it:
+
+| | Windows PowerShell | PowerShell 7 |
+|---|---|---|
+| `$PSVersionTable.PSVersion` | **5.1.26100.9343** | **7.6.5** |
+| `$PSVersionTable.PSEdition` | Desktop | Core |
+| `Test-Path variable:PSNativeCommandUseErrorActionPreference` | **False — the variable does not exist** | True |
+| `$PSNativeCommandUseErrorActionPreference` | *(nothing)* | **False** |
+| `$ErrorActionPreference` (default) | Continue | Continue |
+
+The plan's *"more likely, it does not exist"* branch is the one that holds: under 5.1 — which
+`:122`'s own workaround comment says this script runs under — the variable is **absent entirely**.
+
+⛔ **And this makes the shortcut worse than merely wrong-scoped.** Under 5.1, assigning
+`$PSNativeCommandUseErrorActionPreference = $true` is not an error and not a warning: PowerShell creates
+a new variable, nothing ever reads it, and the deploy carries on exactly as before. **The "fix" would
+look applied and do nothing** — the same disease as the `:113-114` comment this task exists to correct.
+Under 7.6.5 it would work, and would change control flow for every native call in the file at once,
+including the rsync branch at `:88-100` that depends on rsync being allowed to fail.
+
+The sibling repo's borrowed `$false` on 7.6.5 turns out to be reproducible here — but it was never the
+load-bearing fact. **The per-call `$LASTEXITCODE` capture is mandatory under either shell**, and it is
+the only remedy that behaves identically in both.
 
 ##### 📌 Scope note — corroboration from a separate source, and where our shape differs
 
@@ -1251,6 +1328,55 @@ Claude-Session: https://claude.ai/code/session_01PJcw41E87SDxrugC3mKKLf
 
 ---
 
+## 3b. Deliberately NOT fixed in this PR — from the 2026-09-09 pre-merge review
+
+Each of these was found, measured, and left alone on purpose. Recorded so the next person inherits the
+finding rather than re-deriving it.
+
+### F1 — extracted directories take their mode from the remote umask · **owner decision**
+
+With directory members gone from the archive (Task 4), GNU tar creates missing parents at
+`0777 & ~umask` rather than at the archived mode. Measured: a source directory at `700` extracted as
+`775` under `umask 0002`, which is what this box runs (`setup-gvbridge.sh` documents it). **No live
+impact** — every directory in the current publish tree already exists on the box — but any *new* one
+would land group-writable.
+
+The one-word fix is `umask 022;` at the head of the remote chain. It is **not** applied because tar also
+applies the umask to the **file** modes it restores, so that one word silently re-permissions every file
+the extract writes on a production box shared with another service. That is a permissions change with its
+own blast radius, and it belongs to the owner rather than to a PR about exit codes.
+
+### F2 — nothing removes a pre-existing `/tmp/rp-prod.bak` · **affects Task 12's acceptance**
+
+The backup/restore dance is gone, so nothing *creates* one — but nothing deletes a leftover either. Two
+consequences:
+
+- **Task 12 step 3 asserts `/tmp/rp-prod.bak` must be ABSENT.** On a box carrying a stranded B2-era
+  backup that assertion **fails for the wrong reason**. Either clear it by hand once before the UAT, or
+  relax the criterion to "mtime not updated".
+- That file contains the production config — **GV number and HT801 address — world-readable in `/tmp`**.
+  Worth deleting on its own merits.
+
+Not added to the deploy because it is a box-side deletion, and this session was scoped out of box changes.
+
+### F3 — `scp -r scripts/` is now a hard abort · **informational**
+
+Task 4b correctly made it throw. Note what that means in practice: it ships
+`scripts/bin/Debug/net10.0/.playwright/**` with no exclusion (§0.6, and the Out-of-scope note below), so
+it is the largest and most transient-failure-prone transfer in the deploy, and it now aborts at a point
+where the binary has already landed and the service has **not** been restarted. Correct behaviour;
+just know it before the first post-merge deploy. Excluding that tree is still the real fix.
+
+### F4 ⛔ SECURITY, pre-existing and out of scope — a plaintext credential in a public repo
+
+`src/RotaryPhoneController.Server/appsettings.Production.json:45` commits
+`"HT801AdminPassword": "Admin001"`, and `docs/KNOWN-ISSUES.md` states this repo is public. It predates
+this PR and this PR does not touch the file's contents — but it does change how that file is published,
+which is the cheapest moment to notice. **Rotating a live credential is the owner's call**, so nothing
+here does it. Route it to an env var or user-secret and rotate the device password.
+
+---
+
 ## 4. Out of scope
 
 - Radio Console's `setup-kiosk.sh` gap — theirs, tracked on their side.
@@ -1303,6 +1429,50 @@ form works, Task 10 is correct as written. If **neither** works, `Linger=no` is 
 needs `loginctl enable-linger` — a box-side change with its own rollback story, which would make this a
 **blocker** rather than a detail.
 
+#### ✅ ANSWERED 2026-09-09 (owner-run) — Task 10 is not blocked. The caveat is the interesting part.
+
+```
+ssh radio 'systemctl --user is-system-running; echo "rc=$?"'
+  running
+  rc=0
+
+ssh radio 'systemctl --user list-timers "gv-bridge-*"'
+  NEXT                        LEFT      LAST                        PASSED  UNIT
+  Wed 2026-09-09 11:50:00 EDT 1min 45s  Wed 2026-09-09 11:48:00 EDT 14s ago gv-bridge-watchdog.timer
+
+ssh radio 'XDG_RUNTIME_DIR=… DBUS_SESSION_BUS_ADDRESS=… systemctl --user list-timers "gv-bridge-*"'
+  (identical output)
+
+ssh radio 'loginctl show-user $(whoami) -p Linger'
+  Linger=no
+```
+
+**The bare call already works over non-interactive ssh**, so by this section's own decision table the
+explicit `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` in Task 10 are harmless belt, Task 10 is correct
+as written, and no `loginctl enable-linger` is needed.
+
+⚠ **But the measurement was taken in a state Task 10 will not run in, and that is the surviving risk.**
+`Linger=no` means the per-user systemd manager exists **only while the user has an active session**. The
+bare call worked because there **is** one right now — the box is idle in its normal state, kiosk up and
+the watchdog firing, as that timer output shows.
+
+The deploy stops services and the kiosk at Step 2, and Task 10 runs **after** that. If stopping the kiosk
+ends the user's login session, the user manager goes away with it and `systemctl --user` fails at exactly
+the moment Task 10 needs it — **after the binary sync has already landed**. Nothing was mid-deploy when
+this was measured, so the measurement cannot speak to that state.
+
+⭐ **This is the same shape as everything else in this plan: a check that passes in the state you can
+easily observe, and says nothing about the state that matters.** "Q1 answered" must not be read as
+"Task 10 is safe".
+
+**How to settle it cheaply when Task 10 is built** — one command, in the right state, on a real deploy:
+run `ssh radio 'systemctl --user is-system-running'` **after** the deploy's Step 2 has stopped the kiosk
+and **before** the installer runs. That converts the assumption into a measurement.
+
+**If the manager does go away**, Q2's `--scripts-only` contingency removes the `systemctl --user`
+dependency from the deploy path entirely and the blocker evaporates. The contingency is already
+designed — it simply has not been chosen.
+
 ### Q2 — Full installer, or a `--scripts-only` mode?
 
 The decision to **run the installer** is settled and is not re-opened. This is only about *how much of it*
@@ -1325,6 +1495,53 @@ autostart entry, a desktop shortcut, and an extension check — to update one sc
 the units are shipped to the box already. **But if Q1 comes back "neither form works", switch to
 `--scripts-only`** — it turns a blocker into a non-issue, and it is a smaller change than enabling
 lingering on a box shared with another service.
+
+### Q4 ⛔ NEW, found 2026-09-09 by Task 4b's negative control — which `bash` runs the sync script?
+
+**On the machine this was built on, the tar-pipe fallback cannot run at all.** It fails at exit 127
+before doing any work. This is not a defect this plan created, and it is not one this plan's tasks fix —
+it sits underneath all of them, because the tar path is the path §0.3 says every deploy takes.
+
+**Measured, both PowerShell 5.1 and 7.6.5, with and without the user profile loaded:**
+
+```
+(Get-Command bash).Source   ->  C:\WINDOWS\system32\bash.exe        i.e. WSL, not msys
+```
+
+`C:\Program Files\Git\cmd` is on `PATH`, but Git's `bash.exe` lives in `C:\Program Files\Git\bin`,
+which is **not**. So `bash $syncScriptPath` at the end of Step 3 lands in **WSL Ubuntu 22.04.5**, and two
+separate assumptions in the code break there:
+
+| | Git Bash (msys) — what the code assumes | WSL bash — what actually runs |
+|---|---|---|
+| `bash "C:\Users\…\Temp\rp-deploy-sync.sh"` | translates the path, **runs, exit 0** | backslashes stripped to `C:UsersmarkAppDataLocalTemp…`, **exit 127, the script never runs** |
+| `tar -C '/d/prj/…'` (the `$publishMsys` conversion at `:120`) | `/d/…` is the msys drive mapping, **works** | drives are at `/mnt/d`; `/d` does not exist, **tar exits 2** |
+
+Both measured directly, same argument, same machine, opposite outcomes. A live deploy did take the tar
+path successfully on 2026-09-09, so **the owner must have run it from a shell where `bash` was Git
+Bash** — that is the configuration the code is written for, and it is not the default one here.
+
+⚠ **Consequence for this PR's lane-W steps.** Task 3's and Task 4's "run one deploy from Windows and
+confirm the sync completes" will fail at exit 127 if run from a normal PowerShell on this machine, and
+that failure says nothing about Tasks 3 and 4. Establish which `bash` is being used *before* reading a
+lane-W result. Task 4's create side was verified here by invoking Git Bash explicitly, which is the
+environment the code targets.
+
+**This is loud, not silent** — the existing `$syncExit -ne 0` throw catches it — so it is a breakage
+rather than another instance of this PR's theme. It is left unfixed deliberately: choosing the remedy is
+an owner decision with real trade-offs.
+
+- **Pin the interpreter** — invoke `C:\Program Files\Git\bin\bash.exe` explicitly (or resolve it from
+  `git --exec-path`). Keeps every existing msys assumption true, including `$publishMsys`. Costs a
+  hard-coded dependency on Git for Windows.
+- **Target WSL instead** — pass a `/mnt/d/…` style path and a WSL-visible script path. Removes the Git
+  dependency, but `$publishMsys` and the temp-file handoff both have to change together, and it is the
+  larger change.
+- **Detect and adapt** — a second code path to keep correct, which §Q2 already argues against for
+  `--scripts-only`.
+
+⭐ **Recommendation: pin the interpreter.** It makes the code's existing assumptions true rather than
+rewriting them, and it is the smallest change that turns a machine-dependent breakage into a stable one.
 
 ### Q3 — Option A or B for the watchdog timer? (Task 11)
 

@@ -58,7 +58,6 @@ STATE_DIR="${HOME}/.local/state"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 AUTOSTART_DIR="${HOME}/.config/autostart"
 DESKTOP_DIR="${HOME}/Desktop"
-STAMP="$(date '+%Y%m%d-%H%M%S')"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -71,12 +70,69 @@ warn() { echo -e "${YELLOW}[GVBridge]${NC} $1"; }
 # applies to every file the script installs — scripts, units and .desktop entries
 # alike — because an operator who hand-tunes, say, the watchdog interval should
 # not lose it silently to the next provision.
+#
+# ONE ROLLING BACKUP, not one per run. This used to write a timestamped
+# .bak-${STAMP} on every differing file, which was right for a script run by hand
+# a few times a year. Once the deploy runs it on every deploy, that accrues
+# backups in ~/bin, ~/.config/systemd/user, ~/.config/autostart and — visibly, on
+# a kiosk box — ~/Desktop. The protection this exists for is "an operator
+# hand-tuned something and should not lose it silently", which one level
+# satisfies.
 backup_if_changed() {
     local src="$1" dest="$2"
     if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
-        cp -p "$dest" "${dest}.bak-${STAMP}"
-        log "Backed up existing $(basename "$dest") -> $(basename "$dest").bak-${STAMP}"
+        cp -p "$dest" "${dest}.bak"
+        log "Backed up existing $(basename "$dest") -> $(basename "$dest").bak"
     fi
+}
+
+# Replace a destination by ATOMIC RENAME. Never write to the live path.
+#
+# Two different problems are easy to confuse here, and `install -m` solves exactly
+# one of them:
+#
+#   MODE CORRECTNESS  -- solved, and that is what write_mode's comment below is
+#                        about: this box runs umask 0002, so `cat > f` would leave a
+#                        group-writable .desktop file that GNOME silently refuses to
+#                        launch. `install -m` never lets that version exist.
+#
+#   REPLACEMENT ATOMICITY -- NOT solved by install. strace shows install doing
+#                        unlink(dest) then open(dest, O_CREAT|O_EXCL, 0600). A process
+#                        already executing the old file is safe (it holds the unlinked
+#                        inode), but between the unlink and the end of the copy the
+#                        PATH DOES NOT EXIST -- measured directly with a polling loop
+#                        -- and at the tail of that window it exists but is partial,
+#                        at mode 0600.
+#
+# gv-bridge-watchdog.timer runs ExecStart=%h/bin/gv-bridge-ensure.sh every 2 minutes
+# (OnUnitActiveSec=2min, AccuracySec=20s). There is no quiet window to install in. A
+# watchdog firing inside that window gets ENOENT and the unit fails; a new invocation
+# starting at the tail could exec a truncated script, which does not crash -- it STOPS
+# EARLY, and every line after the cut silently does not exist.
+#
+# rename(2) is atomic within a filesystem: every observer sees the whole old file or
+# the whole new one. "${dest}.new" is a sibling of "${dest}" on purpose, so the rename
+# can never degrade into a cross-device copy.
+#
+# NOTE: do not "verify" a replacement by comparing inode numbers. Measured 2026-09-09:
+# the freed inode was immediately REUSED by the new file.
+#
+# The staging file is cleaned up on BOTH failure paths. This script runs under
+# `set -euo pipefail`, so without the guards a failed install (ENOSPC, quota) would
+# abort leaving a PARTIAL file at mode 0600, and a failed mv would abort leaving a
+# complete one -- in ~/bin, ~/.config/systemd/user, ~/.config/autostart and ~/Desktop,
+# which is a kiosk screen the owner looks at. Leaving debris there is the exact
+# problem Task 13 removed from backup_if_changed; re-introducing it here would be a
+# poor trade. `if ! cmd` suspends errexit for the tested command, which is why the
+# cleanup can run at all.
+#
+# It also matters for the NEXT run: a stranded "${dest}.new" owned by another uid
+# (one run under sudo, say) makes the following install fail, which under set -e now
+# aborts the whole installer where the old code would have quietly succeeded.
+install_atomic() {
+    local src="$1" dest="$2" mode="$3"
+    if ! install -m "$mode" "$src" "${dest}.new"; then rm -f "${dest}.new"; return 1; fi
+    if ! mv -f "${dest}.new" "$dest";            then rm -f "${dest}.new"; return 1; fi
 }
 
 install_file() {
@@ -86,7 +142,7 @@ install_file() {
         exit 1
     fi
     backup_if_changed "$src" "$dest"
-    install -m "$mode" "$src" "$dest"
+    install_atomic "$src" "$dest" "$mode"
 }
 
 # Write a file and give it an exact mode in one step.
@@ -97,12 +153,16 @@ install_file() {
 # that is precisely why the shortcut this script used to write did nothing when
 # clicked. Writing through a temp file and `install -m` never lets the
 # group-writable version exist at the destination path at all.
+#
+# ⚠ mktemp puts $tmp in /tmp, which may be a different filesystem from $HOME -- which
+# is exactly why install_atomic stages at "${dest}.new" rather than renaming $tmp
+# directly. rename(2) across filesystems fails with EXDEV.
 write_mode() {
     local dest="$1" mode="$2" tmp
     tmp="$(mktemp)"
     cat > "$tmp"
     backup_if_changed "$tmp" "$dest"
-    install -m "$mode" "$tmp" "$dest"
+    install_atomic "$tmp" "$dest" "$mode"
     rm -f "$tmp"
 }
 

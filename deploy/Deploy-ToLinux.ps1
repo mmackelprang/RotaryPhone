@@ -43,6 +43,33 @@ $RepoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $PublishDir = Join-Path $RepoRoot "publish\$Runtime"
 $SshTarget = "${TargetUser}@${TargetHost}"
 
+# ⛔ Hard gate, and it runs BEFORE ANYTHING TOUCHES THE BOX -- before the build, the
+# sudo mkdir, the binary sync and every scp. It needs nothing but the local repo, so
+# there is no reason to discover a bad file halfway through a deploy: aborting at that
+# point would leave the new binary on disk with the old service still running.
+#
+# Today setup-gvbridge.sh is shipped but never executed by the deploy, so
+# gv-bridge-ensure.sh sits on the box as an inert file and its contents do not matter.
+# The moment the deploy runs the installer (plan Task 10, not yet built) that file
+# becomes an executed one, and --password-store stops being inert. On a profile
+# already holding v11 cookies it makes the keyring-derived key unobtainable and Chrome
+# DISCARDS them: measured live at 45 v11 -> 16 v10, destroying the Google Voice
+# session. ~/.config/gv-bridge-chrome is exactly that profile. The gate lands first,
+# deliberately, so the hazard is closed before the change that opens it.
+#
+# Scoped to this ONE file deliberately. A repo-wide search is NOT equivalent:
+# scripts/bin/Debug/net10.0/.playwright/.../chromiumSwitches.js carries
+# "--password-store=basic" as one of Playwright's own Chromium defaults, and this very
+# file now contains the literal too, so a broad grep fails on a clean tree.
+$ensureSrc = Join-Path $RepoRoot "deploy\gv-bridge-ensure.sh"
+if (Test-Path $ensureSrc) {
+  if (Select-String -Path $ensureSrc -Pattern 'password-store' -SimpleMatch -Quiet) {
+    throw "REFUSING TO DEPLOY: deploy/gv-bridge-ensure.sh contains --password-store. On ~/.config/gv-bridge-chrome that discards the v11 cookies and destroys the Google Voice session. Remove the flag, then redeploy."
+  }
+} else {
+  throw "REFUSING TO DEPLOY: deploy/gv-bridge-ensure.sh is missing -- setup-gvbridge.sh would fail on the box after the binary sync had already landed."
+}
+
 Write-Host "=== Rotary Phone Deploy ===" -ForegroundColor Cyan
 Write-Host "Target:  ${SshTarget}:${TargetPath}"
 Write-Host "Runtime: $Runtime"
@@ -75,7 +102,13 @@ Write-Host "  Build complete" -ForegroundColor Green
 # --- Step 2: Create target directories ---
 Write-Host "[2/4] Preparing target directories..." -ForegroundColor Yellow
 
+# Native commands do NOT honour $ErrorActionPreference -- see the note above Step 3.
+# Every native call from here on captures its own status on the very next line: one
+# capture per call, never a single test after a sequence, because the value would then
+# belong to whichever call ran last rather than to the one that failed.
 ssh $SshTarget "sudo mkdir -p ${TargetPath}/{data,logs} && sudo chown -R ${TargetUser}:${TargetUser} ${TargetPath}"
+$mkdirExit = $LASTEXITCODE
+if ($mkdirExit -ne 0) { throw "failed to prepare ${TargetPath} on ${SshTarget} (exit $mkdirExit) -- every later copy would land somewhere unintended, or not at all" }
 
 # --- Step 3: Sync files ---
 Write-Host "[3/4] Syncing files..." -ForegroundColor Yellow
@@ -85,6 +118,11 @@ $rsyncAvailable = Get-Command rsync -ErrorAction SilentlyContinue
 if ($rsyncAvailable) {
   # Convert Windows path to rsync-compatible path
   $rsyncSource = ($PublishDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower() + "/"
+  # ⚠ This rsync must be allowed to FAIL SOFTLY, and it is the one native call in the
+  # script that must never be made to throw. Its non-zero exit is the BRANCH CONDITION
+  # for the tar fallback below: a `throw` here would delete the fallback outright.
+  # Its status is read by the `if ($LASTEXITCODE -eq 0)` just below -- that IS the
+  # check, and it is deliberate rather than missing.
   rsync -az --delete `
     --exclude 'appsettings.Production.json' `
     --exclude 'data/' `
@@ -109,9 +147,18 @@ if (-not $synced) {
   #   * --unlink-first avoids ETXTBSY when overwriting the running binary (old inode survives for
   #     the live process; the Step-4 restart picks up the new file).
   #   * The box's data/ (cookies) is untouched (publish has no data/); appsettings.Production.json
-  #     is backed up + restored around the extract so the customized prod config is never clobbered.
-  #   * $LASTEXITCODE is checked so a failed sync ABORTS the deploy instead of restarting the
-  #     service on the OLD binary (the silent-stale-deploy bug this replaces).
+  #     is EXCLUDED FROM THE ARCHIVE, so the customized prod config is never overwritten and never
+  #     needs restoring. It used to be backed up + restored around the extract, and that dance
+  #     clobbered the config two different ways when either of its best-effort ends failed --
+  #     see deploy/tests/repro-tar-clobber.sh cases B1 and B2, and the exclude comment below.
+  #   * The remote chain now runs under its own `set -e`. It used to end in `chmod`, so the chain
+  #     reported CHMOD's status -- 0 -- while tar had exited 2. The $LASTEXITCODE check below was
+  #     real but structurally blind, and the deploy restarted the service on a half-extracted tree
+  #     while printing success. Measured 2026-09-09; the old comment claiming this was already
+  #     handled was wrong. See docs/plans/deploy-tooling-honest-deploy-plan.md Defect 4.
+  #   * An exit code says what a program CLAIMED. The sha256 check after the sync asks the box what
+  #     it actually has, which is the only statement here that does not depend on a status being
+  #     reported honestly.
   if (-not $rsyncAvailable) {
     Write-Host "  rsync not found, using tar-pipe over ssh (bash)..." -ForegroundColor Yellow
   }
@@ -123,10 +170,88 @@ if (-not $synced) {
   # quoting of a 'bash -c "<string with quotes>"'). Must be LF-only with no BOM for bash.
   $syncScript =
     "set -e -o pipefail`n" +
-    "tar -C '$publishMsys' --exclude=./.playwright -czf - . | ssh '$SshTarget' '" +
-      "cp -f $TargetPath/appsettings.Production.json /tmp/rp-prod.bak 2>/dev/null || true; " +
+    # --exclude=./appsettings.Production.json is the load-bearing line, and it mirrors
+    # the rsync path's own --exclude in Step 3 above. The box's copy is authoritative
+    # (docs/HT801-ADDRESS.md). The publish output ships the repo TEMPLATE (the SDK's
+    # appsettings*.json Content glob), so while it was in the stream the file was
+    # overwritten on every run and depended on a restore to put it back.
+    #
+    # ⚠ WHAT A CLOBBER ACTUALLY COSTS, measured 2026-09-09 against this tree -- the
+    # widely-repeated "it resets BluetoothAdapter and breaks Radio Console's audio" is
+    # NO LONGER TRUE and should not be repeated. The template currently carries
+    # UseActualBluetoothHfp: true and BluetoothAdapter: hci1, identical to what the box
+    # needs, so a clobber does not touch the adapter at all. It was true when written
+    # (f222613 set the template to hci0); 1b56224 set it back to hci1 and quietly
+    # falsified it. What a clobber DOES lose is GvPhoneNumber, EnableMarkRead and the
+    # box's real HT801 address -- a silent GV/SMS outage that the deploy reports as
+    # success. The reason this file must stay box-owned is that the template CAN drift
+    # back, not that it currently has.
+    #
+    # The backup/restore dance is GONE rather than repaired, and that is the point.
+    # Both of its ends were best-effort (`2>/dev/null || true`), so EITHER end could
+    # fail silently, and each produced a different clobber -- both reproduced in
+    # deploy/tests/repro-tar-clobber.sh:
+    #
+    #   B1  the BACKUP cp fails (first deploy, no config on the box yet) but a
+    #       stale /tmp/rp-prod.bak from an earlier run makes `[ -f ]` true, so the
+    #       restore installs that stale content. Worst case: not the repo template,
+    #       but arbitrary config from a previous deploy, and the chain exits 0.
+    #   B2  the backup SUCCEEDS and the RESTORE mv fails (a /tmp this uid cannot
+    #       unlink from). The template stays on the box and the backup is stranded.
+    #       This is the state PR #72 UAT found, finding L3.
+    #
+    # Excluding the member removes the state instead of protecting it: there is
+    # nothing to restore because nothing is overwritten, and the property holds
+    # whichever end would have failed. Making the restore "unconditional", which
+    # KNOWN-ISSUES proposed, fixes neither -- in B2 the mv runs and fails, and in B1
+    # it runs and installs the wrong file.
+    #
+    # A genuine first deploy still gets its config: the RP_CFG_MISSING probe further
+    # down scps the template in when the box has none, and that is now the only path
+    # in this script that ever writes this file.
+    "cd '$publishMsys'`n" +
+    # Files-only member list, and no './' member. GNU tar creates missing parent
+    # directories on extract (verified: a 'sub/deep' that did not exist beforehand
+    # is created), so directory members buy nothing here -- and --unlink-first calls
+    # unlink() on every one of them, which cannot succeed. `tar -czf - .` therefore
+    # made tar exit 2 on EVERY run (measured 2026-09-09,
+    # deploy/tests/repro-tar-clobber.sh case A; seen live on the box the same day).
+    # Dropping the directory members is what lets the exit status below be honest
+    # instead of decorative -- and stops four `Cannot unlink` lines printing on every
+    # successful deploy, which is what trained us to scroll past them.
+    #
+    # -type l is included so symlinks ship as symlinks. --exclude works against the
+    # names read from -T -, verified against the real publish output: 396 members,
+    # 0 directory members, 0 appsettings.Production.json.
+    #
+    # ⚠ Two known consequences of a files-only list, both measured, neither live today:
+    #
+    #   * EMPTY directories cannot be carried by \( -type f -o -type l \) and are
+    #     silently dropped. Harmless right now -- all 24 empty directories in
+    #     publish/linux-x64 are under .playwright, which is pruned anyway, and there
+    #     are 0 outside it. It becomes a silent-loss mode the day the publish output
+    #     gains one. deploy/tests/repro-tar-clobber.sh case D asserts THE LIMITATION IS
+    #     REAL (an empty dir does not survive the archive). It does NOT assert the
+    #     safety condition -- it uses its own fixture, not the publish tree, so it
+    #     would keep passing on the day publish/linux-x64 gains a load-bearing empty
+    #     directory. Guarding that needs an assertion against the real publish output.
+    #   * Directories tar AUTO-CREATES take their mode from the remote umask rather
+    #     than from the archive (measured: source 700 extracted as 775 under umask
+    #     0002, which is what this box runs -- see setup-gvbridge.sh). No live impact,
+    #     because every directory in the publish tree already exists on the box. Left
+    #     as-is deliberately rather than pinned with `umask 022`: that would also
+    #     tighten every FILE mode the extract writes, which is a permissions change on
+    #     a production box and belongs to the owner, not to this PR. Tracked in the
+    #     plan's follow-ups.
+    "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
+      " tar --null --exclude=./appsettings.Production.json -czf - -T - |" +
+      # `set -e` in the REMOTE shell. Without it the compound's status is the LAST
+      # command's -- chmod's -- so a failed tar reported 0. The remote shell does not
+      # inherit the local `set -e -o pipefail` above: that one governs this script,
+      # and by the time it can act the remote work has already finished.
+      " ssh '$SshTarget' '" +
+      "set -e; " +
       "tar -xzf - --unlink-first -C $TargetPath; " +
-      "[ -f /tmp/rp-prod.bak ] && mv -f /tmp/rp-prod.bak $TargetPath/appsettings.Production.json || true; " +
       "chmod +x $TargetPath/RotaryPhoneController.Server'`n"
   $syncScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-deploy-sync.sh"
   [System.IO.File]::WriteAllText($syncScriptPath, $syncScript, (New-Object System.Text.UTF8Encoding($false)))
@@ -138,13 +263,72 @@ if (-not $synced) {
   $synced = $true
 }
 
-# Copy appsettings.Production.json only if it doesn't exist on target
-$prodExists = ssh $SshTarget "test -f ${TargetPath}/appsettings.Production.json && echo EXISTS"
-if ($prodExists -ne "EXISTS") {
+# Independent of every exit status above: ask the box what it has. An exit code says
+# what a program claimed; this says what is on disk. Runs on both sync paths, because
+# a silently-truncated rsync is no better than a silently-failed tar.
+#
+# ⚠ sha256, NOT size. A size comparison cannot fail in the most common case this is
+# meant to catch: rebuilding unchanged source produces a byte-identical apphost, so
+# `stat -c %s` matches whether or not the sync did anything at all. A sync that
+# silently no-ops -- precisely the defect this script is being fixed for -- passes a
+# size check on every redeploy without a source change. Same round trip, real answer.
+#
+# No 2>/dev/null on the remote side: swallowing the error would blind the diagnostic
+# this throws on.
+$localBinHash = (Get-FileHash (Join-Path $PublishDir "RotaryPhoneController.Server") -Algorithm SHA256).Hash.ToLower()
+$remoteBinHash = ssh $SshTarget "sha256sum ${TargetPath}/RotaryPhoneController.Server | cut -d' ' -f1"
+$hashExit = $LASTEXITCODE
+if ($hashExit -ne 0) {
+  throw "sync verification FAILED: could not hash ${TargetPath}/RotaryPhoneController.Server on ${TargetHost} (exit $hashExit). The service has NOT been restarted."
+}
+$remoteBinHash = "$remoteBinHash".Trim().ToLower()
+if ($remoteBinHash -ne $localBinHash) {
+  throw "sync verification FAILED: ${TargetPath}/RotaryPhoneController.Server hashes $remoteBinHash on ${TargetHost}, expected $localBinHash. The service has NOT been restarted."
+}
+Write-Host "  Sync verified: binary on the box matches sha256 $($localBinHash.Substring(0,16))" -ForegroundColor Green
+
+# Copy appsettings.Production.json only if it doesn't exist on target.
+#
+# ⛔ This probe is now the ONLY thing in the deploy that can write this file, so it has
+# to be unambiguous. The old form was `test -f … && echo EXISTS` compared with
+# `-ne "EXISTS"`, which silently treats "the probe did not answer" as "the file is
+# absent" and overwrites the box's authoritative config with the repo template. Two
+# ways that fired:
+#
+#   * ssh connects but the command does not run cleanly -> $prodExists is $null,
+#     $null -ne "EXISTS" is TRUE, and the template is copied over a live config.
+#   * the remote emits anything besides EXISTS -> $prodExists is a String[], and
+#     PowerShell's -ne on a collection FILTERS rather than compares: it returns the
+#     non-matching elements, and a non-empty array is truthy. Same outcome.
+#
+# So the probe answers both cases explicitly, its transport status IS checked, and
+# only an explicit RP_CFG_MISSING may write. Anything else aborts rather than guesses
+# -- which is the whole point of this change: do not let an unanswered question look
+# like an answer.
+$prodProbe = ssh $SshTarget "if [ -f '${TargetPath}/appsettings.Production.json' ]; then echo RP_CFG_EXISTS; else echo RP_CFG_MISSING; fi"
+$probeExit = $LASTEXITCODE
+if ($probeExit -ne 0) { throw "could not probe ${TargetPath}/appsettings.Production.json on ${TargetHost} (exit $probeExit) -- refusing to guess whether the box has a config; NOT writing the template" }
+$probeAnswers = @("$prodProbe" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($probeAnswers.Count -ne 1 -or $probeAnswers[0] -notin @('RP_CFG_EXISTS', 'RP_CFG_MISSING')) {
+  throw "unexpected output probing ${TargetPath}/appsettings.Production.json: '$($probeAnswers -join '|')' -- refusing to guess; NOT writing the template"
+}
+if ($probeAnswers[0] -eq 'RP_CFG_MISSING') {
   $prodConfig = Join-Path $RepoRoot "src\RotaryPhoneController.Server\appsettings.Production.json"
   if (Test-Path $prodConfig) {
     Write-Host "  Copying initial appsettings.Production.json..." -ForegroundColor Yellow
     scp $prodConfig "${SshTarget}:${TargetPath}/appsettings.Production.json"
+    $prodScpExit = $LASTEXITCODE
+    # ⛔ The one that matters most in this block. This is the FIRST-DEPLOY path for the
+    # very file the rest of this change exists to protect.
+    #
+    # What a missing config actually costs, measured rather than assumed: the app falls
+    # back to appsettings.json, which sets UseActualBluetoothHfp: false. That
+    # short-circuits BluetoothAdapterFactory.Create before any adapter is chosen, so
+    # hci0 is never touched and the Radio Console boundary is NOT crossed. Instead the
+    # service starts, `systemctl status` shows active, and the phone runs silently on
+    # MockBluetoothHfpAdapter with the template's HT801 address -- a dead phone
+    # reported as a healthy deploy, which is worse to diagnose, not better.
+    if ($prodScpExit -ne 0) { throw "failed to copy the initial appsettings.Production.json to ${SshTarget} (exit $prodScpExit) -- the box has NO production config; aborting before the service is restarted" }
   }
 }
 
@@ -153,7 +337,11 @@ $scriptsDir = Join-Path $RepoRoot "scripts"
 if (Test-Path $scriptsDir) {
   Write-Host "  Copying scripts..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/scripts"
+  $scriptsMkdirExit = $LASTEXITCODE
+  if ($scriptsMkdirExit -ne 0) { throw "failed to create ${TargetPath}/scripts on ${SshTarget} (exit $scriptsMkdirExit)" }
   scp -r ($scriptsDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+  $scriptsScpExit = $LASTEXITCODE
+  if ($scriptsScpExit -ne 0) { throw "failed to copy scripts/ to ${SshTarget} (exit $scriptsScpExit) -- the box would be left with stale or absent HFP monitor scripts" }
 }
 
 # Copy Chrome extension (GV Bridge) to both deploy path and snap-accessible path
@@ -161,8 +349,17 @@ $extensionDir = Join-Path $RepoRoot "ChromeExtension"
 if (Test-Path $extensionDir) {
   Write-Host "  Copying Chrome extension..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/ChromeExtension"
+  $extMkdirExit = $LASTEXITCODE
+  if ($extMkdirExit -ne 0) { throw "failed to create ${TargetPath}/ChromeExtension on ${SshTarget} (exit $extMkdirExit)" }
   scp -r ($extensionDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+  $extScpExit = $LASTEXITCODE
+  if ($extScpExit -ne 0) { throw "failed to copy ChromeExtension/ to ${SshTarget} (exit $extScpExit) -- the box would be left with a stale extension" }
   # Also update the snap-accessible copy if it exists (for running Chromium)
+  #
+  # ⚠ Deliberately NOT exit-checked, and it must stay that way. The remote side is
+  # already guarded by `if [ -d … ]`, the snap profile belongs to the SUPERSEDED
+  # legacy configuration (see setup-gvbridge.sh step 7), and its absence is the
+  # normal state on this box. Making this throw would fail every deploy.
   ssh $SshTarget "if [ -d ~/snap/chromium/common/gv-bridge-profile/Extension ]; then cp -r ${TargetPath}/ChromeExtension/* ~/snap/chromium/common/gv-bridge-profile/Extension/ && echo '  Extension updated in snap profile'; fi"
 }
 
@@ -201,11 +398,32 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   # Explicit modes rather than chmod +x: NTFS carries no permission bits, so the
   # mode on arrival is whatever the umask made it. 755 keeps the scripts runnable
   # without making them group-writable.
-  ssh $SshTarget "chmod 755 ${TargetPath}/deploy/*.sh 2>/dev/null; chmod 644 ${TargetPath}/deploy/systemd/* 2>/dev/null"
+  #
+  # ⛔ This used to be `chmod …/*.sh 2>/dev/null; chmod …/systemd/* 2>/dev/null`, whose
+  # status was the SECOND chmod's -- the same last-command-wins masking as the tar
+  # chain. The globs are now built only for groups that actually have files, so a
+  # non-zero status means a real failure rather than an unmatched glob, and the remote
+  # runs under `set -e`. It matters because setup-gvbridge.sh has to be executable for
+  # the deploy to be able to run it.
+  $chmodCmds = @()
+  if ($shellScripts.Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if ($unitFiles.Count -gt 0)    { $chmodCmds += "chmod 644 ${TargetPath}/deploy/systemd/*" }
+  if ($chmodCmds.Count -gt 0) {
+    ssh $SshTarget ("set -e; " + ($chmodCmds -join "; "))
+    $chmodDeployExit = $LASTEXITCODE
+    if ($chmodDeployExit -ne 0) { throw "failed to set modes on ${TargetPath}/deploy (exit $chmodDeployExit) -- setup-gvbridge.sh would not be executable on the box" }
+  }
 }
 
-# Ensure binary is executable
-ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server && chmod +x ${TargetPath}/scripts/*.py 2>/dev/null"
+# Ensure binary is executable.
+#
+# ⛔ The Server chmod must succeed: without it the service cannot start, and the
+# restart below would run anyway. The scripts/*.py chmod is best-effort on purpose --
+# the glob legitimately matches nothing when scripts/ carries no Python -- so it keeps
+# its own `|| true` rather than being allowed to abort the deploy.
+ssh $SshTarget "set -e; chmod +x ${TargetPath}/RotaryPhoneController.Server; chmod +x ${TargetPath}/scripts/*.py 2>/dev/null || true"
+$chmodBinExit = $LASTEXITCODE
+if ($chmodBinExit -ne 0) { throw "failed to make ${TargetPath}/RotaryPhoneController.Server executable (exit $chmodBinExit) -- the service would fail to start; NOT restarting" }
 
 Write-Host "  Files synced" -ForegroundColor Green
 
@@ -214,13 +432,40 @@ Write-Host "[4/4] Installing service..." -ForegroundColor Yellow
 
 $serviceFile = Join-Path $RepoRoot "deploy\rotary-phone.service"
 scp $serviceFile "${SshTarget}:/tmp/rotary-phone.service"
+$svcScpExit = $LASTEXITCODE
+# ⛔ Both of these were unchecked. A failed copy or a failed install left systemd on a
+# STALE unit, and the restart below then restarted into it -- while the script printed
+# "=== Deploy Complete ===". The `&&` chain already stops at the first failure; what was
+# missing was anyone reading its status.
+if ($svcScpExit -ne 0) { throw "failed to copy rotary-phone.service to ${SshTarget} (exit $svcScpExit) -- systemd would be left on the previous unit; NOT restarting" }
 ssh $SshTarget "sudo mv /tmp/rotary-phone.service /etc/systemd/system/rotary-phone.service && sudo systemctl daemon-reload && sudo systemctl enable rotary-phone.service"
+$svcInstallExit = $LASTEXITCODE
+if ($svcInstallExit -ne 0) { throw "failed to install rotary-phone.service on ${TargetHost} (exit $svcInstallExit) -- systemd is on a stale unit; NOT restarting" }
 
 if (-not $NoRestart) {
   Write-Host "  Restarting service..." -ForegroundColor Yellow
   ssh $SshTarget "sudo systemctl restart rotary-phone.service"
+  $restartExit = $LASTEXITCODE
+  # ⛔ The last silent failure in the script, and the loudest one to get wrong: an
+  # unchecked restart meant a service that failed to come up was reported as a
+  # successful deploy.
+  if ($restartExit -ne 0) { throw "systemctl restart rotary-phone.service FAILED on ${TargetHost} (exit $restartExit) -- the new binary is on the box but the service is not running it" }
   Start-Sleep -Seconds 2
+  # ⚠ Not exit-checked on purpose: this is a DISPLAY of the unit's state, and
+  # `systemctl status` returns non-zero for a unit that is merely inactive. The restart
+  # above is the gate; this is the operator's read of what happened.
+  #
+  # ⛔ $ErrorActionPreference is restored around it for a non-obvious reason. `2>&1` on
+  # a NATIVE command merges its stderr into the pipeline as ErrorRecords, and under
+  # $ErrorActionPreference = "Stop" (set at the top of this file) PowerShell turns the
+  # first of those into a terminating NativeCommandError. So anything ssh or sudo
+  # writes to stderr here -- a host-key notice, a sudo lecture -- would abort the
+  # deploy AFTER a successful restart and stop it printing "=== Deploy Complete ===".
+  # A status display must not be able to fail a deploy that already worked.
+  $eapPrev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   ssh $SshTarget "sudo systemctl status rotary-phone.service --no-pager -l" 2>&1 | Write-Host
+  $ErrorActionPreference = $eapPrev
 }
 
 Write-Host ""
@@ -231,5 +476,15 @@ Write-Host ""
 
 if ($Logs) {
   Write-Host "Tailing logs..." -ForegroundColor Yellow
+  # ⚠ Not exit-checked: an interactive follow that the operator ends with Ctrl-C, which
+  # is a non-zero exit and the normal way to leave it. The deploy is already complete
+  # and nothing runs after this.
+  #
+  # ⛔ But do NOT read this comment as an endorsement of `-f` on this box.
+  # docs/plans/deploy-tooling-honest-deploy-plan.md is explicit: "Bounded reads only on
+  # this box -- never journalctl -f or tail -f. It is an N100 shared with Radio Console
+  # and journald churn correlates with audible audio distortion there." This call
+  # predates that policy and survives only because -Logs is opt-in and the operator is
+  # sitting in front of it. Prefer `-n 200 --no-pager`. Do not add another follow.
   ssh $SshTarget "sudo journalctl -u rotary-phone.service -f --no-pager"
 }
