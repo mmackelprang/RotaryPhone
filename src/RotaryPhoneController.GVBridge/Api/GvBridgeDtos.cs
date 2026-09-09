@@ -16,9 +16,9 @@ public record GvCookieStatusDto(
 /// <summary>
 /// Typed response for GET /api/gvbridge/status. Serializes to camelCase JSON.
 /// The first four field NAMES (available, activeMode, sipRegistered, cookiesValid)
-/// are part of the established contract and must not be renamed. WsConnected,
-/// LastConnectedAt, and PsidtsAgeSeconds were added by the keep-alive/reconnect work
-/// so the endpoint reflects real socket + cookie freshness rather than stale flags.
+/// are part of the established contract and must not be renamed. WsConnected and
+/// LastConnectedAt were added by the keep-alive/reconnect work so the endpoint
+/// reflects real socket freshness rather than stale flags.
 /// </summary>
 public record GvBridgeStatusDto(
   [property: JsonPropertyName("available")] bool Available,
@@ -27,7 +27,6 @@ public record GvBridgeStatusDto(
   [property: JsonPropertyName("wsConnected")] bool WsConnected,
   [property: JsonPropertyName("lastConnectedAt")] DateTime? LastConnectedAt,
   [property: JsonPropertyName("cookiesValid")] bool CookiesValid,
-  [property: JsonPropertyName("psidtsAgeSeconds")] long? PsidtsAgeSeconds,
   // Added by the registration-resilience watchdog: degraded = NOT (cookies valid AND registered);
   // lastHealthyAt = last time both held. Appended to preserve the existing field contract.
   [property: JsonPropertyName("degraded")] bool Degraded = false,
@@ -46,12 +45,13 @@ public record GvBridgeStatusDto(
   [property: JsonPropertyName("lastApiAuthFailureAt")] DateTime? LastApiAuthFailureAt = null,
   // Added by the 2026-09-08 first-refresh-anchor work.
   //
-  // psidtsMintedAtUtc is the HONEST replacement for the deprecated psidtsAgeSeconds above. That field
-  // is stamped on every cookie LOAD, not on every mint, so it resets to ~0 on each restart and reload
-  // and reads reassuringly low for a credential that is days old — which is how a two-day Google
-  // session death went unnoticed from 2026-09-06 to 2026-09-08. psidtsAgeSeconds keeps its position
-  // and its exact semantics because it is a published cross-repo contract; correcting it in place
-  // would silently change values a consumer already binds to. Prefer this field for new work.
+  // psidtsMintedAtUtc REPLACES psidtsAgeSeconds, which was REMOVED on 2026-09-08 — do not restore it.
+  // It was named for credential age but stamped on every cookie LOAD, not on every mint, so it reset
+  // to ~0 on each restart and reload and read reassuringly low for a credential that was days old —
+  // which is how a two-day Google session death went unnoticed from 2026-09-06 to 2026-09-08. It was
+  // first frozen and deprecated rather than deleted because Radio Console consumed it as a published
+  // blackout clock; once Radio Console retracted those bands and no consumer remained, the field was
+  // removed outright so its misleading name could not re-seed the doctrine.
   //
   // A TIMESTAMP rather than an age, deliberately: an age is computed at serialisation time and is only
   // true at the instant of the response, while a mint time cannot be faked by a reload — precisely the

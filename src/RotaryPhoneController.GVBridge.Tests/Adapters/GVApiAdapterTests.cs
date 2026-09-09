@@ -66,13 +66,6 @@ public class GVApiAdapterTests
     }
 
     [Fact]
-    public void PsidtsAgeSeconds_BeforeActivate_ReturnsNull()
-    {
-        var adapter = CreateAdapter();
-        Assert.Null(adapter.PsidtsAgeSeconds);
-    }
-
-    [Fact]
     public void Degraded_BeforeActivate_IsFalse()
     {
         // Not activated/available → not "degraded" (that's conveyed by available:false instead);

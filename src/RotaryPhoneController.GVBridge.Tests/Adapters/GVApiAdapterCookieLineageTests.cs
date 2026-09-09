@@ -164,14 +164,6 @@ public class GVApiAdapterCookieLineageTests
             Math.Abs((adapter.PsidtsMintedAtUtc!.Value - minted).TotalSeconds) < 1,
             $"expected the persisted mint time {minted:O}, got {adapter.PsidtsMintedAtUtc:O}");
 
-        // ⚠ FREEZE PIN. psidtsAgeSeconds is a live cross-repo contract (Radio Console binds published
-        // bands to it) and its observable behaviour is deliberately unchanged: a mere LOAD still
-        // restamps it, so it reads ~0 here for a credential that is genuinely 42 minutes old. That is
-        // the documented, frozen lie. Changing this assertion must be a conscious contract decision,
-        // not a drive-by "fix" — the honest value is PsidtsMintedAtUtc, asserted above.
-        Assert.NotNull(adapter.PsidtsAgeSeconds);
-        Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 0, 5);
-
         File.Delete(path);
     }
 
@@ -194,59 +186,9 @@ public class GVApiAdapterCookieLineageTests
         // Unknown is null and null is self-describing — a consumer cannot mistake it for "fresh".
         Assert.Null(adapter.PsidtsMintedAtUtc);
 
-        // ...while the FROZEN field is NOT null after a load, exactly as it has always been.
-        Assert.NotNull(adapter.PsidtsAgeSeconds);
-
         File.Delete(path);
     }
 
-    [Fact]
-    public async Task PsidtsAgeSeconds_IsFrozen_AndStillRestampsOnEveryLoad()
-    {
-        // ⛔ THE GUARD ON A DELIBERATE DECISION. This test's entire job is to FAIL if someone later
-        // "corrects" psidtsAgeSeconds to report the true credential age.
-        //
-        // psidtsAgeSeconds is a published cross-repo contract: Radio Console uses it as a blackout
-        // predictor with bands (<660 healthy, 660-1200 blackout) and RotaryPhone promised in writing
-        // that it "stays exactly as it is". So the field's observable behaviour is frozen — including
-        // the fact that a mere LOAD restamps it and hides a credential's real age.
-        //
-        // If you are here because this test failed, you did not find a bug; you changed a contract.
-        // Ship the honest value under PsidtsMintedAtUtc (already present, already derived from the
-        // cookie set) and take the contract change to the consuming repo first.
-        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
-        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
-
-        // A credential minted two days ago — the exact 2026-09-06 -> 2026-09-08 shape.
-        var minted = DateTime.UtcNow.AddDays(-2);
-        await store.SaveAsync(
-            GVApiAdapterRecoveryTests.NewCookies().WithRefreshedPsidts("p1", "p3", minted));
-
-        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
-        adapter.HealthProbeOverride = _ => Task.FromResult(true);
-        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
-
-        Assert.True(await adapter.ReloadCookiesAsync());
-
-        // Frozen behaviour: reads ~0 for a two-day-old credential, because the LOAD restamped it.
-        Assert.NotNull(adapter.PsidtsAgeSeconds);
-        Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 0, 5);
-
-        // ...and the honest field tells the truth about the same credential at the same instant.
-        Assert.NotNull(adapter.PsidtsMintedAtUtc);
-        Assert.InRange(
-            (DateTime.UtcNow - adapter.PsidtsMintedAtUtc!.Value).TotalHours, 47.5, 48.5);
-
-        // Load it a SECOND time: the frozen field restamps again, the mint time does not move.
-        var mintedAfterFirstLoad = adapter.PsidtsMintedAtUtc!.Value;
-        await Task.Delay(1100);
-        Assert.True(await adapter.ReloadCookiesAsync());
-
-        Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 0, 5);          // restamped, as designed
-        Assert.Equal(mintedAfterFirstLoad, adapter.PsidtsMintedAtUtc!.Value);   // immovable
-
-        File.Delete(path);
-    }
     // ------------- §2.3 ⭐ a failed recovery must not destroy the last known-good cookie set
 
     private sealed class FakeCdpExtractor(CdpExtractionResult result) : ICdpCookieExtractor
@@ -324,20 +266,27 @@ public class GVApiAdapterCookieLineageTests
     }
 
     [Fact]
-    public async Task CdpRefresh_RejectedCandidate_DoesNotDisturbTheFrozenPsidtsAgeSeconds()
+    public async Task CdpRefresh_RejectedCandidate_DoesNotDisturbPsidtsMintedAtUtc()
     {
-        // The freeze, on the rollback path. A rejected candidate must leave psidtsAgeSeconds exactly
-        // where it was — the field is a published cross-repo contract and a failed refresh is not an
-        // event a consumer should see in it.
+        // The rollback path, seen through the credential-lineage field a consumer actually reads. A
+        // rejected candidate must leave psidtsMintedAtUtc exactly where it was: the refresh did not
+        // happen, so nothing about the held credential's age changed, and a failed refresh is not an
+        // event that should surface as either a reset OR a null.
+        //
+        // (This test replaced a freeze pin on psidtsAgeSeconds, which was removed on 2026-09-08. The
+        // rollback of the cookie SET itself is asserted by
+        // CdpRefresh_WhenExtractedCookiesAreRejected_LeavesTheStoredGoodSetIntact above; what is
+        // unique here is that the lineage timestamp rides through the rollback untouched.)
         var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
         var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
-        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD");
+        var minted = DateTime.UtcNow.AddSeconds(-300);
+        var good = GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD")
+            .WithRefreshedPsidts("psidts-1", "psidts-3", minted);
         await store.SaveAsync(good);
 
         var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
         GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
         GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", good);
-        GVApiAdapterRecoveryTests.SetField(adapter, "_psidtsRefreshedAt", DateTime.UtcNow.AddSeconds(-300));
         GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
         adapter.SetCookieExtractor(new FakeCdpExtractor(new CdpExtractionResult(
             CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-DEAD"), 20, null)));
@@ -345,9 +294,9 @@ public class GVApiAdapterCookieLineageTests
 
         await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
 
-        // Untouched: still ~300 s, not reset to 0 and not made null.
-        Assert.NotNull(adapter.PsidtsAgeSeconds);
-        Assert.InRange(adapter.PsidtsAgeSeconds!.Value, 295, 310);
+        // Untouched: still the original mint time, not re-stamped to now and not made null.
+        Assert.NotNull(adapter.PsidtsMintedAtUtc);
+        Assert.Equal(minted, adapter.PsidtsMintedAtUtc!.Value);
 
         File.Delete(path);
     }

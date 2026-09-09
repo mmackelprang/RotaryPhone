@@ -108,14 +108,21 @@ public class GVBridgeControllerTests
   }
 
   [Fact]
-  public void GetStatus_PsidtsAgeSeconds_KeepsItsNameAndItsPlace()
+  public void GetStatus_PsidtsAgeSeconds_IsGone_AndTheRemainingFieldsKeepTheirNamesAndOrder()
   {
-    // ⛔ CONTRACT PIN. psidtsAgeSeconds is a live cross-repo field: Radio Console binds published
-    // bands to it (<660 healthy, 660-1200 blackout) and RotaryPhone promised in writing that it
-    // "stays exactly as it is". It was NOT corrected in place, was NOT renamed, and was NOT moved
-    // behind the new fields — the honest value ships alongside it as psidtsMintedAtUtc.
+    // ⛔ ABSENCE PIN — the inverse of the contract pin this replaces. psidtsAgeSeconds was REMOVED
+    // on 2026-09-08 and must not come back. It was named for credential age but stamped on every
+    // cookie LOAD, so it reset to ~0 on every restart and reload and read reassuringly low for a
+    // credential that was days old — the mechanism behind the 2026-09-06 -> 2026-09-08 blackout going
+    // unnoticed. It was kept frozen for a while only because Radio Console bound published bands to
+    // it; Radio Console retracted those bands (their PR #622) and no consumer remains. The honest
+    // value is psidtsMintedAtUtc.
     //
-    // If this fails you are changing a contract, not fixing a bug. Take it to the consuming repo first.
+    // If you are here to "restore" the field: don't. Ship the honest timestamp instead.
+    //
+    // The rest of this test is still the original pin's job. This payload's field NAMES and their
+    // ORDER are a cross-repo contract, and that remains true of everything that survives — so the
+    // full surviving sequence is asserted, not just the neighbours of the removed field.
     var controller = CreateController();
 
     var result = controller.GetStatus();
@@ -126,16 +133,30 @@ public class GVBridgeControllerTests
 
     var names = doc.RootElement.EnumerateObject().Select(p => p.Name).ToList();
 
-    Assert.Contains("psidtsAgeSeconds", names);
-    Assert.Contains("psidtsMintedAtUtc", names);
+    Assert.DoesNotContain("psidtsAgeSeconds", names);
 
-    // Still ahead of every field appended after it, so the payload order a consumer may have
-    // eyeballed is unchanged.
-    Assert.True(names.IndexOf("psidtsAgeSeconds") < names.IndexOf("psidtsMintedAtUtc"));
-    Assert.True(names.IndexOf("psidtsAgeSeconds") < names.IndexOf("authBlackout"));
-
-    // Nullable, exactly as before — an un-activated adapter holds no cookie set.
-    Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("psidtsAgeSeconds").ValueKind);
+    Assert.Equal(
+      new[]
+      {
+        "available",
+        "activeMode",
+        "sipRegistered",
+        "wsConnected",
+        "lastConnectedAt",
+        "cookiesValid",
+        "degraded",
+        "lastHealthyAt",
+        "throttledUntil",
+        "throttleReason",
+        "authBlackout",
+        "lastApiSuccessAt",
+        "lastApiAuthFailureAt",
+        "psidtsMintedAtUtc",
+        "browserSessionValidatedAt",
+        "browserSessionAgeSeconds",
+        "browserSessionStale",
+      },
+      names);
   }
 
   [Fact]

@@ -40,19 +40,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private bool _disposed;
     private bool _areCookiesValid;
 
-    // When this process last LOADED OR MINTED the rotating freshness cookies (PSIDTS), in UTC.
-    //
-    // ⚠ The name says "refreshed"; the value is stamped on a mere LOAD as well, so it resets to ~0 on
-    // every restart and every reload for a credential that may be days old. That is a defect
-    // (docs/KNOWN-ISSUES.md finding L2) and it is FROZEN DELIBERATELY — PsidtsAgeSeconds, which reads
-    // this field, is a published cross-repo contract and correcting it in place would silently change
-    // values a consumer already binds to. Do not "fix" this without a conscious contract decision;
-    // GVApiAdapterCookieLineageTests.PsidtsAgeSeconds_IsFrozen_AndStillRestampsOnEveryLoad guards it.
-    //
-    // The honest credential lineage is PsidtsMintedAtUtc, which is derived straight from the cookie
-    // set and has no write site at all.
-    private DateTime? _psidtsRefreshedAt;
-
     // Last time the adapter was fully healthy (cookies valid AND SIP registered), set by the watchdog.
     private DateTime? _lastHealthyAt;
 
@@ -222,27 +209,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
 
     /// <summary>Human-readable reason for the active throttle cooldown, or null when not throttled.</summary>
     public string? ThrottleReason => _sipTransport?.ThrottleReason;
-
-    /// <summary>
-    /// ⚠ DEPRECATED — reports the age of the last cookie LOAD, not the age of the credential.
-    /// Prefer <see cref="PsidtsMintedAtUtc"/>.
-    /// </summary>
-    /// <remarks>
-    /// Seconds since this process last loaded OR minted the rotating freshness cookies
-    /// (__Secure-1PSIDTS/3PSIDTS). Because a mere LOAD restamps it, it resets to ~0 on every restart and
-    /// on every reload — so it reads reassuringly low for a credential that is in fact days old. That is
-    /// how a two-day Google session death went unnoticed from 2026-09-06 to 2026-09-08, and it is
-    /// recorded as finding L2 in docs/KNOWN-ISSUES.md.
-    ///
-    /// The behaviour is FROZEN, deliberately: this field is a published cross-repo contract and
-    /// correcting it in place would silently change values a consumer already binds to. The honest
-    /// value is the new <see cref="PsidtsMintedAtUtc"/> timestamp; this field is retained only for
-    /// compatibility and should not be used for new work.
-    /// </remarks>
-    public long? PsidtsAgeSeconds =>
-        _psidtsRefreshedAt is { } refreshed
-            ? (long)Math.Max(0, (DateTime.UtcNow - refreshed).TotalSeconds)
-            : null;
 
     /// <summary>
     /// UTC instant Google actually MINTED the PSIDTS this adapter currently holds, as carried by the
@@ -508,7 +474,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _cookieStore = incomingStore;
         _cookieSet = incomingCookies;
         LoadedAt = _cookieSet != null ? DateTime.UtcNow : null;
-        _psidtsRefreshedAt = _cookieSet != null ? DateTime.UtcNow : null;
 
         if (_cookieSet == null || string.IsNullOrEmpty(_cookieSet.Sapisid))
         {
@@ -796,7 +761,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         _areCookiesValid = false;
         LoadedAt = null;
         LastValidatedAt = null;
-        _psidtsRefreshedAt = null;
 
         // Data-plane outcome timestamps are per-generation too. Leaving them set would carry a
         // stale authBlackout:true from the torn-down generation into the freshly re-activated one
@@ -850,7 +814,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
 
         _cookieSet = newCookies;
         LoadedAt = DateTime.UtcNow;
-        _psidtsRefreshedAt = DateTime.UtcNow;
 
         // Re-create the authenticated HttpClient + account client with the updated cookies. This
         // CONSTRUCTS AND PUBLISHES BEFORE DISPOSING the old client (it used to dispose first), which
@@ -1410,15 +1373,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             {
                 _areCookiesValid = true;
                 LoadedAt = DateTime.UtcNow;
-
-                // ⚠ DateTime.UtcNow, not candidate.PsidtsMintedAtUtc — deliberately.
-                // This method REPLACES the old TryCdpRefreshAsync -> ReloadCookiesAsync call path, and
-                // ReloadCookiesAsync stamps DateTime.UtcNow here. psidtsAgeSeconds is a published
-                // cross-repo contract whose observable behaviour is frozen (see PsidtsAgeSeconds), so
-                // stamping anything else would change its values on this path and break that freeze.
-                // The honest credential lineage travels on the cookie set and is read back through
-                // PsidtsMintedAtUtc, which needs no write site here at all.
-                _psidtsRefreshedAt = DateTime.UtcNow;
                 return true;
             }
 
@@ -1636,7 +1590,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         // Overlay the refreshed PSIDTS so ToCookieHeader() stops replaying the stale values.
         var refreshed = current.WithRefreshedPsidts(result.Psidts1, result.Psidts3);
         _cookieSet = refreshed;
-        _psidtsRefreshedAt = DateTime.UtcNow;
 
         // Persist so a restart / other paths pick up the fresh cookies.
         if (_cookieStore != null)
