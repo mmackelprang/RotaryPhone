@@ -390,33 +390,26 @@ if (!app.Environment.IsDevelopment())
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// Handle CORS for GV Bridge event endpoint BEFORE the general CORS middleware
-// (content script on voice.google.com POSTs call events to this endpoint)
-app.Use(async (context, next) =>
-{
-    var path = context.Request.Path.Value ?? "";
-    if (path.Contains("gvbridge/event", StringComparison.OrdinalIgnoreCase))
-    {
-        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
-        context.Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
-        context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type";
-        context.Response.Headers["X-GVBridge-CORS"] = "handled";
-        if (context.Request.Method == "OPTIONS")
-        {
-            context.Response.StatusCode = 204;
-            await context.Response.CompleteAsync();
-            return;
-        }
-    }
-    await next();
-});
+// A bespoke CORS block for /api/gvbridge/event used to sit here, ahead of the general policy. It was
+// removed on 2026-09-09 along with the matching auth-gate exemption: the browser-extension relay it
+// served was deleted by design in March 2026 and no route for that path has existed since.
+//
+// Two reasons its removal is a security improvement, not just tidying:
+//   1. It set Access-Control-Allow-Origin: * — a wildcard origin.
+//   2. It matched on path.Contains("gvbridge/event") — a SUBSTRING test. The auth middleware was
+//      hardened against exactly that in review MEDIUM-1 (anchoring to a segment boundary); this block
+//      never got the same fix. So a sibling like /api/gvbridge/eventlog was correctly gated by auth
+//      while still being handed wildcard CORS by this block.
+//
+// Unmatched /api/gvbridge/* paths now fall through to the /api/{**rest} 404 (see the fallback below).
 
 // Enable CORS
 app.UseCors("AllowClients");
 
 // Inter-service auth gate (ADR §6.5): gate /api/gvbridge/* behind X-RotaryPhone-Auth when a key is
 // configured. Runs AFTER UseCors (so preflight still works) and BEFORE the endpoints. Default-off:
-// with no key it is a pass-through, exempting /api/gvbridge/event (the extension content-script path).
+// with no key it is a pass-through. No path is exempt — see the middleware's own doc comment for the
+// /api/gvbridge/event carve-out that was removed on 2026-09-09 and why it must not come back.
 app.UseMiddleware<RotaryPhoneController.Server.Middleware.GvBridgeAuthMiddleware>();
 
 // Static Files - Defaults to wwwroot

@@ -253,6 +253,12 @@ until we confirm unread works (stated in the reply).
 
 ### 6.2 Auth posture — already covered by PR5, no special handling (Q8)
 
+> ⚠ **Updated 2026-09-09 — the exemption named below no longer exists.** `/api/gvbridge/event` was
+> removed from `GvBridgeAuthMiddleware` along with its bespoke CORS block: it had no controller route
+> and had not had one since the relay it served was deleted by design in March 2026. The gate now has
+> **no exemptions at all**, which makes the "one gate, applied consistently" property below stronger
+> than it was when written, not weaker. See `docs/KNOWN-ISSUES.md`.
+
 **Confirmed: no special auth posture for mark-read.** PR5's `GvBridgeAuthMiddleware` gates on
 `path.StartsWith("/api/gvbridge", ...)` (exempting only the exact `/api/gvbridge/event` segment). Both
 new routes live under `/api/gvbridge/...`, so they are **auto-covered the moment `InterServiceAuthKey`

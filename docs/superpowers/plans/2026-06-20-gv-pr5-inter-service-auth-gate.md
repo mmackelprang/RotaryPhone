@@ -1,5 +1,13 @@
 # PR5 Plan — `feat(gv): inter-service auth gate (X-RotaryPhone-Auth)`
 
+> 📌 **HISTORICAL RECORD — one decision in this plan was reversed on 2026-09-09.** This file is kept
+> as written; do not read it as current. The plan's `/api/gvbridge/event` exemption (and the bespoke
+> CORS block it depended on) **have been removed** — the path had no controller route, and had not had
+> one since the service-worker relay it served was deleted by design in March 2026. Everything else in
+> the plan shipped and still stands. Current behaviour: **no exemptions**, every `/api/gvbridge/*`
+> path gated uniformly. See `docs/KNOWN-ISSUES.md` and
+> `docs/handoffs/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
+
 > ## 🔒 OWNER-HOLD — DO NOT BUILD OR MERGE WITHOUT EXPLICIT OWNER APPROVAL
 > **Reason:** This PR **touches auth/secret handling** — it introduces a shared secret that gates the
 > credential-adjacent `/api/gvbridge/cookies` endpoints, private voicemail audio, and the SMS-send

@@ -149,10 +149,14 @@ and the HT801 address, in addition to the BT keys above.
 confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
 
 
-## ⚠️ OPEN — `/api/gvbridge/event` has no route, but two middlewares still special-case it (found 2026-09-09)
+## `/api/gvbridge/event` had no route, but two middlewares still special-cased it (RESOLVED 2026-09-09)
 
-**Status:** ⚠️ **OPEN — needs an owner decision.** Found while fixing the `/api/*` fallback below;
-**not** introduced by it. Left in place deliberately rather than fixed in an unrelated PR.
+**Status:** ✅ **Resolved by `fix/remove-gvbridge-event-carveouts`.** The owner's decision was to
+**remove both carve-outs**. Recorded below as found, then the resolution — the finding's reasoning is
+kept intact rather than rewritten, because *why* it stayed invisible is the reusable part.
+
+Found while fixing the `/api/*` fallback below; **not** introduced by it, and deliberately left out of
+that PR rather than fixed in an unrelated change.
 
 **There is no controller route for `/api/gvbridge/event`.** No `[HttpPost("event")]`, no
 `[Route("event")]` — anywhere. Two middlewares nonetheless still carve it out:
@@ -183,6 +187,34 @@ already failing before the 404 change — the change only makes it audible.
 2. **The auth exemption is the part that matters.** It punches a permanent hole in the
    `/api/gvbridge/*` gate for a path that does not exist. Harmless today — there is nothing behind
    it to reach — but a future route added at that path would be **born unauthenticated**, silently.
+
+### Resolution (2026-09-09) — both carve-outs removed
+
+The owner chose **removal**. `GvBridgeAuthMiddleware`'s exemption and the bespoke CORS block in
+`Program.cs` are both gone; every `/api/gvbridge/*` path is now gated uniformly, and the gate remains
+default-off when no key is configured.
+
+**The CORS block's removal was a security improvement in its own right**, for a reason not visible in
+the original finding: it set **`Access-Control-Allow-Origin: *`** and matched on
+`path.Contains("gvbridge/event")` — a **substring**. Review MEDIUM-1 had anchored the *auth*
+exemption to a segment boundary precisely so `/api/gvbridge/eventlog` would not be wrongly exempted;
+**the CORS block never got that fix.** So that sibling path was correctly gated by auth while still
+being handed wildcard CORS.
+
+Pinned by four tests in `GvBridgeAuthMiddlewareTests` — `/api/gvbridge/event` and `/event/status` now
+`401` without a header, `200` with a valid one (proving it is gated, not hard-denied), and still
+ungated when no key is set. Negative control: restoring the exemption fails exactly the two tests
+that pin its removal.
+
+⚠ **The published contract changed.** The boundary doc's Inter-service auth row previously promised
+Radio Console that this path *"stays open — never gated"*. That sentence is withdrawn, with a dated
+Change Log entry and a notice at
+`docs/handoffs/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
+
+**The lesson worth keeping:** the carve-outs had been reviewed, hardened, documented, and published as
+a cross-repo contract — and nobody checked whether the endpoint they protected still existed. It had
+been deleted by design six months earlier. Careful work, correctly executed, on something that should
+not have been there.
 
 ## Unmatched `/api/*` returned HTTP 200 with `index.html` instead of a 404 (RESOLVED 2026-09-09)
 

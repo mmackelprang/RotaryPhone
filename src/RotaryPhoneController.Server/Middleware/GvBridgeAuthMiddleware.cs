@@ -5,10 +5,17 @@ namespace RotaryPhoneController.Server.Middleware;
 /// <summary>
 /// Gates every /api/gvbridge/* REST endpoint behind X-RotaryPhone-Auth when a key is configured
 /// (ADR §6.5). Default-off: with no key, this is a pass-through and today's LAN behavior is unchanged.
-/// EXCEPTION: /api/gvbridge/event stays open — it is the browser-extension content-script callback
-/// (CORS-handled in Program.cs), not a RadioConsole consumer endpoint, and gating it would break the
-/// extension. All other /api/gvbridge/* paths (status, adapter/mode, cookies, voicemail, sms, sms/send)
-/// are gated uniformly — "one gate, applied consistently" (ADR §6.5).
+///
+/// There are NO exemptions. Every /api/gvbridge/* path — status, adapter/mode, cookies, voicemail,
+/// sms, sms/send, mark-read — is gated uniformly: "one gate, applied consistently" (ADR §6.5).
+///
+/// ⚠ HISTORY (2026-09-09): /api/gvbridge/event used to be exempt, for a browser-extension
+/// content-script callback. That relay was deleted by design in March 2026 (see the migration spec's
+/// "What Gets Deleted": "Service worker HTTP relay for call events — no longer needed"), and no route
+/// for it has existed since. The exemption outlived the endpoint, leaving a permanent hole in the
+/// gate for a path that did not exist — so a route later added at /api/gvbridge/event would have been
+/// born unauthenticated, silently. Do not reintroduce a carve-out here without a live endpoint that
+/// genuinely cannot carry the header; GvBridgeAuthMiddlewareTests pins the uniformity.
 /// </summary>
 public class GvBridgeAuthMiddleware
 {
@@ -32,14 +39,8 @@ public class GvBridgeAuthMiddleware
 
         var path = context.Request.Path.Value ?? "";
         var isGvBridge = path.StartsWith("/api/gvbridge", StringComparison.OrdinalIgnoreCase);
-        // Exempt ONLY the exact /api/gvbridge/event segment (and any sub-path of it), not a substring —
-        // a Contains("/gvbridge/event") match would wrongly exempt a hypothetical future sibling like
-        // /api/gvbridge/eventlog from the auth gate (review MEDIUM-1). Anchor to a segment boundary.
-        var isExtensionEvent =
-            path.Equals("/api/gvbridge/event", StringComparison.OrdinalIgnoreCase) ||
-            path.StartsWith("/api/gvbridge/event/", StringComparison.OrdinalIgnoreCase);
 
-        if (isGvBridge && !isExtensionEvent)
+        if (isGvBridge)
         {
             var header = context.Request.Headers[HeaderName].ToString();
             if (!_validator.IsAuthorized(string.IsNullOrEmpty(header) ? null : header))

@@ -1471,6 +1471,10 @@ gated. **No code for this task in the path-a PR.**
 > gates `path.StartsWith("/api/gvbridge", ...)` and exempts only the exact `/api/gvbridge/event` segment —
 > both new routes (`.../voicemail/{id}/read`, `.../sms/threads/{threadId}/read`) are under the prefix and
 > are NOT the event segment, so they ARE gated. The PR5 test project is `RotaryPhoneController.Server.Tests`.
+>
+> 📌 **Historical note (2026-09-09):** the `/api/gvbridge/event` exemption referenced above no longer
+> exists — it was removed along with its CORS block, so the gate now has no exceptions. The conclusion
+> here is unchanged and, if anything, simpler: the mark-read routes are gated by the prefix alone.
 
 **Files:**
 - Modify: a middleware test in `src/RotaryPhoneController.Server.Tests/` (the PR5 `GvBridgeAuthMiddleware`
