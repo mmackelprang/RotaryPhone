@@ -530,10 +530,34 @@ corroboration, one level up again.**
 **Therefore the deploy trigger verifies the INSTALLED ARTEFACT, not the merge:**
 
 ```bash
-# Radio Console's launcher — must no longer read the removed field
-ssh mmack@radio "grep -c psidtsAgeSeconds /usr/local/bin/radio-console-open"   # expect 0
-ssh mmack@radio "grep -c lastApiSuccessAt /usr/local/bin/radio-console-open"   # expect >= 1
+# Radio Console's launcher — the ONLY discriminator between old and new
+ssh mmack@radio "grep -c lastApiSuccessAt /usr/local/bin/radio-console-open"
+#   0  -> OLD launcher, KIOSK-3 NOT installed
+#   6  -> NEW launcher, KIOSK-3 installed
 ```
+
+⛔ **Do NOT check `grep -c psidtsAgeSeconds` and expect 0. An earlier version of this section said to,
+and that check is defective** — it is recorded here rather than deleted because the way it failed is the
+most instructive thing in this file.
+
+**Both versions contain exactly 3.** The fixed launcher deliberately keeps the name in **comments
+documenting why the field was retired** (`origin/main` lines 23, 98, 122). Verified independently from
+their merged file rather than taken on report:
+
+| | `psidtsAgeSeconds` | `lastApiSuccessAt` |
+|---|---|---|
+| OLD (installed) | **3** | 0 |
+| NEW (`origin/main`) | **3** | 6 |
+
+⚠ **So the check would have reported FAILURE on a SUCCESSFUL install**, and the natural response —
+reinstall and re-measure — would have produced the same 3 forever. **Nobody would have questioned the
+ruler.** The author reasoned "the fix removes the field, so the name should disappear": plausible, and
+false, because good practice keeps a retired name in the comment that explains the retirement.
+
+⭐ **Check for the presence of what the fix ADDS, not the absence of what it removes.** An absence test
+assumes the fixed artefact is silent about the thing it fixed, and well-written code is usually the
+opposite — it explains itself. This is the same defect as the `src/`-scoped greps and the false status
+fields: **an instrument that cannot distinguish the two states it exists to distinguish.**
 
 **Verify the artefact that will actually run, on the machine it will run on.** A commit, a green deploy,
 and a status field are all proxies; the installed file is the fact.
@@ -579,14 +603,26 @@ ordering — theirs first, then ours — is safe because of this overlap rather 
 compared against:**
 
 ```
-grep -c psidtsAgeSeconds /usr/local/bin/radio-console-open   ->  3   (gate expects 0)
-grep -c lastApiSuccessAt /usr/local/bin/radio-console-open   ->  0   (gate expects >= 1)
+grep -c psidtsAgeSeconds /usr/local/bin/radio-console-open   ->  3   ⚠ MEANINGLESS — both versions are 3
+grep -c lastApiSuccessAt /usr/local/bin/radio-console-open   ->  0   ✅ the real signal: OLD launcher
 ```
 
-**The old launcher is installed, exactly as predicted.** Nothing is broken today: the box still runs the
-pre-#78 build, which still serves `psidtsAgeSeconds`, so old launcher and old payload are consistent.
-⭐ **Note this measurement was run by the owner directly, not by either session** — so the install half
-of the gate *can* be dual-verified on request even while this session has no box access.
+**The old launcher is installed** — established by the *second* line only. Nothing is broken today: the
+box still runs the pre-#78 build, which still serves `psidtsAgeSeconds`, so old launcher and old payload
+are consistent.
+
+⭐ **This measurement is also the evidence that caught the defective check.** The owner's `3` disagreed
+with the expected `0`, and the disagreement was read as "not installed yet" — which happened to be true,
+so the broken instrument produced a correct conclusion and survived. **Had the install already
+happened, the same 3 would have read as failure.** A check that is wrong and agrees with reality is
+harder to catch than one that is wrong and contradicts it.
+
+⭐ **Run by the owner directly, not by either session** — so the install half of the gate *can* be
+dual-verified on request even while this session has no box access.
+
+**Merge state, verified independently from Radio Console's repo (2026-09-09):** `origin/main` moved
+`33915a11` → **`500ff8e9`**, carrying `1bd78daa` (KIOSK-3, #635) and `500ff8e9` (#636).
+**KIOSK-3 is merged; only the install remains.**
 
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
