@@ -24,7 +24,22 @@ public interface IBellFailureTracker
     /// </summary>
     void RecordSuccess(string phoneId);
 
-    /// <summary>Marks the stored failure acknowledged (the user dismissed the note). Idempotent; returns false if there was nothing to acknowledge.</summary>
+    /// <summary>
+    /// Marks the stored failure acknowledged (the user dismissed the note). Idempotent.
+    ///
+    /// <para>
+    /// ⚠ The bool reports whether <b>THIS CALL</b> changed state — false when there was nothing to
+    /// acknowledge, or when it was already acknowledged. It is <b>not</b> the HTTP response's
+    /// <c>acknowledged</c> field, which deliberately answers <c>true</c> regardless because it
+    /// reports the post-condition (see PhoneController.AcknowledgeBellFailure). Conflating the two
+    /// is what made a documented-idempotent endpoint report failure on a retry.
+    /// </para>
+    ///
+    /// <para>
+    /// A false return is <b>not</b> "did nothing at all": acking an already-acknowledged failure
+    /// re-persists it, so a retry can repair a write that never reached disk. See the implementation.
+    /// </para>
+    /// </summary>
     bool Acknowledge(string phoneId);
 
     BellFailureRecord? Get(string phoneId);
@@ -176,8 +191,25 @@ public sealed class BellFailureTracker : IBellFailureTracker
         {
             if (!_failures.TryGetValue(phoneId, out var existing) || existing.Acknowledged)
             {
-                // Nothing to acknowledge (or already acknowledged). Idempotent by design — the caller
-                // returns 200 with acknowledged=false rather than 404.
+                // Nothing to acknowledge (or already acknowledged). Idempotent by design — false here
+                // means only "this call changed nothing"; the HTTP caller still returns 200 with
+                // acknowledged=true, because the post-condition holds either way.
+
+                // ...but "changed nothing in memory" must not mean "wrote nothing to disk". Persist is
+                // best-effort by design (it swallows I/O errors so a bell-failure recording can never
+                // be broken by a full disk), so the flip below can succeed in memory while the write
+                // never lands. A repeat ack is exactly the retry the published contract invites —
+                // docs/handoffs/radioconsole-bell-failure-reply.md §5 tells Radio Console to "retry
+                // freely on a flaky network" — and the failure most likely to accompany a dropped
+                // response is the one that also lost the write. Re-persisting here is what lets that
+                // retry REPAIR it, instead of no-opping and leaving a restart to resurrect a note the
+                // operator already dismissed.
+                //
+                // Only when a record actually exists and is already acknowledged: with no record at
+                // all there is nothing to repair, and writing would be pure churn on every ack of a
+                // healthy phone.
+                if (existing is { Acknowledged: true }) Persist();
+
                 return false;
             }
 

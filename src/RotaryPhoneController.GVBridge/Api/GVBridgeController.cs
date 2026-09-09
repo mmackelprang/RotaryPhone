@@ -48,7 +48,6 @@ public class GVBridgeController : ControllerBase
             WsConnected: _adapter.IsWebSocketConnected,
             LastConnectedAt: _adapter.SipLastConnectedAt,
             CookiesValid: _adapter.AreCookiesValid,
-            PsidtsAgeSeconds: _adapter.PsidtsAgeSeconds,
             Degraded: _adapter.Degraded,
             LastHealthyAt: _adapter.LastHealthyAt,
             ThrottledUntil: _adapter.ThrottledUntil,

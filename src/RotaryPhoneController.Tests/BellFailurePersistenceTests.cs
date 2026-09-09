@@ -57,6 +57,52 @@ public class BellFailurePersistenceTests : IDisposable
     }
 
     [Fact]
+    public void RepeatAcknowledge_RepairsAnAckWriteThatNeverLanded()
+    {
+        // docs/handoffs/radioconsole-bell-failure-reply.md §5 invites Radio Console in those words to
+        // "retry freely on a flaky network". A dropped response is exactly when a client takes that
+        // invitation up — and the failure most likely to accompany one is the write that also did not
+        // land, because Persist is best-effort by design (it swallows I/O errors so that a full disk
+        // can never break a bell-failure recording on the live ring path). So the retry has to be able
+        // to REPAIR the lost write. Before this test, Acknowledge early-returned before Persist on the
+        // already-acknowledged path, the retry wrote nothing, and a restart resurrected a note the
+        // operator had dismissed twice.
+        var tracker = NewTracker();
+        Fail(tracker);
+
+        // Exactly what is on disk BEFORE the dismissal: the failure, unacknowledged.
+        var beforeTheAck = File.ReadAllText(_path);
+
+        Assert.True(tracker.Acknowledge(PhoneId));
+
+        // The write that never landed. Restoring the pre-ack bytes reproduces precisely the state a
+        // swallowed I/O error leaves behind: acknowledged in memory, not acknowledged on disk.
+        File.WriteAllText(_path, beforeTheAck);
+        Assert.False(NewTracker().Get(PhoneId)!.Acknowledged);   // the damage is real, not assumed
+
+        // The retry. It still reports false — that bool means "THIS call changed memory state", and
+        // BellFailureTrackerTests.Acknowledge_ReturnsFalse_WhenNothingToAcknowledge pins it.
+        Assert.False(tracker.Acknowledge(PhoneId));
+
+        // ...and yet it repaired the disk, which is the whole point. Restart to prove it.
+        Assert.True(NewTracker().Get(PhoneId)!.Acknowledged);
+    }
+
+    [Fact]
+    public void Acknowledge_WithNothingStored_StillWritesNoFile()
+    {
+        // The repair above is deliberately scoped to a record that EXISTS and is already
+        // acknowledged. With no record there is nothing to repair, so persisting would be pure
+        // churn — and it would create the state file that MissingStateFile_StartsEmpty proves a first
+        // boot does not leave behind.
+        var tracker = NewTracker();
+
+        Assert.False(tracker.Acknowledge(PhoneId));
+
+        Assert.False(File.Exists(_path));
+    }
+
+    [Fact]
     public void RecordedFailure_SurvivesRestart_WithFailureCountIntact()
     {
         var before = NewTracker();

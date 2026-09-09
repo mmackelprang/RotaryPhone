@@ -58,6 +58,11 @@ flap. **Treat `null` as "not yet known", and alarm on a mint time that is old, n
 
 ## 2. `psidtsAgeSeconds` — unchanged, and now deprecated in the payload
 
+> ⛔ **SUPERSEDED the same day by PR #79 — the field has since been REMOVED.** This section is left as
+> delivered, because it is the record of what we told Radio Console; it is no longer true of the code.
+> The "open question for our owner" below was answered: retire it. See
+> `docs/handoffs/2026-09-09-radioconsole-gv-auth-wire-changes.md` §3 and `docs/KNOWN-ISSUES.md` **L2**.
+
 **It is byte-for-byte unchanged.** All three write sites, the property expression, the position in the
 payload, the name. Three tests now pin that freeze so nobody corrects it by accident.
 

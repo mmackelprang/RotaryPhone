@@ -394,31 +394,36 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   was ~7 minutes old. Pre-existing, not introduced by B2, but B2's re-activation path hits it more often,
   so the field is a **less trustworthy staleness signal** than the pre-fix traces implied. (Finding **L2**.)
 
-  > **Status 2026-09-08: ⚠ SUPERSEDED, deliberately NOT resolved. Scored LOW; it caused the outage.**
+  > **Status 2026-09-08: ✅ RESOLVED — by REMOVAL, not by correction (PR #79).**
   >
-  > **The field still does exactly this, on purpose.** `psidtsAgeSeconds` is a published cross-repo
-  > contract and RotaryPhone told Radio Console in writing that it *"stays exactly as it is"*. Correcting
-  > it in place would have changed values underneath a consumer that already binds to them — the same
-  > class of mistake as the defect itself. So its behaviour is **frozen**, and three tests now pin that
-  > freeze so nobody "fixes" it by accident.
+  > **The field is gone.** `psidtsAgeSeconds` has been removed from `/api/gvbridge/status`, and the
+  > `_psidtsRefreshedAt` state behind it has been deleted along with every one of its write sites. It had
+  > exactly one reader — the removed property — so nothing else depended on it.
   >
-  > What changed instead:
-  > - **The information gap is closed.** The genuine mint time now travels **with the cookie set**, is
-  >   persisted, survives a restart, and is exposed as **`psidtsMintedAtUtc`** — a nullable ISO-8601
-  >   timestamp on `/api/gvbridge/status`. `null` means the mint time is genuinely unknown (a legacy
-  >   cookie file, a hand-pasted set, or one extracted from Chrome, whose jar carries no readable issue
-  >   time). **Unknown is not healthy; do not render it as fresh or as zero.**
-  > - **`psidtsAgeSeconds` is now marked deprecated in the payload's own doc comment**, not only in a
-  >   handoff — a true-but-invisible caveat becomes a false premise six months later.
-  > - **The operational consequence is fixed.** This finding's real cost was never the misleading number:
-  >   it was that *the scheduler could not know the credential's age either*, so a restarted process
-  >   waited a full 8-minute interval on a credential that was already 7 minutes old. That is defect 1 of
-  >   the 2026-09-08 outage and it is fixed by `ComputeFirstRefreshDelayMs`.
+  > **Why removal, when PR #78 had just deliberately frozen it.** The freeze existed because Radio Console
+  > consumed the field as a documented blackout clock, and changing values underneath a live consumer is
+  > the same class of mistake as the defect itself. **That premise is now dead.** Radio Console retracted
+  > the published bands (their PR #622) and the owner verified independently that there are **zero
+  > references to `psidtsAgeSeconds` anywhere in their `src/`** — it lived only in prose. A field that
+  > protects nothing, whose *name* asserts "credential age" while its *value* reports the age of a cache
+  > operation, is a trap set for whoever reads it next. That is exactly how the six-week doctrine formed.
+  > A deprecation notice does not stop that; absence does.
   >
-  > **Retiring `psidtsAgeSeconds` outright is an open owner decision.** Radio Console has since retracted
-  > the published bands that motivated the freeze and confirmed **zero code references** to the field in
-  > their `src/` — so the freeze now protects prose rather than a parser. It was kept anyway because
-  > reversing an owner decision is not a Builder's call.
+  > **What replaces it:** `psidtsMintedAtUtc` — the instant Google actually minted the credential, carried
+  > on the cookie set, persisted across restarts, and unfakeable by a reload. ⚠ Its honest failure mode is
+  > `null` = UNKNOWN, which is **not** healthy and must never render as fresh or as `0`. That is a real
+  > limitation, but it is the *opposite* failure mode from L2's: the new field can decline to answer,
+  > where the old one answered reassuringly and wrongly.
+  >
+  > **Two things this does NOT resolve — stated so "RESOLVED" is not read more widely than it should be:**
+  > - **The operational consequence was already fixed separately**, by `ComputeFirstRefreshDelayMs` in
+  >   PR #78. This finding's real cost was never the misleading number: it was that *the scheduler could
+  >   not know the credential's age either*, so a restarted process waited a full 8-minute interval on a
+  >   credential already 7 minutes old — defect 1 of the 2026-09-08 outage. Removing the field fixes the
+  >   misleading signal, and only that.
+  > - **Resolved in the code, not on the box.** The deployed build still serves the old field with the old
+  >   behaviour until the owner deploys. Anything reading `/api/gvbridge/status` on `radio:5004` *today*
+  >   still sees `psidtsAgeSeconds`, and it is still lying.
 
 **See:** [`docs/plans/gv-auth-blackout-b2-design.md`](plans/gv-auth-blackout-b2-design.md) (findings
 F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plans/gv-auth-blackout-b2-plan.md)
@@ -510,5 +515,5 @@ cold-send blip is gone (or, if present, a single benign blip). Inbound ring + an
 - **Keep-alive (primary fix):** parse the RFC 6223 `keep=` frequency from the REGISTER 200-OK first Via (default 120s) and send the RFC 5626 §3.5.1 double-CRLF (`\r\n\r\n`) ping every `max(15, keep/2)`s, plus a secondary protocol-level `ClientWebSocket.Options.KeepAliveInterval` (defense-in-depth). A failed ping is treated as a dropped link and triggers reconnect.
 - **Auto-reconnect:** the channel now raises a `Closed` event (with a `WasIntentional` flag); the transport runs a single-flight (`Interlocked`-guarded) reconnect loop with capped exponential backoff (1,2,4,8,16,30s) + ±20% jitter, retrying indefinitely until success or disposal, reusing the existing `RegisterAsync` path. The old channel is disposed and its handlers unsubscribed before a new one is created (fixes a latent handler/channel leak).
 - **401 auth-recovery:** a real post-Digest 401/403 (or a 401/403 from `sipregisterinfo/get`) now escalates to a browser-less `RotateCookies` refresh of the rotating `__Secure-1PSIDTS/3PSIDTS` (primary), falling back to the CDP `cookies/refresh-from-browser` flow. Plain network drops do NOT trigger cookie work. (RotateCookies request shape is best-effort / unconfirmed — see `docs/research/gv-protocol-notes.md` §3.2 and the `GvCookieRotator` TODO.)
-- **Honest status:** `IsRegistered` is now `registered AND socket-connected`; `/api/gvbridge/status` adds `wsConnected`, `lastConnectedAt`, and `psidtsAgeSeconds` (the original four field names are unchanged).
+- **Honest status:** `IsRegistered` is now `registered AND socket-connected`; `/api/gvbridge/status` adds `wsConnected`, `lastConnectedAt`, and `psidtsAgeSeconds` (the original four field names are unchanged). ⚠ *Historical record: `psidtsAgeSeconds` was **removed** on 2026-09-08 — see finding **L2** above. `wsConnected` and `lastConnectedAt` are unaffected.*
 **Next step:** Confirm the exact `RotateCookies` request shape for the voice.google.com origin via a packet capture and tighten `GvCookieRotator` (fast-follow).

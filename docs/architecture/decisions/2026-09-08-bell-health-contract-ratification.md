@@ -347,12 +347,28 @@ where a ~5 s window remains and their §7f handling (record the sticky note, no 
    against a running server, not only in tests: a real bell failure was driven through the detection
    path, acknowledged, the process `pkill`ed, and the note came back with `acknowledged: true` and every
    field byte-identical.
-   **⚠ A THIRD instance of the same failure class was found while testing this and is still open.** The
-   delivered reply §5 also promises that acking an *already-acked or absent* failure returns
-   `200 {"acknowledged": true}`, and invites clients to "retry freely on a flaky network". The code
-   returns `{"acknowledged": false}` — confirmed live in both cases. It is pre-existing and untouched by
-   this work, but changing a response body RadioConsole consumes needs the owner, so it was deliberately
-   not fixed here.
+   **⚠ A THIRD instance of the same failure class was found while testing this.** The delivered reply §5
+   also promises that acking an *already-acked or absent* failure returns `200 {"acknowledged": true}`,
+   and invites clients to "retry freely on a flaky network". The code returned `{"acknowledged": false}` —
+   confirmed live in both cases. It was pre-existing and untouched by that work, because changing a
+   response body RadioConsole consumes needs the owner.
+   **→ DECIDED and SHIPPED in PR #79: fix the code, not the promise.** A repeat ack and an ack of an
+   absent failure both return `{"acknowledged": true}`. The reasoning that settled it: what we published
+   is a **post-condition** — *the failure is acknowledged* — not a **delta** — *you were the one who
+   changed it*. The endpoint was answering the delta. The tracker still reports the delta internally
+   (it is a useful log line, and `BellFailureTrackerTests.Acknowledge_ReturnsFalse_WhenNothingToAcknowledge`
+   is unchanged); what changed is that it no longer leaks onto a wire contract that promised otherwise.
+   ⚠ **A FOURTH instance surfaced in this PR's own pre-merge review, and was fixed in the same PR.**
+   Returning `true` did not by itself make *"retry freely on a flaky network"* true. A repeat ack
+   returned early without re-writing the state file, so a retry following an ack whose disk write never
+   landed — the failure a retry is most likely to meet alongside a dropped response — was told `true`
+   and wrote nothing; the dismissal would not have survived the next restart. `BellFailureTracker`
+   now re-persists on the already-acknowledged path, so a retry **repairs** a lost write.
+   ⚠ **All four instances are now closed, and every one of them was closed by making the code true
+   rather than by retracting the document.** That is the pattern worth carrying forward: on this
+   contract the delivered prose has repeatedly been a better specification than the delivered code —
+   and the fourth instance was found only because someone asked "when is this `true` a lie?" rather
+   than checking that the endpoint returned the promised value.
 3. **§5 — unifying `CallStateChanged`** is a coordinated cross-repo breaking deploy. Not schedulable
    from this side alone.
 
