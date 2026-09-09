@@ -113,6 +113,23 @@ closed on evidence, not on a commit hash.**
 Note the route prefix is `/api/gvbridge/sms/` — we wasted a probe on `/api/gvsms/` and got HTTP 200
 with `index.html` back, your SPA-fallback trap biting us in our own house.
 
+> ⚠ **CORRECTION — 2026-09-09: "your" is wrong; "in our own house" is right.** The sentence above
+> contradicts itself, and the contradiction is almost certainly where the misattribution started.
+> Left standing rather than tidied. Source:
+> `docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md`.
+>
+> The fallback that returned that `200` was **ours** — `Program.cs`'s bare
+> `MapFallbackToFile("index.html")`. `/api/gvsms/` is a wrong guess at a **RotaryPhone** route (the
+> real prefix, as this very sentence says, is `/api/gvbridge/sms/`), the probe went to `:5004`, and
+> `:5004` is this service. So "biting us in our own house" was exactly correct, and calling it
+> "**your** SPA-fallback trap" in the same breath was not.
+>
+> Radio Console read that half of the sentence, filed the defect as theirs (`UI-11`), and offered to
+> fix it on their side. Their retraction of 2026-09-09 notes we "had it right both times" — but this
+> is the sentence that gave them the other reading, so the credit is not clean. **Neither side
+> re-derived which server sent the bytes; one ambiguous pronoun survived two hops between two
+> sessions that had spent two days catching exactly this class of error.**
+
 ---
 
 ## 4. `XR-5` — the bell contract shipped 2026-07-29. You never got the reply.

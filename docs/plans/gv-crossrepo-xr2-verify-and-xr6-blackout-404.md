@@ -777,6 +777,22 @@ why the id must stay in the path with `%2F` and must never be sent raw. **This i
 disqualifies any future "move it to a query parameter" refactor** that leaves a route shape able to
 fall through to `index.html`.
 
+> ⚠ **SUPERSEDED — 2026-09-09. The expected result above is now `404 application/json`.** Do not
+> read the new result as a failure; the check still passes, on a different value.
+>
+> `Program.cs` now registers `MapFallback("/api/{**rest}", ...)` ahead of the SPA fallback, so an
+> unmatched `/api/*` path returns a JSON 404 with an `{ "error": ... }` body instead of the SPA
+> shell. The raw-`/` probe above still misses the API route — that has not changed, and the reason
+> the id must stay `%2F`-encoded in the path is untouched. **Only what the miss returns has
+> changed.**
+>
+> **The point A7 was making now holds more strongly, not less.** A route shape able to fall through
+> used to be invisible behind a `200`; it is now a loud `404`. The refactor A7 disqualifies stays
+> disqualified.
+>
+> Also note the citation `Program.cs:405` had already drifted (the call was at `:434` before this
+> change) — it is now the `MapFallbackToFile` beneath the new API fallback.
+
 ### Part B — XR-6, the fix in this batch
 
 **B1 — the happy path still works.** During a healthy window

@@ -99,3 +99,22 @@ Your §3 note that you *"wasted a probe on `/api/gvsms/` and got HTTP 200 with `
 fallback has now bitten both of us, in both repos. If it would help, we can add an explicit 404 for
 unmatched `/api/*` paths on our side; say the word and we will file it. It is our fallback, so it is
 ours to fix.
+
+> ⚠ **RETRACTED BY THE SENDER — 2026-09-09.** Radio Console withdrew this paragraph in
+> `docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md`. Kept here, unedited, because it is
+> where the misattribution entered our records.
+>
+> - **"in both repos" is FALSE — it is one repo, and it is ours.** `Radio.Web` has no SPA fallback
+>   and never had one: no `MapFallback`/`MapFallbackToFile`/`UseSpa` in `src/`, no `index.html` at
+>   all, no catch-all `@page`, and `git log -S "MapFallback" --all -- src/` finds zero commits, so it
+>   was never removed either. The behaviour described belongs to the legacy .NET 6/7
+>   `MapFallbackToPage("/_Host")` model, which that app was never on.
+> - **"It is our fallback, so it is ours to fix" is FALSE.** It was `RotaryPhoneController.Server`'s,
+>   at `Program.cs`'s bare `MapFallbackToFile("index.html")`. Fixed on this branch.
+> - **Nothing about the SHAPE of the defect was wrong** — a 200 that is HTML when the caller asked
+>   for JSON is exactly as described, and the diagnosis is what made the fix obvious. **Only the
+>   ownership was wrong.**
+>
+> We accepted this at the time without checking which server returned the bytes, and answered it in
+> `docs/handoffs/2026-09-08-radioconsole-bell-persistence-and-404.md` §2 with "the fix is symmetric"
+> — so the error propagated one further hop on our side before anyone re-derived it.

@@ -1204,6 +1204,28 @@ curl -s -D- -o /dev/null http://radio:5004/api/health/version | grep -i content-
 ```
 **PASS:** `Content-Type: application/json`. **FAIL** if `text/html` — the route did not register.
 
+> ⚠ **THIS CHECK IS NOW WEAKER THAN IT READS — 2026-09-09. Assert the status code too.** As written
+> it can no longer detect the failure it was built to detect.
+>
+> `Program.cs` now returns a **JSON** 404 for unmatched `/api/*` paths instead of the SPA shell. So
+> a `/api/health/version` that **failed to register** now answers `404 application/json` — which
+> satisfies the PASS condition above (`Content-Type: application/json`) and never trips the stated
+> FAIL condition (`text/html`). The content-type discriminator that made this check work has been
+> removed by the fix it was written before.
+>
+> **Use this instead** — it checks the status line as well, and does not depend on the fallback's
+> content type:
+>
+> ```bash
+> curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://radio:5004/api/health/version
+> ```
+>
+> **PASS:** `200 application/json`. **FAIL** on any other status — `404 application/json` now means
+> exactly what the original check meant by `text/html`: **the route did not register.**
+>
+> The prose above it ("returns HTML with HTTP 200 for any unmatched path") is still true for
+> non-`/api/*` paths, and false for `/api/*` since this change.
+
 **P3 — no credentials needed.**
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://192.168.86.50:5004/api/health/version
