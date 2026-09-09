@@ -5,5 +5,19 @@
       "Bash(npm run build:*)",
       "Bash(npx vite build)"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && f=$(git ls-files --others --exclude-standard docs/prompts/ 2>/dev/null); [ -n \"$f\" ] && jq -n --arg f \"$f\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"\\u26a0 UNPROCESSED INBOUND cross-repo message(s) in docs/prompts/. Radio Console writes these and never commits them, so untracked = unread. Read each one BEFORE other work, then commit it \\u2014 an uncommitted inbound file is one git checkout from being lost:\\n\" + $f)}}' || true",
+            "timeout": 10,
+            "statusMessage": "Checking for inbound cross-repo messages"
+          }
+        ]
+      }
+    ]
   }
 }
