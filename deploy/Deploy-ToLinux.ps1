@@ -75,7 +75,13 @@ Write-Host "  Build complete" -ForegroundColor Green
 # --- Step 2: Create target directories ---
 Write-Host "[2/4] Preparing target directories..." -ForegroundColor Yellow
 
+# Native commands do NOT honour $ErrorActionPreference -- see the note above Step 3.
+# Every native call from here on captures its own status on the very next line: one
+# capture per call, never a single test after a sequence, because the value would then
+# belong to whichever call ran last rather than to the one that failed.
 ssh $SshTarget "sudo mkdir -p ${TargetPath}/{data,logs} && sudo chown -R ${TargetUser}:${TargetUser} ${TargetPath}"
+$mkdirExit = $LASTEXITCODE
+if ($mkdirExit -ne 0) { throw "failed to prepare ${TargetPath} on ${SshTarget} (exit $mkdirExit) -- every later copy would land somewhere unintended, or not at all" }
 
 # --- Step 3: Sync files ---
 Write-Host "[3/4] Syncing files..." -ForegroundColor Yellow
@@ -85,6 +91,11 @@ $rsyncAvailable = Get-Command rsync -ErrorAction SilentlyContinue
 if ($rsyncAvailable) {
   # Convert Windows path to rsync-compatible path
   $rsyncSource = ($PublishDir -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower() + "/"
+  # ⚠ This rsync must be allowed to FAIL SOFTLY, and it is the one native call in the
+  # script that must never be made to throw. Its non-zero exit is the BRANCH CONDITION
+  # for the tar fallback below: a `throw` here would delete the fallback outright.
+  # Its status is read at :102 -- that is the check, and it is deliberate rather than
+  # missing.
   rsync -az --delete `
     --exclude 'appsettings.Production.json' `
     --exclude 'data/' `
@@ -210,13 +221,23 @@ if ($remoteBinSize -ne "$localBinSize") {
 }
 Write-Host "  Sync verified: binary is $localBinSize bytes on the box" -ForegroundColor Green
 
-# Copy appsettings.Production.json only if it doesn't exist on target
+# Copy appsettings.Production.json only if it doesn't exist on target.
+#
+# ⚠ This `ssh` is deliberately NOT exit-checked. `test -f` returns non-zero when the
+# file is absent, which is the normal first-deploy case -- the whole point of the
+# probe. Its ANSWER is the signal, not its status.
 $prodExists = ssh $SshTarget "test -f ${TargetPath}/appsettings.Production.json && echo EXISTS"
 if ($prodExists -ne "EXISTS") {
   $prodConfig = Join-Path $RepoRoot "src\RotaryPhoneController.Server\appsettings.Production.json"
   if (Test-Path $prodConfig) {
     Write-Host "  Copying initial appsettings.Production.json..." -ForegroundColor Yellow
     scp $prodConfig "${SshTarget}:${TargetPath}/appsettings.Production.json"
+    $prodScpExit = $LASTEXITCODE
+    # ⛔ The one that matters most in this block. This is the FIRST-DEPLOY path for the
+    # very file the rest of this change exists to protect. A silent failure here leaves
+    # the box with no production config at all, and the service starts on defaults --
+    # including the wrong BluetoothAdapter, which crosses the Radio Console boundary.
+    if ($prodScpExit -ne 0) { throw "failed to copy the initial appsettings.Production.json to ${SshTarget} (exit $prodScpExit) -- the box has NO production config; aborting before the service is restarted" }
   }
 }
 
@@ -225,7 +246,11 @@ $scriptsDir = Join-Path $RepoRoot "scripts"
 if (Test-Path $scriptsDir) {
   Write-Host "  Copying scripts..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/scripts"
+  $scriptsMkdirExit = $LASTEXITCODE
+  if ($scriptsMkdirExit -ne 0) { throw "failed to create ${TargetPath}/scripts on ${SshTarget} (exit $scriptsMkdirExit)" }
   scp -r ($scriptsDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+  $scriptsScpExit = $LASTEXITCODE
+  if ($scriptsScpExit -ne 0) { throw "failed to copy scripts/ to ${SshTarget} (exit $scriptsScpExit) -- the box would be left with stale or absent HFP monitor scripts" }
 }
 
 # Copy Chrome extension (GV Bridge) to both deploy path and snap-accessible path
@@ -233,8 +258,17 @@ $extensionDir = Join-Path $RepoRoot "ChromeExtension"
 if (Test-Path $extensionDir) {
   Write-Host "  Copying Chrome extension..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/ChromeExtension"
+  $extMkdirExit = $LASTEXITCODE
+  if ($extMkdirExit -ne 0) { throw "failed to create ${TargetPath}/ChromeExtension on ${SshTarget} (exit $extMkdirExit)" }
   scp -r ($extensionDir -replace '\\', '/') "${SshTarget}:${TargetPath}/"
+  $extScpExit = $LASTEXITCODE
+  if ($extScpExit -ne 0) { throw "failed to copy ChromeExtension/ to ${SshTarget} (exit $extScpExit) -- the box would be left with a stale extension" }
   # Also update the snap-accessible copy if it exists (for running Chromium)
+  #
+  # ⚠ Deliberately NOT exit-checked, and it must stay that way. The remote side is
+  # already guarded by `if [ -d … ]`, the snap profile belongs to the SUPERSEDED
+  # legacy configuration (see setup-gvbridge.sh step 7), and its absence is the
+  # normal state on this box. Making this throw would fail every deploy.
   ssh $SshTarget "if [ -d ~/snap/chromium/common/gv-bridge-profile/Extension ]; then cp -r ${TargetPath}/ChromeExtension/* ~/snap/chromium/common/gv-bridge-profile/Extension/ && echo '  Extension updated in snap profile'; fi"
 }
 
@@ -273,11 +307,32 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   # Explicit modes rather than chmod +x: NTFS carries no permission bits, so the
   # mode on arrival is whatever the umask made it. 755 keeps the scripts runnable
   # without making them group-writable.
-  ssh $SshTarget "chmod 755 ${TargetPath}/deploy/*.sh 2>/dev/null; chmod 644 ${TargetPath}/deploy/systemd/* 2>/dev/null"
+  #
+  # ⛔ This used to be `chmod …/*.sh 2>/dev/null; chmod …/systemd/* 2>/dev/null`, whose
+  # status was the SECOND chmod's -- the same last-command-wins masking as the tar
+  # chain. The globs are now built only for groups that actually have files, so a
+  # non-zero status means a real failure rather than an unmatched glob, and the remote
+  # runs under `set -e`. It matters because setup-gvbridge.sh has to be executable for
+  # the deploy to be able to run it.
+  $chmodCmds = @()
+  if ($shellScripts.Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if ($unitFiles.Count -gt 0)    { $chmodCmds += "chmod 644 ${TargetPath}/deploy/systemd/*" }
+  if ($chmodCmds.Count -gt 0) {
+    ssh $SshTarget ("set -e; " + ($chmodCmds -join "; "))
+    $chmodDeployExit = $LASTEXITCODE
+    if ($chmodDeployExit -ne 0) { throw "failed to set modes on ${TargetPath}/deploy (exit $chmodDeployExit) -- setup-gvbridge.sh would not be executable on the box" }
+  }
 }
 
-# Ensure binary is executable
-ssh $SshTarget "chmod +x ${TargetPath}/RotaryPhoneController.Server && chmod +x ${TargetPath}/scripts/*.py 2>/dev/null"
+# Ensure binary is executable.
+#
+# ⛔ The Server chmod must succeed: without it the service cannot start, and the
+# restart below would run anyway. The scripts/*.py chmod is best-effort on purpose --
+# the glob legitimately matches nothing when scripts/ carries no Python -- so it keeps
+# its own `|| true` rather than being allowed to abort the deploy.
+ssh $SshTarget "set -e; chmod +x ${TargetPath}/RotaryPhoneController.Server; chmod +x ${TargetPath}/scripts/*.py 2>/dev/null || true"
+$chmodBinExit = $LASTEXITCODE
+if ($chmodBinExit -ne 0) { throw "failed to make ${TargetPath}/RotaryPhoneController.Server executable (exit $chmodBinExit) -- the service would fail to start; NOT restarting" }
 
 Write-Host "  Files synced" -ForegroundColor Green
 
@@ -286,12 +341,28 @@ Write-Host "[4/4] Installing service..." -ForegroundColor Yellow
 
 $serviceFile = Join-Path $RepoRoot "deploy\rotary-phone.service"
 scp $serviceFile "${SshTarget}:/tmp/rotary-phone.service"
+$svcScpExit = $LASTEXITCODE
+# ⛔ Both of these were unchecked. A failed copy or a failed install left systemd on a
+# STALE unit, and the restart below then restarted into it -- while the script printed
+# "=== Deploy Complete ===". The `&&` chain already stops at the first failure; what was
+# missing was anyone reading its status.
+if ($svcScpExit -ne 0) { throw "failed to copy rotary-phone.service to ${SshTarget} (exit $svcScpExit) -- systemd would be left on the previous unit; NOT restarting" }
 ssh $SshTarget "sudo mv /tmp/rotary-phone.service /etc/systemd/system/rotary-phone.service && sudo systemctl daemon-reload && sudo systemctl enable rotary-phone.service"
+$svcInstallExit = $LASTEXITCODE
+if ($svcInstallExit -ne 0) { throw "failed to install rotary-phone.service on ${TargetHost} (exit $svcInstallExit) -- systemd is on a stale unit; NOT restarting" }
 
 if (-not $NoRestart) {
   Write-Host "  Restarting service..." -ForegroundColor Yellow
   ssh $SshTarget "sudo systemctl restart rotary-phone.service"
+  $restartExit = $LASTEXITCODE
+  # ⛔ The last silent failure in the script, and the loudest one to get wrong: an
+  # unchecked restart meant a service that failed to come up was reported as a
+  # successful deploy.
+  if ($restartExit -ne 0) { throw "systemctl restart rotary-phone.service FAILED on ${TargetHost} (exit $restartExit) -- the new binary is on the box but the service is not running it" }
   Start-Sleep -Seconds 2
+  # ⚠ Not exit-checked on purpose: this is a DISPLAY of the unit's state, and
+  # `systemctl status` returns non-zero for a unit that is merely inactive. The restart
+  # above is the gate; this is the operator's read of what happened.
   ssh $SshTarget "sudo systemctl status rotary-phone.service --no-pager -l" 2>&1 | Write-Host
 }
 
@@ -303,5 +374,8 @@ Write-Host ""
 
 if ($Logs) {
   Write-Host "Tailing logs..." -ForegroundColor Yellow
+  # ⚠ Not exit-checked: an interactive follow that the operator ends with Ctrl-C, which
+  # is a non-zero exit and the normal way to leave it. The deploy is already complete
+  # and nothing runs after this.
   ssh $SshTarget "sudo journalctl -u rotary-phone.service -f --no-pager"
 }

@@ -1425,6 +1425,53 @@ the units are shipped to the box already. **But if Q1 comes back "neither form w
 `--scripts-only`** — it turns a blocker into a non-issue, and it is a smaller change than enabling
 lingering on a box shared with another service.
 
+### Q4 ⛔ NEW, found 2026-09-09 by Task 4b's negative control — which `bash` runs the sync script?
+
+**On the machine this was built on, the tar-pipe fallback cannot run at all.** It fails at exit 127
+before doing any work. This is not a defect this plan created, and it is not one this plan's tasks fix —
+it sits underneath all of them, because the tar path is the path §0.3 says every deploy takes.
+
+**Measured, both PowerShell 5.1 and 7.6.5, with and without the user profile loaded:**
+
+```
+(Get-Command bash).Source   ->  C:\WINDOWS\system32\bash.exe        i.e. WSL, not msys
+```
+
+`C:\Program Files\Git\cmd` is on `PATH`, but Git's `bash.exe` lives in `C:\Program Files\Git\bin`,
+which is **not**. So `bash $syncScriptPath` at the end of Step 3 lands in **WSL Ubuntu 22.04.5**, and two
+separate assumptions in the code break there:
+
+| | Git Bash (msys) — what the code assumes | WSL bash — what actually runs |
+|---|---|---|
+| `bash "C:\Users\…\Temp\rp-deploy-sync.sh"` | translates the path, **runs, exit 0** | backslashes stripped to `C:UsersmarkAppDataLocalTemp…`, **exit 127, the script never runs** |
+| `tar -C '/d/prj/…'` (the `$publishMsys` conversion at `:120`) | `/d/…` is the msys drive mapping, **works** | drives are at `/mnt/d`; `/d` does not exist, **tar exits 2** |
+
+Both measured directly, same argument, same machine, opposite outcomes. A live deploy did take the tar
+path successfully on 2026-09-09, so **the owner must have run it from a shell where `bash` was Git
+Bash** — that is the configuration the code is written for, and it is not the default one here.
+
+⚠ **Consequence for this PR's lane-W steps.** Task 3's and Task 4's "run one deploy from Windows and
+confirm the sync completes" will fail at exit 127 if run from a normal PowerShell on this machine, and
+that failure says nothing about Tasks 3 and 4. Establish which `bash` is being used *before* reading a
+lane-W result. Task 4's create side was verified here by invoking Git Bash explicitly, which is the
+environment the code targets.
+
+**This is loud, not silent** — the existing `$syncExit -ne 0` throw catches it — so it is a breakage
+rather than another instance of this PR's theme. It is left unfixed deliberately: choosing the remedy is
+an owner decision with real trade-offs.
+
+- **Pin the interpreter** — invoke `C:\Program Files\Git\bin\bash.exe` explicitly (or resolve it from
+  `git --exec-path`). Keeps every existing msys assumption true, including `$publishMsys`. Costs a
+  hard-coded dependency on Git for Windows.
+- **Target WSL instead** — pass a `/mnt/d/…` style path and a WSL-visible script path. Removes the Git
+  dependency, but `$publishMsys` and the temp-file handoff both have to change together, and it is the
+  larger change.
+- **Detect and adapt** — a second code path to keep correct, which §Q2 already argues against for
+  `--scripts-only`.
+
+⭐ **Recommendation: pin the interpreter.** It makes the code's existing assumptions true rather than
+rewriting them, and it is the smallest change that turns a machine-dependent breakage into a stable one.
+
 ### Q3 — Option A or B for the watchdog timer? (Task 11)
 
 Recommendation and reasoning in Task 11. **Recommended: B** — leave the timer running. Option A's failure
