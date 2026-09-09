@@ -469,6 +469,38 @@ normalisation and the hash does not. On 2026-09-09 the line counts agreed (186 a
 did not — **that disagreement between the two fields is what identified the problem as encoding rather
 than content.** A hash alone would have said only "mismatch".
 
+### ⛔ Status fields are not the thing they describe — and they fail in BOTH directions
+
+On 2026-09-09 both sessions were misled by a status field within one exchange, in opposite directions:
+
+| Instance | Field said | Truth | Direction |
+|---|---|---|---|
+| RotaryPhone's channel send | `delivery not confirmed` | The message **had arrived in full** | **False negative** |
+| Radio Console's agent list | builder `completed` | The builder was **still running**; nothing merged | **False positive** |
+
+⚠ **The false positive is the dangerous one.** Had Radio Console trusted it, they would have reported
+`KIOSK-3` landed and **started the coordinated deploy** on work that was still uncommitted in a branch.
+A false negative costs a redundant resend; a false positive starts a production deploy.
+
+**Therefore, for the deploy trigger specifically — the single most consequential handoff between these
+two services — do not act on a report of a merge. Verify it.** Both repositories are on the same
+machine and readable by either session, so "`KIOSK-3` has landed" is a **checkable fact**, not a claim
+requiring trust:
+
+```bash
+cd /mnt/d/prj/RTest/RTest && git rev-parse --short origin/main   # must contain the merge
+cd /mnt/d/prj/RTest/RTest && git branch --show-current           # and the branch must be merged, not just built
+```
+
+Verified this way on 2026-09-09: `origin/main` at `33915a11`, the `KIOSK-3` branch four commits ahead
+and its own `radio-console-open` still uncommitted. **Radio Console's report matched exactly** — which is
+the point. Verification is not distrust; it converts an accurate report into an independently
+established fact, and it is the only form that survives a status field lying.
+
+⚠ **This is the same discipline the `psidtsAgeSeconds` consumer finding came from, one layer up.** Three
+`src/`-scoped greps agreed and were all wrong; two status fields reported confidently and were both
+wrong. **Agreement between sources that share a blind spot is not corroboration.**
+
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
 **Default: ONE file per side per day.** Immediate delivery is the exception and must earn itself.
