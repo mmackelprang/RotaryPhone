@@ -109,7 +109,10 @@ if (-not $synced) {
   #   * --unlink-first avoids ETXTBSY when overwriting the running binary (old inode survives for
   #     the live process; the Step-4 restart picks up the new file).
   #   * The box's data/ (cookies) is untouched (publish has no data/); appsettings.Production.json
-  #     is backed up + restored around the extract so the customized prod config is never clobbered.
+  #     is EXCLUDED FROM THE ARCHIVE, so the customized prod config is never overwritten and never
+  #     needs restoring. It used to be backed up + restored around the extract, and that dance
+  #     clobbered the config two different ways when either of its best-effort ends failed --
+  #     see deploy/tests/repro-tar-clobber.sh cases B1 and B2, and the exclude comment below.
   #   * $LASTEXITCODE is checked so a failed sync ABORTS the deploy instead of restarting the
   #     service on the OLD binary (the silent-stale-deploy bug this replaces).
   if (-not $rsyncAvailable) {
@@ -123,10 +126,38 @@ if (-not $synced) {
   # quoting of a 'bash -c "<string with quotes>"'). Must be LF-only with no BOM for bash.
   $syncScript =
     "set -e -o pipefail`n" +
-    "tar -C '$publishMsys' --exclude=./.playwright -czf - . | ssh '$SshTarget' '" +
-      "cp -f $TargetPath/appsettings.Production.json /tmp/rp-prod.bak 2>/dev/null || true; " +
+    # --exclude=./appsettings.Production.json is the load-bearing line, and it mirrors
+    # what the rsync path at :89 has always done. The box's copy is authoritative
+    # (docs/HT801-ADDRESS.md) and carries BluetoothAdapter: hci1, which crosses the
+    # Radio Console audio boundary. The publish output ships the repo TEMPLATE (the
+    # SDK's appsettings*.json Content glob), so while it was in the stream the file
+    # was overwritten on every run and depended on a restore to put it back.
+    #
+    # The backup/restore dance is GONE rather than repaired, and that is the point.
+    # Both of its ends were best-effort (`2>/dev/null || true`), so EITHER end could
+    # fail silently, and each produced a different clobber -- both reproduced in
+    # deploy/tests/repro-tar-clobber.sh:
+    #
+    #   B1  the BACKUP cp fails (first deploy, no config on the box yet) but a
+    #       stale /tmp/rp-prod.bak from an earlier run makes `[ -f ]` true, so the
+    #       restore installs that stale content. Worst case: not the repo template,
+    #       but arbitrary config from a previous deploy, and the chain exits 0.
+    #   B2  the backup SUCCEEDS and the RESTORE mv fails (a /tmp this uid cannot
+    #       unlink from). The template stays on the box and the backup is stranded.
+    #       This is the state PR #72 UAT found, finding L3.
+    #
+    # Excluding the member removes the state instead of protecting it: there is
+    # nothing to restore because nothing is overwritten, and the property holds
+    # whichever end would have failed. Making the restore "unconditional", which
+    # KNOWN-ISSUES proposed, fixes neither -- in B2 the mv runs and fails, and in B1
+    # it runs and installs the wrong file.
+    #
+    # A genuine first deploy still gets its config: :142-148 scps the template in
+    # when the box has no appsettings.Production.json, which is now the only path
+    # that ever writes this file.
+    "tar -C '$publishMsys' --exclude=./appsettings.Production.json --exclude=./.playwright -czf - . |" +
+      " ssh '$SshTarget' '" +
       "tar -xzf - --unlink-first -C $TargetPath; " +
-      "[ -f /tmp/rp-prod.bak ] && mv -f /tmp/rp-prod.bak $TargetPath/appsettings.Production.json || true; " +
       "chmod +x $TargetPath/RotaryPhoneController.Server'`n"
   $syncScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-deploy-sync.sh"
   [System.IO.File]::WriteAllText($syncScriptPath, $syncScript, (New-Object System.Text.UTF8Encoding($false)))
