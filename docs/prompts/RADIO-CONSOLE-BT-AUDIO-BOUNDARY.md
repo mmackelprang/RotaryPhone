@@ -364,6 +364,72 @@ composed and relayed verbally instead of written to the lane; the receiving sess
 the relay and marked it as a transcription. A reply that is complete, correct and undelivered is the
 failure this lane exists to close.
 
+### Channel + files — the two carriers (owner's ruling, 2026-09-09)
+
+**Immediate traffic passes over the live session channel. Durable artifacts pass as files.**
+
+| | Channel (session-to-session) | Files (the lanes above) |
+|---|---|---|
+| **Carries** | notification, ack, hash echo, "are you up", urgent stop-work | contracts, gate questions, evidence — anything a future session must re-read |
+| **Lifetime** | dies with the session | permanent; this is the audit record |
+| **Truth role** | proves **delivery** | is the **payload** |
+
+⛔ **The channel must not carry the payload.** Three reasons, and the third is the one that bites:
+neither session is up most of the time; a chat message never becomes a queue row or a Change Log entry;
+and **a live channel makes the HANDSHAKE trustworthy, not the CONTENT.** If either side types a summary
+from memory instead of pointing at a committed file, today's failure is reproduced with lower latency
+and nothing to diff. **The hash is computed over the delivered file, never over what the sender
+believes the file says.**
+
+⚠ **Channel down means fall back to the file lane, not wait.** A lane that silently waits for a channel
+that is offline fails closed and looks idle.
+
+**The lanes are a named pair, not a shared path.** Each side's inbound lane is stated explicitly above
+so neither has to infer its counterpart's: **Radio Console inbound = `RTest/docs/queue/inbound/`;
+RotaryPhone inbound = `RotaryPhone/docs/prompts/`.** ⚠ A rule phrased as *"deliver into the recipient's
+`docs/queue/inbound/`"* is wrong and dangerous — RotaryPhone has no such directory, and a session
+applying it literally would create one, splitting the lane in two with both sides behaving correctly
+and messages lost in the seam.
+
+⚠ **A filename never says which way a file is travelling.** `docs/handoffs/` (RotaryPhone's outbound
+*record*) and `docs/prompts/` (RotaryPhone's *inbound*) both hold `…radioconsole-*.md`, and "handoffs"
+versus "prompts" does not encode direction either. **That ambiguity is exactly what let a record
+masquerade as a transport** — `docs/handoffs/2026-09-09-radioconsole-deploy-handoff.md` reads like a
+delivery and was a note to ourselves. Writing into your own outbound directory is **not** sending.
+
+**Delivery state:** committed and pushed in the **sender's** repo; delivered **uncommitted** into the
+recipient's. The recipient commits it, which is how it marks the file processed — so in the recipient's
+tree, **untracked means unread**. (RotaryPhone has a `SessionStart` hook that reports untracked files in
+`docs/prompts/` for this reason. It fires only at session start; a file arriving mid-session is not
+detected.)
+
+**Every exchange carries a Lane block:** `Delivered:` (file + sha256 + line count) and `Received:`
+(same, as computed by the receiver). ⚠ **A message cannot carry its own hash**, so the sender's
+`Delivered:` line only covers *accompanying* files — **the integrity of the message itself is
+established solely by the receiver echoing its hash back. The ack half is load-bearing; the delivery
+half is a convenience.** Do not "simplify" away the redundant-looking half; it is the only part that
+works.
+
+**Three failure modes this has actually met, all on real traffic:**
+
+1. **Non-delivery** — outbound written to the sender's own directory and never delivered. Visible as
+   silence. Fixed by delivering into the recipient's lane.
+2. **Stale draft delivered** — an unpushed local commit sent as though current. **Invisible by reading**
+   (right name, right date, plausible content, merely old) and detected only by a hash mismatch.
+3. **Silent in-place revision after delivery** — a delivered file rewritten in place after the recipient
+   read, acted on and committed it. Recipient's copy is correct as at arrival, sender's as at sending,
+   **both parties honest**, and the Lane block cannot express it because it announces one delivery of
+   one filename. On a mismatch neither side can tell *which* is stale. Therefore: **announce the hash as
+   at the moment of delivery, announce a re-delivery as a REVISION rather than a first delivery, and
+   prefer a new filename over rewriting a file that has already been announced.**
+
+⚠ **Address sessions by their real names, not owner-supplied nicknames.** On the channel's first use,
+both nicknames were wrong: this session is **`rotaryphone-a3`**, not "Phone", and five peer sessions are
+named "Radio" with only one running. **A message to a name that does not resolve looks, from the
+sender's side, exactly like the recipient ignoring them** — the same not-sent/not-received ambiguity the
+lane exists to remove, reappearing in the new carrier. Confirm the exact address string with the peer
+and record it here when it changes.
+
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
 **Default: ONE file per side per day.** Immediate delivery is the exception and must earn itself.
