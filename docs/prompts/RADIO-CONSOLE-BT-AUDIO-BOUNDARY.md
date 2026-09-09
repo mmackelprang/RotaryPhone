@@ -501,6 +501,37 @@ established fact, and it is the only form that survives a status field lying.
 `src/`-scoped greps agreed and were all wrong; two status fields reported confidently and were both
 wrong. **Agreement between sources that share a blind spot is not corroboration.**
 
+### ⭐ And the positive form — what corroboration actually looks like
+
+The rule above diagnosed **four** separate failures on 2026-09-09: three `src/`-scoped greps that agreed
+and were all wrong; two status fields that reported confidently and were both wrong; "merged" and
+"deployed" that would both have been true while the box ran old code; and a broken grep that agreed with
+reality on its only run. In every case the sources agreed **and shared a limitation.**
+
+The same day produced one clean instance of the opposite, and it is worth recording because it is not
+merely the inverse:
+
+> **The exit-status masking lived specifically in the fallback path** — because on the rsync path, rsync
+> *is* the last native call before the check. **Both repositories found this independently**, days apart,
+> from different symptoms, neither session looking at the other's code. Radio Console fixed theirs as
+> `OPS-9` (a chain ending in `rm -rf`); RotaryPhone found the same shape ending in `chmod`.
+
+⭐ **The distinction is the INDEPENDENCE OF THE SEARCH, not the COUNT of the agreements.** Three greps
+agreeing proved nothing, because they shared a scope. Two investigations agreeing means something,
+because they shared nothing but the conclusion. **Counting agreements measures the wrong thing** — the
+question is always what the agreeing sources could not have seen.
+
+### Scope of claim is a separate discipline from scope of search
+
+A narrow search honestly reported is fine. **The defect is a broad claim resting on it.** Radio Console
+checked one named file for `--password-store=basic`, correctly found it clean, and then volunteered
+*"cannot cost us anything"* — a general statement about the whole risk. The flag was in fact present
+elsewhere in RotaryPhone's tree (Playwright's own switch list, shipped by an unexcluded `scp -r`).
+
+⚠ **The repair is not "search wider" — it is to say "clean in the file you named" rather than "not a
+risk."** The scoped-grep failure and this one look identical from outside, but only one of them is fixed
+by looking harder. The other is fixed by **matching the claim to the evidence actually gathered.**
+
 ### ⛔ "Merged" ≠ "deployed" ≠ "INSTALLED" — a three-link chain, and BOTH services have it
 
 Found by Radio Console on 2026-09-09, then confirmed to exist identically in this repo. **Each link can
