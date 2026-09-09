@@ -2650,3 +2650,109 @@ this same repo:
 > **Read the installed artefact. Not a repo file, not a branch name, and not your own memory of this
 > morning.**
 
+
+---
+
+## 7. What the build found — corrections to this plan
+
+*Appended 2026-09-09 by the build session. **Additive: nothing above is rewritten.** The plan's own §0
+is the model — a claim that stopped being correct is worth more annotated than deleted, because the
+reason it stopped being correct is the content.*
+
+### 7.1 ⛔ PR #84 HAS MERGED — §0.1, §0.2, §0.7, §0.9, Q6 and Task 19 all move
+
+Measured, by asking git rather than by reading this plan:
+
+```
+$ git merge-base --is-ancestor e6f8018 main   ->  YES
+$ grep -c install_atomic deploy/setup-gvbridge.sh   ->  4
+$ grep -c "type f" deploy/Deploy-ToLinux.ps1        ->  2
+```
+
+⭐ **The plan was right to check, and right about the method — it just checked at a moment that has
+passed.** §0.1's whole point was "read the installed artefact, not your memory of this morning", and the
+same discipline applied one day later reverses its finding. That is not a flaw in §0.1; it is §0.1
+working.
+
+| Claim above | Now |
+|---|---|
+| §0.1 "the atomic-install work has **not** landed" | ⛔ **false** — `e6f8018` is on `main` |
+| §0.2 reason **2** ("option one is blocked on an unmerged PR") | ⛔ **void**. Reasons 1, 3 and 4 stand, and the narrow-installer decision is **unchanged** |
+| §0.7 / §0.9 the silent-stale-deploy path | ✅ **fixed on main** — the remote chain runs under its own `set -e`, and the archive is files-only |
+| §0.9's "⚠ Assumption … its precondition is PR #84" | ✅ **satisfied** |
+| **Q6** "does #84 merge before or after this arc?" | ✅ **answered: before** |
+| **Task 19** "depends on PR #84 merging" | ✅ **unblocked, and VERIFIED** — `docs/KNOWN-ISSUES.md` carries exactly one additive `⛔ SUPERSEDED 2026-09-09` block, original preserved. Nothing was written twice |
+
+⚠ Task 2's `install_atomic()` comment ("duplicated because #84 is UNMERGED") was **corrected in the
+shipped file**, not left to read falsely. It stays duplicated for a better reason: borrowing the helper
+would mean sourcing a 13 KB script this installer exists to avoid running.
+
+### 7.2 ⛔ `systemctl --user list-timers --all` does NOT list a disabled timer — §0.8 and Task 5
+
+§0.8 reasons that plain `list-timers` would miss an installed-but-disabled unit and concludes `--all` is
+"the correct instrument". **Measured on the box against a real installed-but-disabled timer:**
+
+```
+$ systemctl --user list-unit-files 'gv-bridge-restart.*'
+  gv-bridge-restart.timer   disabled  enabled        <- present
+$ systemctl --user list-timers --all 'gv-bridge-restart.*'
+  0 timers listed.                                   <- ABSENT
+```
+
+`--all` adds *inactive but LOADED* timers. A disabled unit that has never started is not loaded, so it
+appears in neither. **`list-unit-files` alone is the instrument for the installed check**, and Task 5's
+bullet *"`list-timers --all` lists `gv-session-alarm.timer`"* would have **failed on a correct install**.
+
+⭐ This is §0.10's own fourth neighbour, committed inside the section that names it: a check that runs,
+answers truthfully, and answers a different question than the one being asked. §0.8 was derived by
+reasoning about what `--all` ought to mean, and never run.
+
+### 7.3 ⛔ Three acceptance checks contradict this plan's own literal code
+
+Each is stated as `grep -c … is 0`, and each is unsatisfiable because the plan's own code block for that
+task contains the string being forbidden. The **intent** is right in all three; only the instrument is.
+
+| Task | Check as written | Why it cannot pass | The meaningful check, which does pass |
+|---|---|---|---|
+| **14** | `grep -c 9222 CookieRetriever.cs` is 0 | 14a's own comment says *"used to be a private const 9222"* | no **non-comment** occurrence — ✅ 0 |
+| **13** | `grep -c EnvironmentFile gv-session-alarm.*` is 0 | the unit's own comment says *"DELIBERATELY NO `EnvironmentFile=`"* twice | no **active directive** — ✅ 0 |
+| **10** | flapping gives *"three distinct `dedupe_key`s"* | `dedupe_key` is `…-${condition}` — **per condition, by this plan's own design** (spec §4.4: *"Keys chosen per condition, never per message"*) — and `Stale` recurs | 3 messages, **1** thread_key, **2** distinct dedupe_keys |
+
+### 7.4 ⚠ Task 10 predicts the wrong failure shape for a lost state file
+
+The plan says: *"delete the state file mid-incident and confirm the RESOLVED opens a **new** thread."*
+**Measured: it does not. There is no all-clear at all.** On a cold state file the `ok` branch finds no
+open incident and correctly stays silent, so the owner is left holding an alert that is never closed.
+
+That is **worse** than the predicted shape and it is **not fixable** — a cold start and a lost state file
+are indistinguishable without state. Recorded, asserted in the harness as the real behaviour, and the
+state file's durability is what covers it.
+
+### 7.5 ⛔ Task 12b's guard would have run NOWHERE
+
+The MSBuild wiring is `Condition="'$([MSBuild]::IsOSPlatform(Linux))' == 'true'"`, reasoned as *"CI and
+the box both run Linux."* Measured: **there is no CI** (no `.github` in this repo at all), the owner
+builds on Windows, and the box runs a self-contained publish with no SDK. So the guard could not fire on
+any machine that exists.
+
+⭐ **A guard that cannot fail is the first of the boundary doc's four neighbours**, and it would have been
+this arc shipping the failure class it was written to correct. The shell script is kept as the Linux
+convenience copy; the **enforcement** is now `AlarmCopyDriftTests.cs`, which makes the same comparison as
+a unit test and therefore runs wherever `dotnet test` runs. Both were proven by breaking the quote and
+watching each fail naming the sentence.
+
+### 7.6 ⚠ Two smaller corrections, both applied in the shipped code
+
+- **Task 3b's `scp $manifestPath`** passes a raw Windows temp path. `scp` reads the leading `C:` as a
+  **remote host**; every other `scp` in that file already does `-replace '\\', '/'`. Applied.
+- **Task 2's installer aborts a deploy on a box with no user D-Bus.** `set -euo pipefail` plus a bare
+  `systemctl --user daemon-reload` exits non-zero **after** the three files are written, and Task 3b's
+  `throw` then fails the whole deploy. The plan's own Task 2 acceptance says the reload *"is tolerated
+  failing"* — the code does not. Made non-fatal and loud. Reproduced locally.
+
+### 7.7 📌 Line references above are stale, and lane U needs the Windows SDK
+
+- Every `Deploy-ToLinux.ps1` line number in §0.7, §0.9 and Task 3b predates #84's 275-line rewrite. The
+  deploy-scripts copy block is now ~`:367-435`; the post-deploy hooks land before `=== Deploy Complete ===`.
+- **Lane U cannot run in WSL on this workstation:** the projects target `net10.0` and WSL carries only
+  SDK 8.0.131 / 9.0.115. The Windows SDK (10.0.400) is what runs them — `dotnet.exe` from WSL works.
