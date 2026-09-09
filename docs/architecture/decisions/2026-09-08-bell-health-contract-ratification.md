@@ -358,9 +358,17 @@ where a ~5 s window remains and their §7f handling (record the sticky note, no 
    changed it*. The endpoint was answering the delta. The tracker still reports the delta internally
    (it is a useful log line, and `BellFailureTrackerTests.Acknowledge_ReturnsFalse_WhenNothingToAcknowledge`
    is unchanged); what changed is that it no longer leaks onto a wire contract that promised otherwise.
-   ⚠ **All three instances of this failure class are now closed, and all three were closed by making the
-   code true rather than by retracting the document.** That is a pattern worth noticing: on this contract
-   the delivered prose has twice been a better specification than the delivered code.
+   ⚠ **A FOURTH instance surfaced in this PR's own pre-merge review, and was fixed in the same PR.**
+   Returning `true` did not by itself make *"retry freely on a flaky network"* true. A repeat ack
+   returned early without re-writing the state file, so a retry following an ack whose disk write never
+   landed — the failure a retry is most likely to meet alongside a dropped response — was told `true`
+   and wrote nothing; the dismissal would not have survived the next restart. `BellFailureTracker`
+   now re-persists on the already-acknowledged path, so a retry **repairs** a lost write.
+   ⚠ **All four instances are now closed, and every one of them was closed by making the code true
+   rather than by retracting the document.** That is the pattern worth carrying forward: on this
+   contract the delivered prose has repeatedly been a better specification than the delivered code —
+   and the fourth instance was found only because someone asked "when is this `true` a lie?" rather
+   than checking that the endpoint returned the promised value.
 3. **§5 — unifying `CallStateChanged`** is a coordinated cross-repo breaking deploy. Not schedulable
    from this side alone.
 

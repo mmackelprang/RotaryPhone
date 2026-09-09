@@ -113,6 +113,20 @@ because that is useful; it just no longer leaks onto a wire contract that promis
 `acknowledged: false` as "the ack did not take" and retries or surfaces an error, it will stop doing so.
 Until we deploy, `false` is still what the box returns; do not treat it as an error either way.
 
+**And one thing our own pre-merge review found, which we would rather tell you than let you discover.**
+Making the endpoint answer `true` was not by itself enough to make *"retry freely"* true. A repeat ack
+used to return early **without re-writing the state file** — so if the original ack's disk write never
+landed (the failure a retry is *most* likely to meet alongside a dropped response), your retry would
+have been told `true` and still written nothing, and the dismissal would not have survived the next
+restart. That is now fixed in the same PR: a repeat ack re-persists, so **a retry actually repairs a
+write that did not land** rather than politely agreeing with you. Verified end-to-end, not just in a
+unit test — we forced the on-disk state back to unacknowledged behind a running server, retried the ack
+over HTTP, and confirmed the file was repaired.
+
+This is worth naming plainly because it is the fourth instance on this contract of the same thing: the
+delivered prose described a stronger guarantee than the delivered code. This time the review caught it
+before you did.
+
 ## 6. What the deploy will change on the box
 
 Verified still running right now: **every 20 minutes the box saves unvalidated cookies, receives
