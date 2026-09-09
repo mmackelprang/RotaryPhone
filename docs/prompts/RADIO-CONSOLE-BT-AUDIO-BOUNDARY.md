@@ -501,6 +501,49 @@ established fact, and it is the only form that survives a status field lying.
 `src/`-scoped greps agreed and were all wrong; two status fields reported confidently and were both
 wrong. **Agreement between sources that share a blind spot is not corroboration.**
 
+### ⛔ "Merged" ≠ "deployed" ≠ "INSTALLED" — a three-link chain, and BOTH services have it
+
+Found by Radio Console on 2026-09-09, then confirmed to exist identically in this repo. **Each link can
+succeed while the next silently does not happen**, and every check either side had agreed to run would
+have passed anyway:
+
+```
+merged into origin/main  ->  shipped by the deploy script  ->  INSTALLED by a separate manual setup script
+```
+
+| Service | Deploy script ships it to | Installed to | By | Deploy runs the installer? |
+|---|---|---|---|---|
+| Radio Console | — | `/usr/local/bin/radio-console-open` | `setup-kiosk.sh` | **No** — `setup-kiosk.sh` appears in `Deploy-ToLinux.ps1:170` only inside a *warning string* |
+| **RotaryPhone** | `${TargetPath}/deploy/` (`Deploy-ToLinux.ps1:186`) | `~/bin/gv-bridge-ensure.sh` | `setup-gvbridge.sh:131` | **No** — `setup-gvbridge.sh` appears in `Deploy-ToLinux.ps1` only in *comments* (`:169`, `:170`, `:192`); it is never executed |
+
+⚠ **So a RotaryPhone deploy updates the repo copy on the box and leaves the INSTALLED copy in `~/bin`
+untouched, however stale, while reporting success.** That is not hypothetical for the other service:
+the 2026-09-08 Change Log records Radio Console's `KIOSK-2` as a **second consumer** of
+`~/bin/gv-bridge-ensure.sh`. A stale installed copy on our side is their bug too.
+
+⭐ **Why this defeats the trigger rule as first written.** "Verify `KIOSK-3` is in `origin/main`" checks a
+**proxy** for the thing that matters. Merged and deployed would both have been true, both verifiable,
+and the box would still have been running the old parser — a false report made in good faith and
+confirmed by every agreed check. **Agreement between sources that share a blind spot is not
+corroboration, one level up again.**
+
+**Therefore the deploy trigger verifies the INSTALLED ARTEFACT, not the merge:**
+
+```bash
+# Radio Console's launcher — must no longer read the removed field
+ssh mmack@radio "grep -c psidtsAgeSeconds /usr/local/bin/radio-console-open"   # expect 0
+ssh mmack@radio "grep -c lastApiSuccessAt /usr/local/bin/radio-console-open"   # expect >= 1
+```
+
+**Verify the artefact that will actually run, on the machine it will run on.** A commit, a green deploy,
+and a status field are all proxies; the installed file is the fact.
+
+⚠ **Open on our side, and it should be fixed before the next deploy:** either `Deploy-ToLinux.ps1` runs
+`setup-gvbridge.sh` after shipping it, or the deploy prints a loud unmissable instruction that the
+manual step is still required. Today it copies the installer next to the box's stale installed copy and
+says nothing — which reads as success. Tracked here rather than fixed inline because it is deploy
+tooling, and the same PR should address the `appsettings.Production.json` clobber above.
+
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
 **Default: ONE file per side per day.** Immediate delivery is the exception and must earn itself.
