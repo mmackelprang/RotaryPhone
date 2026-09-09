@@ -113,8 +113,14 @@ if (-not $synced) {
   #     needs restoring. It used to be backed up + restored around the extract, and that dance
   #     clobbered the config two different ways when either of its best-effort ends failed --
   #     see deploy/tests/repro-tar-clobber.sh cases B1 and B2, and the exclude comment below.
-  #   * $LASTEXITCODE is checked so a failed sync ABORTS the deploy instead of restarting the
-  #     service on the OLD binary (the silent-stale-deploy bug this replaces).
+  #   * The remote chain now runs under its own `set -e`. It used to end in `chmod`, so the chain
+  #     reported CHMOD's status -- 0 -- while tar had exited 2. The $LASTEXITCODE check below was
+  #     real but structurally blind, and the deploy restarted the service on a half-extracted tree
+  #     while printing success. Measured 2026-09-09; the old comment claiming this was already
+  #     handled was wrong. See docs/plans/deploy-tooling-honest-deploy-plan.md Defect 4.
+  #   * An exit code says what a program CLAIMED. The size check after the sync asks the box what
+  #     it actually has, which is the only statement here that does not depend on a status being
+  #     reported honestly.
   if (-not $rsyncAvailable) {
     Write-Host "  rsync not found, using tar-pipe over ssh (bash)..." -ForegroundColor Yellow
   }
@@ -155,8 +161,28 @@ if (-not $synced) {
     # A genuine first deploy still gets its config: :142-148 scps the template in
     # when the box has no appsettings.Production.json, which is now the only path
     # that ever writes this file.
-    "tar -C '$publishMsys' --exclude=./appsettings.Production.json --exclude=./.playwright -czf - . |" +
+    "cd '$publishMsys'`n" +
+    # Files-only member list, and no './' member. GNU tar creates missing parent
+    # directories on extract (verified: a 'sub/deep' that did not exist beforehand
+    # is created), so directory members buy nothing here -- and --unlink-first calls
+    # unlink() on every one of them, which cannot succeed. `tar -czf - .` therefore
+    # made tar exit 2 on EVERY run (measured 2026-09-09,
+    # deploy/tests/repro-tar-clobber.sh case A; seen live on the box the same day).
+    # Dropping the directory members is what lets the exit status below be honest
+    # instead of decorative -- and stops four `Cannot unlink` lines printing on every
+    # successful deploy, which is what trained us to scroll past them.
+    #
+    # -type l is included so symlinks ship as symlinks. --exclude works against the
+    # names read from -T -, verified against the real publish output: 396 members,
+    # 0 directory members, 0 appsettings.Production.json.
+    "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
+      " tar --null --exclude=./appsettings.Production.json -czf - -T - |" +
+      # `set -e` in the REMOTE shell. Without it the compound's status is the LAST
+      # command's -- chmod's -- so a failed tar reported 0. The remote shell does not
+      # inherit the local `set -e -o pipefail` above: that one governs this script,
+      # and by the time it can act the remote work has already finished.
       " ssh '$SshTarget' '" +
+      "set -e; " +
       "tar -xzf - --unlink-first -C $TargetPath; " +
       "chmod +x $TargetPath/RotaryPhoneController.Server'`n"
   $syncScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-deploy-sync.sh"
@@ -168,6 +194,21 @@ if (-not $synced) {
   if ($syncExit -ne 0) { throw "tar-pipe deploy failed (exit $syncExit) -- aborting (service NOT restarted; still on prior binary)" }
   $synced = $true
 }
+
+# Independent of every exit status above: ask the box what it has. An exit code says
+# what a program claimed; this says what is on disk. Runs on both sync paths, because
+# a silently-truncated rsync is no better than a silently-failed tar.
+$localBinSize = (Get-Item (Join-Path $PublishDir "RotaryPhoneController.Server")).Length
+$remoteBinSize = (ssh $SshTarget "stat -c %s ${TargetPath}/RotaryPhoneController.Server 2>/dev/null")
+$statExit = $LASTEXITCODE
+if ($statExit -ne 0) {
+  throw "sync verification FAILED: could not stat ${TargetPath}/RotaryPhoneController.Server on ${TargetHost} (exit $statExit). The service has NOT been restarted."
+}
+$remoteBinSize = "$remoteBinSize".Trim()
+if ($remoteBinSize -ne "$localBinSize") {
+  throw "sync verification FAILED: ${TargetPath}/RotaryPhoneController.Server is $remoteBinSize bytes on ${TargetHost}, expected $localBinSize. The service has NOT been restarted."
+}
+Write-Host "  Sync verified: binary is $localBinSize bytes on the box" -ForegroundColor Green
 
 # Copy appsettings.Production.json only if it doesn't exist on target
 $prodExists = ssh $SshTarget "test -f ${TargetPath}/appsettings.Production.json && echo EXISTS"
