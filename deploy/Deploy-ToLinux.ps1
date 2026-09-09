@@ -290,6 +290,31 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   ssh $SshTarget "mkdir -p ${TargetPath}/deploy/systemd"
   if ($LASTEXITCODE -ne 0) { throw "failed to create ${TargetPath}/deploy on ${SshTarget} (exit $LASTEXITCODE)" }
 
+  # ⛔ Hard gate, and it runs BEFORE any scp so a bad file never reaches the box.
+  #
+  # Today setup-gvbridge.sh is shipped but never executed by the deploy, so
+  # gv-bridge-ensure.sh sits on the box as an inert file and its contents do not
+  # matter. The moment the deploy runs the installer (plan Task 10, not yet built)
+  # that file becomes an executed one, and --password-store stops being inert. On a
+  # profile already holding v11 cookies it makes the keyring-derived key
+  # unobtainable and Chrome DISCARDS them: measured live at 45 v11 -> 16 v10,
+  # destroying the Google Voice session. ~/.config/gv-bridge-chrome is exactly that
+  # profile. The gate lands first, deliberately, so the hazard is closed before the
+  # change that opens it.
+  #
+  # Scoped to this ONE file deliberately. A repo-wide search is NOT equivalent:
+  # scripts/bin/Debug/net10.0/.playwright/.../chromiumSwitches.js carries
+  # "--password-store=basic" as one of Playwright's own Chromium defaults, so a broad
+  # grep fails on a clean tree (verified 2026-09-09).
+  $ensureSrc = Join-Path $deployScripts "gv-bridge-ensure.sh"
+  if (Test-Path $ensureSrc) {
+    if (Select-String -Path $ensureSrc -Pattern 'password-store' -SimpleMatch -Quiet) {
+      throw "REFUSING TO DEPLOY: deploy/gv-bridge-ensure.sh contains --password-store. On ~/.config/gv-bridge-chrome that discards the v11 cookies and destroys the Google Voice session. Remove the flag, then redeploy."
+    }
+  } else {
+    throw "REFUSING TO DEPLOY: deploy/gv-bridge-ensure.sh is missing -- setup-gvbridge.sh would fail on the box after the binary sync had already landed."
+  }
+
   foreach ($script in $shellScripts) {
     scp ($script.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/"
     if ($LASTEXITCODE -ne 0) { throw "failed to copy $($script.Name) (exit $LASTEXITCODE) -- aborting before the box is left with a stale copy" }

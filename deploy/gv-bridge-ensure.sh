@@ -6,6 +6,7 @@
 #   - gv-bridge-watchdog.timer                      every 2 minutes (liveness)
 #   - ~/.config/autostart/gv-bridge-chrome.desktop  at GNOME login
 #   - gv-bridge-restart.sh                          after the nightly kill
+#   - the deploy's post-install gate                --print-config, side-effect free
 #
 # Idempotent by contract: the watchdog runs this every 2 minutes, so an
 # invocation made while the bridge is already up does nothing and exits 0.
@@ -32,35 +33,11 @@ MARKER="user-data-dir=${PROFILE}"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-# Serialize against the other launcher. The watchdog fires every 2 minutes and
-# the nightly recycle kills-then-relaunches, so without this the recycle's
-# `pkill -9` can land on a Chrome the watchdog started a moment earlier and
-# leave a half-initialised profile behind. Both scripts take the same lock.
-#
-# Failing to take it is not an error here: whoever holds it is already bringing
-# the bridge up or recycling it, which is exactly the outcome this script wants.
-LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
-
-# Only lock if the lock is actually obtainable. If flock is missing or the file
-# cannot be opened, carry on WITHOUT it: an unserialized launch risks a rare
-# double-start, but treating an unopenable lock as "someone else has it" would
-# mean never launching the bridge at all, which is far worse.
-if command -v flock >/dev/null 2>&1 && : >>"${LOCK}" 2>/dev/null; then
-  exec 9>>"${LOCK}"
-  flock -n 9 || exit 0
-fi
-
-# Checked under the lock, so the answer cannot go stale between here and launch.
-if pgrep -f "${MARKER}" >/dev/null 2>&1; then
-  exit 0
-fi
-
-mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
-
-# Chrome refuses to open a profile whose Singleton* lock files survive a crash
-# or a kill -9, so clear them before every launch attempt.
-rm -f "${PROFILE}"/Singleton* 2>/dev/null || true
-
+# --- The launch command line -------------------------------------------------
+# Built HERE, before the lock and before any mkdir, so --print-config below can
+# report it without taking the lock or touching the filesystem. The construction
+# is pure — a [ -d ] test and array appends — so nothing changes by it happening
+# earlier than it used to.
 CHROME_ARGS=(
   # Keeps Google Voice's own ringer and call audio out of the console speakers.
   --mute-audio
@@ -99,6 +76,61 @@ CHROME_ARGS+=(
   "--remote-allow-origins=*"
   "${BRIDGE_URL}"
 )
+
+# --- Self-report -------------------------------------------------------------
+# The deploy calls this on the INSTALLED copy after setup-gvbridge.sh runs, so
+# the gate tests what the installed thing DOES rather than what a file contains:
+# a checksum cannot catch a bad mode, a partial copy, or the wrong file under the
+# right name.
+#
+# Deliberately NOT a --version constant. A hand-maintained version string is a
+# second source of truth that goes stale silently — which is the whole disease
+# the deploy PR this arrived with exists to treat. This reports the real,
+# resolved command line, so it cannot drift from the code it lives in.
+#
+# Must run BEFORE the lock and BEFORE any mkdir: it has to be side-effect free so
+# the watchdog's 2-minute cadence cannot be disturbed by a deploy asking a
+# question. It launches no Chrome, creates no lock file and writes no log.
+#
+# ${1:-} rather than $1 because of `set -u` above: the no-argument case is the
+# normal one and must stay safe.
+if [ "${1:-}" = "--print-config" ]; then
+  printf 'script=gv-bridge-ensure.sh\n'
+  printf 'profile=%s\n'    "${PROFILE}"
+  printf 'cdp_port=%s\n'   "${CDP_PORT}"
+  printf 'url=%s\n'        "${BRIDGE_URL}"
+  printf 'chrome_arg=%s\n' "${CHROME_ARGS[@]}"
+  exit 0
+fi
+
+# Serialize against the other launcher. The watchdog fires every 2 minutes and
+# the nightly recycle kills-then-relaunches, so without this the recycle's
+# `pkill -9` can land on a Chrome the watchdog started a moment earlier and
+# leave a half-initialised profile behind. Both scripts take the same lock.
+#
+# Failing to take it is not an error here: whoever holds it is already bringing
+# the bridge up or recycling it, which is exactly the outcome this script wants.
+LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
+
+# Only lock if the lock is actually obtainable. If flock is missing or the file
+# cannot be opened, carry on WITHOUT it: an unserialized launch risks a rare
+# double-start, but treating an unopenable lock as "someone else has it" would
+# mean never launching the bridge at all, which is far worse.
+if command -v flock >/dev/null 2>&1 && : >>"${LOCK}" 2>/dev/null; then
+  exec 9>>"${LOCK}"
+  flock -n 9 || exit 0
+fi
+
+# Checked under the lock, so the answer cannot go stale between here and launch.
+if pgrep -f "${MARKER}" >/dev/null 2>&1; then
+  exit 0
+fi
+
+mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
+
+# Chrome refuses to open a profile whose Singleton* lock files survive a crash
+# or a kill -9, so clear them before every launch attempt.
+rm -f "${PROFILE}"/Singleton* 2>/dev/null || true
 
 # --collect reaps the transient unit once Chrome reparents itself away from it,
 # so repeated launches do not accumulate failed scopes.
