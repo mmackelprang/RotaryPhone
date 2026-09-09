@@ -376,6 +376,35 @@ tar -tzf "$WORK/fixed.tgz" | grep -q appsettings.Production.json && { echo "C: F
 - **C: PASS** — the archive has no `appsettings.Production.json` member, the destination sha256 is
   unchanged, and the new binary still landed.
 
+> ### ⛔ Correction 2026-09-09, made while building this task — case B's stated mechanism is wrong
+>
+> All three cases behave as written above. **Case B's explanation does not.** The comment in the script
+> block says *"cp -f fails and is swallowed; `[ -f ]` then sees the STALE file"*. Measured against that
+> exact fixture:
+>
+> ```
+> cp -f src ro/rp-prod.bak     -> exit 0, backup content becomes BOX-AUTHORITATIVE
+> mv -f ro/rp-prod.bak dst/…   -> mv: cannot move …: Permission denied, exit 1
+> ```
+>
+> Writing to an **already-existing, writable** file needs no write permission on the containing
+> directory — only *unlinking* it does. So in that fixture the backup **succeeds** and it is the
+> **restore** that fails. The assertions (`config=TEMPLATE-FROM-REPO`, `backup=survives`) pass either
+> way, which is precisely why this was worth catching: a green check whose stated mechanism is wrong is
+> the defect this PR exists to fix, one level up.
+>
+> **The shipped script therefore splits case B in two**, both measured, neither hypothetical:
+>
+> | Case | Fixture | What fails | Result |
+> |---|---|---|---|
+> | **B1** | first deploy (no config on the box) + a stale `/tmp/rp-prod.bak` | the **backup** `cp -f` (source absent) | `[ -f ]` is true and the restore installs **stale content from an earlier run**. ⛔ Worse than the template — arbitrary config, chain exits 0 |
+> | **B2** | this plan's original read-only-directory fixture, kept and relabelled | the **restore** `mv` | the repo **template** stays on the box and the backup is stranded in `/tmp` — exactly the state PR #72 UAT found |
+>
+> **Nothing downstream is invalidated.** Task 3's fix is mechanism-independent by design (§0.2: *"removes
+> the state rather than protecting it"*), so it closes both. The script adds **C-B1** and **C-B2** —
+> both fixtures re-run against the fixed chain — which is what Task 3's strengthened acceptance
+> criterion actually asks for and which the block above did not implement.
+
 ---
 
 #### Task 2 — Correct `docs/KNOWN-ISSUES.md` by annotation · lane **L**
@@ -581,6 +610,32 @@ measured by a **sibling repo on PowerShell 7.6.5**, not by us. Two things could 
   mandatory regardless**, and the borrowed measurement is not even applicable.
 
 Either way the pattern below is correct; only the *reason* changes.
+
+##### ✅ Step 0 MEASURED 2026-09-09 — the second hypothesis is the right one, and the shortcut is a no-op
+
+Run on the deploying machine, both shells present on it:
+
+| | Windows PowerShell | PowerShell 7 |
+|---|---|---|
+| `$PSVersionTable.PSVersion` | **5.1.26100.9343** | **7.6.5** |
+| `$PSVersionTable.PSEdition` | Desktop | Core |
+| `Test-Path variable:PSNativeCommandUseErrorActionPreference` | **False — the variable does not exist** | True |
+| `$PSNativeCommandUseErrorActionPreference` | *(nothing)* | **False** |
+| `$ErrorActionPreference` (default) | Continue | Continue |
+
+The plan's *"more likely, it does not exist"* branch is the one that holds: under 5.1 — which
+`:122`'s own workaround comment says this script runs under — the variable is **absent entirely**.
+
+⛔ **And this makes the shortcut worse than merely wrong-scoped.** Under 5.1, assigning
+`$PSNativeCommandUseErrorActionPreference = $true` is not an error and not a warning: PowerShell creates
+a new variable, nothing ever reads it, and the deploy carries on exactly as before. **The "fix" would
+look applied and do nothing** — the same disease as the `:113-114` comment this task exists to correct.
+Under 7.6.5 it would work, and would change control flow for every native call in the file at once,
+including the rsync branch at `:88-100` that depends on rsync being allowed to fail.
+
+The sibling repo's borrowed `$false` on 7.6.5 turns out to be reproducible here — but it was never the
+load-bearing fact. **The per-call `$LASTEXITCODE` capture is mandatory under either shell**, and it is
+the only remedy that behaves identically in both.
 
 ##### 📌 Scope note — corroboration from a separate source, and where our shape differs
 
@@ -1302,6 +1357,50 @@ If the bare call already works, the explicit variables in Task 10 are harmless b
 form works, Task 10 is correct as written. If **neither** works, `Linger=no` is the reason and Task 10
 needs `loginctl enable-linger` — a box-side change with its own rollback story, which would make this a
 **blocker** rather than a detail.
+
+#### ✅ ANSWERED 2026-09-09 (owner-run) — Task 10 is not blocked. The caveat is the interesting part.
+
+```
+ssh radio 'systemctl --user is-system-running; echo "rc=$?"'
+  running
+  rc=0
+
+ssh radio 'systemctl --user list-timers "gv-bridge-*"'
+  NEXT                        LEFT      LAST                        PASSED  UNIT
+  Wed 2026-09-09 11:50:00 EDT 1min 45s  Wed 2026-09-09 11:48:00 EDT 14s ago gv-bridge-watchdog.timer
+
+ssh radio 'XDG_RUNTIME_DIR=… DBUS_SESSION_BUS_ADDRESS=… systemctl --user list-timers "gv-bridge-*"'
+  (identical output)
+
+ssh radio 'loginctl show-user $(whoami) -p Linger'
+  Linger=no
+```
+
+**The bare call already works over non-interactive ssh**, so by this section's own decision table the
+explicit `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` in Task 10 are harmless belt, Task 10 is correct
+as written, and no `loginctl enable-linger` is needed.
+
+⚠ **But the measurement was taken in a state Task 10 will not run in, and that is the surviving risk.**
+`Linger=no` means the per-user systemd manager exists **only while the user has an active session**. The
+bare call worked because there **is** one right now — the box is idle in its normal state, kiosk up and
+the watchdog firing, as that timer output shows.
+
+The deploy stops services and the kiosk at Step 2, and Task 10 runs **after** that. If stopping the kiosk
+ends the user's login session, the user manager goes away with it and `systemctl --user` fails at exactly
+the moment Task 10 needs it — **after the binary sync has already landed**. Nothing was mid-deploy when
+this was measured, so the measurement cannot speak to that state.
+
+⭐ **This is the same shape as everything else in this plan: a check that passes in the state you can
+easily observe, and says nothing about the state that matters.** "Q1 answered" must not be read as
+"Task 10 is safe".
+
+**How to settle it cheaply when Task 10 is built** — one command, in the right state, on a real deploy:
+run `ssh radio 'systemctl --user is-system-running'` **after** the deploy's Step 2 has stopped the kiosk
+and **before** the installer runs. That converts the assumption into a measurement.
+
+**If the manager does go away**, Q2's `--scripts-only` contingency removes the `systemctl --user`
+dependency from the deploy path entirely and the blocker evaporates. The contingency is already
+designed — it simply has not been chosen.
 
 ### Q2 — Full installer, or a `--scripts-only` mode?
 

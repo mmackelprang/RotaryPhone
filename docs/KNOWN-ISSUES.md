@@ -131,18 +131,81 @@ The box's copy is **authoritative** (see `docs/HT801-ADDRESS.md`) and carries va
 does not: `EnableMarkRead`, the GV number (`GvPhoneNumber: +1XXXXXXXXXX` — redacted; this repo is public),
 and the HT801 address, in addition to the BT keys above.
 
+> ### ⛔ Correction 2026-09-09 — step 3's mechanism is wrong; the defect is not. Entry stays OPEN.
+>
+> **Falsified twice: locally** (`deploy/tests/repro-tar-clobber.sh` case A) **and by a live deploy on the
+> box.** Step 3 above says `set -e -o pipefail` aborts the chain before the restore `mv` runs. That
+> `set -e` is in the **local** PowerShell-invoked script (`Deploy-ToLinux.ps1:125`). Backup → extract →
+> restore is a `;`-separated string executed by the **remote** shell, which does not inherit it, and
+> `pipefail` can only abort the local script after the remote work has finished. **The restore runs.**
+>
+> The live deploy proved the sequence with three facts rather than assuming it: the config's sha256 was
+> **unchanged**, its mtime **moved**, and `/tmp/rp-prod.bak` was **gone**. tar overwrote the file and the
+> restore put it back.
+>
+> What step 3 got right: `--unlink-first` really does fail on the archive's directory members and tar
+> really does exit 2 — on **every** run, because `tar -czf - .` always carries a `./` member.
+>
+> **The mechanism that actually clobbers — and there are two of them, not one.** Both ends of the dance
+> are best-effort (`2>/dev/null || true`), so *either* end can fail silently and each produces a
+> different bad outcome. Measured 2026-09-09:
+>
+> - **Backup-side failure** (`repro-tar-clobber.sh` case **B1**). `cp -f … /tmp/rp-prod.bak` fails — no
+>   config on the box yet on a first deploy, `/tmp` unwritable, disk full — and is swallowed. The
+>   `[ -f ]` guard is nonetheless **true**, because a `rp-prod.bak` from an earlier run is still sitting
+>   in `/tmp`, and the restore installs that **stale** content. ⛔ **This is the worst case:** the box
+>   does not get the repo template, which is at least a reviewable file in version control — it gets
+>   arbitrary config from a previous deploy, and the chain exits 0.
+> - **Restore-side failure** (case **B2**). The backup **succeeds**, and the restore `mv` is what fails —
+>   a sticky `/tmp` holding an `rp-prod.bak` this uid cannot unlink, for instance. tar's template stays
+>   on the box and the backup is stranded in `/tmp`. **This is exactly the state PR #72 UAT found**
+>   (finding L3): clobbered config, backup still present.
+>
+> ⚠ **A note on how nearly this correction repeated the original error.** The implementation plan for
+> this fix proposed a single case B, using a read-only parent directory, and attributed it to the
+> **backup** side. Measured, that fixture's `cp -f` exits **0** and it is the `mv` that fails — writing
+> to an already-existing writable file needs no write permission on the containing directory, only
+> unlinking it does. The assertions passed either way. A green check with a wrong stated mechanism is the
+> same defect as the one this entry records, one level up, so the fixture was kept as B2 and correctly
+> labelled rather than quietly re-explained.
+>
+> **A second, worse thing came out of the same measurement.** The remote chain's exit status is
+> `chmod`'s, so it reports **0** while tar has failed. The comment at `Deploy-ToLinux.ps1:113-114`
+> claiming the exit-code check prevents a silent stale deploy is therefore **false on the tar path** —
+> the check is real but structurally blind. Tracked as Defect 4 in
+> [`docs/plans/deploy-tooling-honest-deploy-plan.md`](plans/deploy-tooling-honest-deploy-plan.md).
+>
+> ⚠ **And this is not a rare path.** `rsync` is absent from the deploying machine's PowerShell `PATH`, so
+> `Get-Command rsync` finds nothing and **every deploy from that machine takes the tar path.** Installing
+> rsync changes the default; it does not fix the fallback.
+>
+> ⭐ **The lesson, which is the part worth keeping.** The recorded explanation was written after the
+> defect was correctly observed, and it was wrong. It stayed plausible for five weeks because it named a
+> real flag (`set -e`) doing a real thing (aborting a chain) in the wrong shell. Fixing what it described
+> — making the restore unconditional, or wrapping it in a `trap` — would have changed nothing and looked
+> like a fix. The chosen fix instead removes the file from the tar stream, so the property holds
+> whichever way the dance fails.
+
 **Proposed fix (not done in PR #72 — deploy tooling, needs its own change + rollback story):**
 
 - **Primary:** add `--exclude=./appsettings.Production.json` to the `tar -C … -czf -` invocation in
   `deploy/Deploy-ToLinux.ps1`, matching what the rsync path already does. Then the file is never in the
   stream and the fragile backup/restore dance stops being load-bearing.
+  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 3. The dance is deleted, not repaired.
 - **Belt and braces:** drop it from the publish output entirely — in
   `src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj`, exclude
   `appsettings.Production.json` from `Content` (or set `CopyToPublishDirectory=Never`), so no artifact
   can carry a config that only the box should own.
+  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 5.
 - **Either way:** make the restore unconditional (run it in a `trap`/`||` rather than after a `set -e`
   command that can abort), and have the deploy **print** the post-deploy `BluetoothAdapter` value so a
   clobber is loud instead of silent.
+  > ⛔ **First half superseded** — the restore already runs; see the correction above. Making it
+  > unconditional would have changed nothing, because in case B2 the `mv` runs and *fails*, and in case
+  > B1 it runs and installs the wrong file. There is no version of "run the restore harder" that fixes
+  > either.
+  > 📌 **Second half still open** — printing the post-deploy `BluetoothAdapter` value is Task 6 of the
+  > plan and is **not** in `fix/deploy-honest-status`; its acceptance needs a live deploy to demonstrate.
 
 **Until it is fixed — mandatory manual step on every deploy:** back up
 `/opt/rotary-phone/appsettings.Production.json` **before** the sync and verify it **after**, explicitly

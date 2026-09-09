@@ -17,6 +17,10 @@ install and the #78/#79 deploy come first. This fixes the tooling that will run 
 - The **tar-pipe fallback** (`:124-129`) backs up to `/tmp/rp-prod.bak`, extracts, then restores.
 - ⚠ **It is reachable on any rsync FAILURE, not only rsync's absence** (`:98`) — a transient network
   error drops a working machine onto this path.
+  > ⚠ **Corrected 2026-09-09 — understated.** `rsync` is absent from the deploying machine's PowerShell
+  > `PATH`, so `Get-Command rsync` finds nothing and **every deploy from that machine takes this path.**
+  > It is not a fallback; it is the only path running today. The owner is installing `rsync` separately,
+  > which changes the default and **does not fix the fallback**.
 
 **Why it matters beyond this service:** the clobbered template resets **`BluetoothAdapter: hci1`** and
 `UseActualBluetoothHfp`. That **crosses the audio boundary into Radio Console** and nothing in the
@@ -36,6 +40,13 @@ later for the original reason. **Reproduce the clobber first, then fix what actu
 
 **Acceptance:** a deliberately-failed rsync followed by the tar path leaves the box's
 `appsettings.Production.json` byte-identical, proven by sha256 before and after.
+
+> ⛔ **Superseded 2026-09-09 — this criterion passes against the UNFIXED code.** A live deploy on the box
+> that day was exactly this test, and it passed while the defect was present: the restore ran and put the
+> file back, so sha256 was unchanged. It measures the *plain* case, in which the dance works. The
+> criteria that the current code actually fails are `deploy/tests/repro-tar-clobber.sh` cases **B1** and
+> **B2** — the two ways an end of the dance fails silently — re-run against the fixed chain as **C-B1**
+> and **C-B2**. See the plan's §0.2 and Task 3.
 
 ---
 
@@ -107,6 +118,49 @@ Voice session. `~/.config/gv-bridge-chrome` is exactly that profile.
 
 ---
 
+## Defect 4 — the tar path has never been able to detect its own failure (added 2026-09-09)
+
+Found while re-deriving Defect 1's mechanism, not part of the original scope.
+
+The remote command string ends in `chmod`, so **the chain reports `chmod`'s exit status**. `tar` exiting 2
+yields a chain exit of **0**. And tar exits 2 on *every* run: `tar -C … -czf - .` always carries a `./`
+member and `--unlink-first` calls `unlink(".")` on it, which cannot succeed. So the comment at
+`Deploy-ToLinux.ps1:113-114` — *"$LASTEXITCODE is checked so a failed sync ABORTS the deploy"* — has never
+been true on this path. The check is real; it is structurally blind.
+
+**Second cost, and it is the one that bites people:** four `tar: … Cannot unlink` lines print on every
+successful deploy, which trains the operator to read a failing deploy as normal. The diagnostic that
+should raise the alarm is the one already being scrolled past.
+
+**Third, and wider than the tar path: 11 of the script's 20 native calls have no exit check at all** —
+including `scp` of the initial `appsettings.Production.json` (`:147`), `chmod 755` on the deploy scripts
+(`:204`), `chmod +x` on the server binary (`:208`), the `scp`+install of `rotary-phone.service`
+(`:216-217`), and `systemctl restart` (`:221`). Each failure is silent and the script still prints
+`=== Deploy Complete ===`.
+
+⚠ **`$ErrorActionPreference = "Stop"` does not fix this** — it does not cover native commands, as the
+script's own comment at `:172-176` already states. The remedy is a per-call `$LASTEXITCODE` capture.
+
+⛔ **And the setting that *would* cover native commands is a trap here, measured 2026-09-09 on the
+deploying machine.** `$PSNativeCommandUseErrorActionPreference` **does not exist** under Windows
+PowerShell **5.1.26100.9343** (Desktop), which is what `Deploy-ToLinux.ps1:122`'s own workaround comment
+says this script runs under. Assigning it there is not an error — it silently creates a variable nothing
+reads, so the "fix" appears to work and does nothing. PowerShell **7.6.5** is also installed on the same
+machine, where the variable exists and reads `$False`. Whichever shell the deploy is launched from, the
+per-call capture is the only remedy that works, and setting the preference variable would either be a
+no-op (5.1) or change control flow for every native call in the file at once (7.x) — including the rsync
+path at `:88-100`, whose fallback depends on rsync being *allowed* to fail.
+
+Measured 2026-09-09 (`deploy/tests/repro-tar-clobber.sh` case A, plus a native-call audit) and seen live
+on the box the same day. The same defect class was found independently in a sibling repo, whose remote
+compound ended in `rm -rf` where ours ends in `chmod`.
+
+**Acceptance:** a deliberately-failed extract makes the deploy throw and leaves the service unrestarted;
+an unreachable target host aborts at the first failing call instead of printing `=== Deploy Complete ===`.
+Handled by Tasks 4 and 4b.
+
+---
+
 ## Out of scope
 
 - Radio Console's `setup-kiosk.sh` gap — theirs, tracked on their side.
@@ -119,3 +173,13 @@ Voice session. `~/.config/gv-bridge-chrome` is exactly that profile.
 the ordering of install-vs-restart needs deciding, since `setup-gvbridge.sh` touches autostart and
 timers. Radio Console explicitly refused to run their installer while a deploy held the tree; the same
 race may exist here.
+
+> ✅ **Answered 2026-09-09 — no, and the two do not interact.** `setup-gvbridge.sh` writes to `~/bin`,
+> `~/.config/systemd/user`, `~/.config/autostart` and `~/Desktop`, and drives `systemctl --user`.
+> `rotary-phone.service` is a **system** unit, restarted at Step 4 (`:221`) after all file copying. The
+> only mention of `rotary-phone.service` inside the installer is `After=`/`Wants=` in the **opt-in
+> legacy** block (`:233-234`), off by default. There is no install-vs-restart race.
+>
+> ⚠ **The real race is one this doc does not mention:** the `gv-bridge-watchdog.timer`, which fires every
+> 2 minutes with no quiet window to install in. See the plan's §0.5 and Tasks 7 and 11. Three new open
+> questions replace this one in the plan's §6.
