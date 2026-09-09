@@ -15,10 +15,11 @@ public record GvCookieStatusDto(
 
 /// <summary>
 /// Typed response for GET /api/gvbridge/status. Serializes to camelCase JSON.
-/// The first four field NAMES (available, activeMode, sipRegistered, cookiesValid)
-/// are part of the established contract and must not be renamed. WsConnected and
-/// LastConnectedAt were added by the keep-alive/reconnect work so the endpoint
-/// reflects real socket freshness rather than stale flags.
+/// Four field NAMES — available, activeMode, sipRegistered, cookiesValid — are the original
+/// established contract and must not be renamed. They are no longer the first four POSITIONS:
+/// WsConnected and LastConnectedAt were inserted ahead of cookiesValid by the keep-alive/reconnect
+/// work (so the endpoint reflects real socket freshness rather than stale flags), which leaves
+/// cookiesValid 6th. Position does not matter to a JSON consumer; the names do.
 /// </summary>
 public record GvBridgeStatusDto(
   [property: JsonPropertyName("available")] bool Available,

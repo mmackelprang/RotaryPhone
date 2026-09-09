@@ -101,6 +101,9 @@ public class BellFailureAckEndpointTests
     {
         var ok = Assert.IsType<OkObjectResult>(controller.GetStatus());
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value));
+        // PascalCase here is a HARNESS ARTIFACT, not the contract: this serialises the anonymous
+        // object directly, bypassing ASP.NET's camelCase policy. On the wire the name is
+        // lastBellFailure.
         return doc.RootElement.GetProperty("LastBellFailure").GetProperty("acknowledged").GetBoolean();
     }
 

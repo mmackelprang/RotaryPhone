@@ -168,6 +168,45 @@ public class GVApiAdapterCookieLineageTests
     }
 
     [Fact]
+    public async Task PsidtsMintedAtUtc_DoesNotMoveAcrossReloads()
+    {
+        // Pinned on its own rather than as a side assertion, because psidtsMintedAtUtc is now the
+        // ONLY credential-age signal in the system: psidtsAgeSeconds was removed on 2026-09-08, and
+        // the freeze-pin test deleted alongside it also carried this invariant — after which nothing
+        // held it anywhere. A mutation that re-stamps the mint only on a RE-load (the second call and
+        // later, which every single-reload test above stops short of) stayed green across the suite.
+        //
+        // Why it has to hold: ComputeFirstRefreshDelayMs anchors the first refresh to this timestamp.
+        // A mint that creeps forward on each reload makes an old credential read as a young one and
+        // schedules a full interval for a PSIDTS with minutes left — which is exactly the defect
+        // psidtsAgeSeconds was removed for having, reintroduced through the field that replaced it.
+        var path = Path.Combine(Path.GetTempPath(), "gv-lineage-tests", Guid.NewGuid().ToString("n") + ".enc");
+        var store = new GvCookieStore(path, Convert.ToBase64String(new byte[32]));
+
+        var minted = DateTime.UtcNow.AddMinutes(-42);
+        await store.SaveAsync(
+            GVApiAdapterRecoveryTests.NewCookies().WithRefreshedPsidts("p1", "p3", minted));
+
+        var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore", store);
+
+        Assert.True(await adapter.ReloadCookiesAsync());
+        var afterFirstLoad = adapter.PsidtsMintedAtUtc;
+        Assert.NotNull(afterFirstLoad);
+
+        // THE re-load. Nothing about the credential changed, so nothing about its age may either.
+        Assert.True(await adapter.ReloadCookiesAsync());
+
+        Assert.Equal(afterFirstLoad, adapter.PsidtsMintedAtUtc);
+        Assert.True(
+            Math.Abs((adapter.PsidtsMintedAtUtc!.Value - minted).TotalSeconds) < 1,
+            $"the reload moved the mint time: expected {minted:O}, got {adapter.PsidtsMintedAtUtc:O}");
+
+        File.Delete(path);
+    }
+
+    [Fact]
     public async Task LegacyCookieFileWithNoMintTime_LoadsFine_AndReportsMintTimeAsUnknown()
     {
         // Backward compatibility: an existing gv-cookies.enc has neither new field. It must still load

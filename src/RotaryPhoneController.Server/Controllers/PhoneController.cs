@@ -113,12 +113,29 @@ public class PhoneController : ControllerBase
 
     /// <summary>
     /// Acknowledges (dismisses) the stored bell failure for a phone so it does not reappear after a
-    /// reload. <b>Idempotent:</b> always 200 with <c>acknowledged: true</c> — including a repeat ack
-    /// and an ack of a phone with no stored failure — so a client may retry it freely.
+    /// reload. <b>Idempotent:</b> a repeat ack, and an ack of a phone with no stored failure, both
+    /// answer 200 with <c>acknowledged: true</c> rather than reporting "you changed nothing" as a
+    /// failure — so a client may retry it freely. (Not a claim that EVERY conceivable input yields a
+    /// 200: a null <c>phoneId</c> throws on the dictionary lookup it reaches. The guarantee is the one
+    /// that was published — repeat acks and absent failures — and "always" overstated it.)
     /// </summary>
     [HttpPost("bell-failure/ack")]
     public IActionResult AcknowledgeBellFailure([FromQuery] string phoneId = "default")
     {
+        // Every other phoneId-taking action here 404s an unknown id; this one deliberately does not.
+        // The published contract promised "never a 409 and never an error", and the post-condition —
+        // no unacknowledged failure is showing for that id — genuinely does hold for an id that has
+        // no failures because it does not exist. But a caller-side typo or a phoneId drift would then
+        // read as a successful dismissal for ever, with nothing anywhere to notice it. So the
+        // detection channel moves to the log rather than disappearing.
+        //
+        // ⚠ Do NOT "tidy" this into a `return NotFound()`. Changing the status code is an owner-level
+        // contract decision against a delivered promise, not a cleanup.
+        if (_phoneManager.GetPhone(phoneId) == null)
+            _logger.LogWarning(
+                "Bell failure ack for {PhoneId} returned true by contract, but that id matches no "
+                + "configured phone — most likely a caller-side typo or a phoneId drift", phoneId);
+
         // The response reports the POST-CONDITION — the failure is acknowledged — NOT whether this
         // particular call was the one that changed it. So a repeat ack and an ack of an absent
         // failure are both 200 {"acknowledged": true}, because
@@ -130,7 +147,12 @@ public class PhoneController : ControllerBase
         if (stateChanged)
             _logger.LogInformation("Bell failure acknowledged for {PhoneId} — a live note was cleared", phoneId);
         else
-            _logger.LogDebug("Bell failure ack for {PhoneId} was a no-op — already acked, or none stored", phoneId);
+            // Information, NOT Debug. Now that the wire always says true, this line is the only
+            // remaining signal that an ack changed nothing — and appsettings.Production.json sets
+            // Serilog's MinimumLevel.Default to "Information" while deploy/rotary-phone.service runs
+            // ASPNETCORE_ENVIRONMENT=Production, so at Debug the delta would be destroyed on the
+            // appliance rather than relocated to the log.
+            _logger.LogInformation("Bell failure ack for {PhoneId} was a no-op — already acked, or none stored", phoneId);
 
         return Ok(new { acknowledged = true });
     }
