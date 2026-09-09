@@ -64,6 +64,38 @@ path**, and the box-side cron fires it **every 20 minutes**.
 > expired; the cron is now the mechanism most likely to *destroy* working credentials. Retiring it should
 > be prioritized accordingly. It remains a box-side change needing its own rollback story.
 
+> ⛔ **SUPERSEDED 2026-09-09 — DO NOT ACT ON THE PARAGRAPH ABOVE. Retiring the cron today would remove
+> the only mechanism ever observed doing this job.** Kept visible rather than deleted, because it was
+> correct when written and the reason it stopped being correct is the point.
+>
+> **Two things changed on 2026-09-09, both measured:**
+>
+> 1. **The hardening deployed.** The "✅ IMPLEMENTED 2026-09-08" gate below went live on the box at
+>    **15:28:50Z**. `refresh-from-browser` now validates the candidate against Google *before* adopting:
+>    on refusal it logs *"REJECTED a cookie set from {Source} — Google refused it. The working on-disk
+>    set was NOT overwritten"* (`GVApiAdapter.cs:900`) and returns without touching the good set.
+>    **The downgrade path the paragraph above describes is closed.** The cron can no longer overwrite
+>    working credentials with dead ones.
+>
+> 2. **The cron is load-bearing, and was doing real work all day.** Radio Console traced the journal:
+>    `*/20 * * * * /opt/rotary-phone/refresh-gv-cookies.sh` fired on the 20-minute boundary **all day**
+>    (05:40, 06:00, … 11:20, 11:40), plus once off-cadence at 11:28:56 for the service restart. The
+>    15:40:02Z event that cleared a `browserSessionStale: true` was **that cron slot** — not the
+>    in-process recovery ladder, and not the operator restart that coincided with it.
+>
+> ⚠ **The recovery ladder that is supposed to replace the cron has still NEVER been observed
+> revalidating a stale browser session unattended.** Removing the cron would swap a mechanism proven to
+> work for one proven only to exist.
+>
+> ⚠ **And note what the 19 pre-deploy cron runs actually were.** Between 05:40 and 11:20 the box ran the
+> *unhardened* build, so each of those adoptions was the blind downgrade path. None caused harm because
+> Chrome's session stayed healthy — **that is luck, not design**, and it is the strongest argument for
+> the hardening rather than against the cron.
+>
+> **Revised M1: do not retire the cron. Re-evaluate it only once the in-process ladder has been observed
+> revalidating a stale session unattended** — which is a thing to *measure*, not assume. Until then the
+> cron is a validated, load-bearing mechanism, and this entry's original framing is stale.
+
 **Proposed hardening — ✅ IMPLEMENTED 2026-09-08**, five weeks after it was proposed here and **one day
 after the delay cost an 83-minute guest-facing outage.** All three rules below now hold, in both of the
 two places that persist cookies:
