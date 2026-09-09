@@ -2246,7 +2246,7 @@ at death; a healthy one runs for days. **A plausible-looking number here is wors
 the alarm's whole credibility rests on it: too low and the owner mutes it, too high and it never fires.
 **The threshold is chosen by the owner, after reading this task's report.**
 
-Create `deploy/tools/sample-browser-session-age.sh` and run it **on the box** for at least **72 hours**:
+Create `deploy/sample-browser-session-age.sh` and run it **on the box** for at least **72 hours**:
 
 ```bash
 #!/usr/bin/env bash
@@ -2756,3 +2756,15 @@ watching each fail naming the sentence.
   deploy-scripts copy block is now ~`:367-435`; the post-deploy hooks land before `=== Deploy Complete ===`.
 - **Lane U cannot run in WSL on this workstation:** the projects target `net10.0` and WSL carries only
   SDK 8.0.131 / 9.0.115. The Windows SDK (10.0.400) is what runs them — `dotnet.exe` from WSL works.
+
+### 7.8 ⚠ Task 15's sampler could never have reached the box
+
+The plan puts the sampler at `deploy/tools/sample-browser-session-age.sh` and then says *"run it **on the
+box** for at least 72 hours."* `Deploy-ToLinux.ps1` collects shell scripts with
+`Get-ChildItem -Path deploy -Filter "*.sh" -File` — **no `-Recurse`** — so nothing under `deploy/tools/`
+is ever shipped. A sampler that cannot reach the box cannot sample it.
+
+**Shipped at `deploy/sample-browser-session-age.sh` instead**, where the existing glob picks it up, the
+existing `chmod 755` applies, and it lands in the drift manifest for free. The **analyser** stays in
+`deploy/tools/` deliberately — it runs on the deploying machine against a CSV pulled off the box, so it
+has no reason to ship.

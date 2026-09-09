@@ -5,6 +5,13 @@
 #   nohup bash sample-browser-session-age.sh >/dev/null 2>&1 &
 #   bash sample-browser-session-age.sh --once      # one row, for a smoke test
 #
+# ⚠ IT LIVES IN deploy/ AND NOT deploy/tools/ FOR ONE REASON: that is what ships.
+# Deploy-ToLinux.ps1 collects `Get-ChildItem -Path deploy -Filter "*.sh" -File`
+# with NO -Recurse, so anything under deploy/tools/ never reaches the box — and a
+# sampler that cannot reach the box cannot sample it. The analyser is the other
+# half of this pair and DOES live in deploy/tools/, because it runs on the
+# deploying machine against a CSV pulled off the box, not on the box itself.
+#
 # ⛔ THIS SCRIPT PRODUCES NO THRESHOLD, AND NEITHER DOES ITS ANALYSER.
 # Spec §11 decision 3: "Needs a measured baseline before a number is chosen — do
 # not guess one." Today's session was ~2h old at death; a healthy one runs for
