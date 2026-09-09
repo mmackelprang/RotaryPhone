@@ -255,6 +255,35 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     public bool BrowserSessionStale => _lastBrowserRefreshOutcome == BrowserRefreshOutcome.Stale;
 
     /// <summary>
+    /// Why the last attempt to pull cookies from the box's Chrome ended the way it did, as a string:
+    /// one of <c>NotAttempted</c>, <c>Unreachable</c>, <c>Stale</c>, <c>Succeeded</c>, <c>TornDown</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⛔ ADDITIVE. <see cref="BrowserSessionStale"/> is unchanged and stays — Radio Console consumes the
+    /// boolean under the cross-repo contract (boundary doc, "GV auth lineage" table). Removing or
+    /// repurposing it is a contract breach.
+    /// <para>
+    /// It exists because the boolean is a derived read of ONE enum value. When Chrome is DEAD the outcome
+    /// is <c>Unreachable</c>, so <c>browserSessionStale</c> reads FALSE — a consumer keyed on the boolean
+    /// alone shows a green light on the worst state. That is the 2h10m gap of 2026-09-09 expressed as a
+    /// type. This property reports the whole enum so "signed out" and "gone" are distinguishable.
+    /// </para>
+    /// <para>
+    /// ⚠ The NAME is <c>BrowserRefreshOutcomeName</c>, not <c>BrowserRefreshOutcome</c>, and that is not a
+    /// stylistic choice: a property may not share its name with a nested type in the same class (CS0102),
+    /// and <see cref="BrowserRefreshOutcome"/> is the enum declared at the bottom of this file. Do not
+    /// "tidy" it. The JSON name is <c>browserRefreshOutcome</c> and that is what consumers see.
+    /// </para>
+    /// <para>
+    /// A STRING rather than the enum, for two reasons. The enum is <c>internal</c>, so a public property
+    /// returning it does not compile. And a name on the wire means a future member arrives at a consumer
+    /// as an unrecognised STRING it can log, rather than as a silently-renumbered integer it will
+    /// mis-decode.
+    /// </para>
+    /// </remarks>
+    public string BrowserRefreshOutcomeName => _lastBrowserRefreshOutcome.ToString();
+
+    /// <summary>
     /// When the current cookie set was loaded into the adapter (set during ActivateAsync or ReloadCookiesAsync).
     /// </summary>
     public DateTime? LoadedAt { get; private set; }

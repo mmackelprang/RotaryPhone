@@ -413,6 +413,33 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
     $chmodDeployExit = $LASTEXITCODE
     if ($chmodDeployExit -ne 0) { throw "failed to set modes on ${TargetPath}/deploy (exit $chmodDeployExit) -- setup-gvbridge.sh would not be executable on the box" }
   }
+
+  # Record what the REPO holds for every file we just shipped, and carry it to the box.
+  #
+  # check-installed-drift.sh needs the REPO end of the chain. Comparing only shipped-vs-installed
+  # is a check that runs, passes, and answers a different question: it truthfully reports "the two
+  # copies match" and gets read as "the box has the current file". On a transfer that silently did
+  # nothing, two stale copies match. See docs/plans/gv-session-alarm.md §0.9.
+  #
+  # ⚠ PowerShell-native by requirement, not by taste. Get-FileHash and WriteAllText, then scp as a
+  # native command -- NO local bash/sh/wsl. `bash` on this machine's persistent PATH resolves to
+  # the WSL launcher (C:\WINDOWS\system32\bash.exe), which cannot resolve the msys-style /d/prj/...
+  # paths this script uses; Git\bin and msys64\usr\bin are not on the persistent PATH. ssh.exe and
+  # scp.exe are safe -- they live in C:\WINDOWS\System32\OpenSSH on the MACHINE path.
+  $manifestPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-shipped-manifest.sha256"
+  $manifestLines = foreach ($f in ($shellScripts + $unitFiles)) {
+    $rel = if ($f.Directory.Name -eq "systemd") { "systemd/$($f.Name)" } else { $f.Name }
+    "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
+  }
+  [System.IO.File]::WriteAllText($manifestPath, (($manifestLines -join "`n") + "`n"),
+                                 (New-Object System.Text.UTF8Encoding($false)))
+  # ⛔ The path MUST be slash-converted, exactly like every other scp in this file. Passed raw, a
+  # Windows path reaches scp as "C:\Users\...\rp-shipped-manifest.sha256" and scp reads the leading
+  # "C:" as a REMOTE HOST. The plan's literal code omitted this.
+  scp ($manifestPath -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/.shipped-manifest.sha256"
+  $manifestScpExit = $LASTEXITCODE
+  if ($manifestScpExit -ne 0) { throw "failed to ship the drift manifest (exit $manifestScpExit) -- the post-deploy state check would silently have nothing to compare against" }
+  Remove-Item $manifestPath -ErrorAction SilentlyContinue
 }
 
 # Ensure binary is executable.
@@ -467,6 +494,50 @@ if (-not $NoRestart) {
   ssh $SshTarget "sudo systemctl status rotary-phone.service --no-pager -l" 2>&1 | Write-Host
   $ErrorActionPreference = $eapPrev
 }
+
+# --- Post-deploy: install the alarm, and report the installed state of both groups ---
+#
+# The alarm's installer is narrow and safe to run every deploy; it does NOT touch
+# gv-bridge-ensure.sh. That matters: the shipped copy of gv-bridge-ensure.sh adds
+# `flock ... || exit 0`, a THIRD outcome arriving as exit 0 on a cross-repo contract that
+# already cannot express two. See docs/plans/gv-session-alarm.md §0.2.
+#
+# ⚠ Every shell construct below is on the FAR side of ssh, interpreted by the box's own
+# bash. Nothing here invokes a local interpreter.
+ssh $SshTarget "bash ${TargetPath}/deploy/install-gv-session-alarm.sh"
+$alarmInstallExit = $LASTEXITCODE
+
+# ⛔ DO NOT throw here. The drift check below is the ONLY thing that states what is
+# actually on the box, and a failed install is exactly when the operator needs that
+# statement most. The installer runs under `set -euo pipefail` and installs three files
+# in sequence, so a failure on the second or third leaves a PARTIAL install -- and
+# throwing first would report "the installer failed" while saying nothing about what is
+# now installed. That is this repo's own failure class, arrived at from the tidy end.
+if ($alarmInstallExit -ne 0) {
+  Write-Host "  the GV session alarm installer FAILED (exit $alarmInstallExit) -- reading the installed state before aborting:" -ForegroundColor Red
+}
+
+# Conditional by construction: these print one quiet line when everything matches, and a
+# ⚠ block naming the action only when it does not. Never an unconditional banner -- a
+# warning that fires on a healthy deploy trains the operator to scroll past the one run
+# where it means something, which is exactly what the old "Cannot unlink" line did here.
+#
+# ⚠ --ship-dir is passed explicitly. The script's default happens to equal the default
+# $TargetPath, so omitting it agreed only by coincidence of two defaults -- and a
+# -TargetPath override would have had the check read a DIFFERENT tree's manifest and
+# report confidently about the wrong box directory.
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group alarm --ship-dir '${TargetPath}/deploy'"
+$alarmDriftExit = $LASTEXITCODE
+if ($alarmInstallExit -ne 0) { throw "the GV session alarm installer failed (exit $alarmInstallExit) -- the drift report above states what is actually on the box" }
+if ($alarmDriftExit -ne 0) { throw "the alarm's installed state does not match what was shipped (exit $alarmDriftExit) -- see the drift report above" }
+
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group bridge --ship-dir '${TargetPath}/deploy'"
+$bridgeDriftExit = $LASTEXITCODE
+# ⛔ NOT a throw. ~/bin/gv-bridge-ensure.sh's staleness is real -- measured 2026-09-09, the
+# installed copy is from Aug 18 -- but it is not this deploy's to fix, and fixing it is
+# blocked on a cross-repo exit-code decision (spec §8, §11 decision 4). Aborting here would
+# block every deploy on that decision. It must be LOUD and it must not be fatal.
+if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal; blocked on the gv-bridge-ensure.sh exit-code decision, spec §11 decision 4.)" -ForegroundColor Yellow }
 
 Write-Host ""
 Write-Host "=== Deploy Complete ===" -ForegroundColor Green

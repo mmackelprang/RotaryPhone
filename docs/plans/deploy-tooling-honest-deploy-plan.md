@@ -1053,6 +1053,19 @@ chrome_arg=https://voice.google.com
 **Depends on:** Tasks 7, 8, 9. ⛔ **All three.** Task 7 stops the install racing the watchdog; Task 8 stops
 a session-destroying flag reaching an executed file; Task 9 provides the gate's strongest signal.
 
+> ⛔ **Cross-repo prerequisite added 2026-09-09.** Running `setup-gvbridge.sh` from the deploy INSTALLS
+> `gv-bridge-ensure.sh`, whose shipped copy adds `flock … || exit 0`. Radio Console's KIOSK-2 launcher reads
+> that exit code, and it already cannot distinguish two states; this would add a third, also arriving as 0.
+> Per `docs/superpowers/specs/2026-09-09-gv-session-alarm-design.md` §8, **fixing the exit code is a
+> prerequisite for deploying the shipped `gv-bridge-ensure.sh` at all**, and any change to it must be
+> announced in the boundary doc's Change Log first. Task 10 is therefore blocked on an owner + Radio Console
+> decision (spec §11 decision 4), not merely on box access.
+>
+> ⚠ The GV session alarm does **not** travel on this install path for exactly that reason — it ships its own
+> narrow `deploy/install-gv-session-alarm.sh` instead. See `docs/plans/gv-session-alarm.md` §0.2. What that
+> arc does add is `deploy/check-installed-drift.sh --group bridge`, which makes `~/bin/gv-bridge-ensure.sh`'s
+> staleness **visible on every deploy** (loudly, non-fatally) while this task stays blocked.
+
 The scope doc's framing is the right one: **ours is already shipped; this is "run the thing you already
 ship."** Add after the `chmod 755 …/deploy/*.sh` line at `:204`:
 

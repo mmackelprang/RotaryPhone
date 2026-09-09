@@ -683,6 +683,7 @@ public class GVApiAdapterCookieLineageTests
 
         await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(stale, "TryCdpRefreshAsync")!;
         Assert.True(stale.BrowserSessionStale);
+        Assert.Equal("Stale", stale.BrowserRefreshOutcomeName);
 
         // Chrome is down: extraction never produced a cookie set, so the login was never tested.
         var unreachable = GVApiAdapterRecoveryTests.CreateAdapter();
@@ -694,6 +695,9 @@ public class GVApiAdapterCookieLineageTests
 
         await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(unreachable, "TryCdpRefreshAsync")!;
         Assert.False(unreachable.BrowserSessionStale);   // NOT stale — nothing tested the login
+        // ⭐ …and THIS is the whole reason the string field exists. The boolean above reads false on a
+        // DEAD Chrome, identically to a healthy one. The string does not.
+        Assert.Equal("Unreachable", unreachable.BrowserRefreshOutcomeName);
 
         File.Delete(path);
     }

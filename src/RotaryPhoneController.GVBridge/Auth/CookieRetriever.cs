@@ -12,15 +12,19 @@ namespace RotaryPhoneController.GVBridge.Auth;
 /// </summary>
 public static class CookieRetriever
 {
-    private const int DebugPort = 9222;
-
     /// <summary>
     /// Extract cookies from Chrome and save encrypted to disk.
     /// If Chrome isn't running with debug port, launches it automatically.
     /// On first run, user must log in manually in the Chrome window.
     /// </summary>
+    // ⛔ The port used to be a private const 9222 here while the bridge listens on
+    // GVBridgeConfig.ChromeCdpPort (9224). The "connect to an existing Chrome" branch below could
+    // therefore NEVER succeed, so gv-login ALWAYS fell through to the launch branch — which killed
+    // Chrome by process name. A wrong constant turned an optional fallback into the only path.
+    // It is a parameter now precisely so it cannot drift back out of step with the config.
     public static async Task<bool> RetrieveAndSaveAsync(
-        string cookiePath, string keyPath, Action<string>? log = null, CancellationToken ct = default)
+        string cookiePath, string keyPath, int cdpPort,
+        Action<string>? log = null, CancellationToken ct = default)
     {
         log ??= _ => { };
 
@@ -34,8 +38,8 @@ public static class CookieRetriever
         try
         {
             browser = await playwright.Chromium.ConnectOverCDPAsync(
-                $"http://127.0.0.1:{DebugPort}").ConfigureAwait(false);
-            log($"Connected to existing Chrome on port {DebugPort}.");
+                $"http://127.0.0.1:{cdpPort}").ConfigureAwait(false);
+            log($"Connected to existing Chrome on port {cdpPort}.");
         }
 #pragma warning disable CA1031
         catch
@@ -48,30 +52,28 @@ public static class CookieRetriever
         {
             log("Launching Chrome with remote debugging...");
 
-            // Kill existing Chrome/Chromium to avoid port conflict
-            foreach (var name in new[] { "chrome", "chromium", "chromium-browser" })
-            {
-                foreach (var proc in Process.GetProcessesByName(name))
-                {
-                    try { proc.Kill(); }
-#pragma warning disable CA1031
-                    catch { /* best effort */ }
-#pragma warning restore CA1031
-                }
-            }
-
-            await Task.Delay(2000, ct).ConfigureAwait(false);
-
             var chromePath = FindChromePath();
             var debugProfilePath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "RotaryPhone", "chrome-debug-profile");
             Directory.CreateDirectory(debugProfilePath);
 
+            // Kill existing Chrome/Chromium to free the debug port.
+            //
+            // ⛔ SCOPED TO OUR OWN PROFILE, and that is not defensive style — it is a cross-service
+            // boundary. This used to kill EVERY process named chrome/chromium/chromium-browser with no
+            // filter at all. `radio` also runs Radio Console's kiosk Chrome on
+            // ~/.config/radio-kiosk-chrome, and the GV bridge's own browser on
+            // ~/.config/gv-bridge-chrome. Either would have been killed by an operator running
+            // `gv-login` to fix a broken login — see docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md.
+            KillOwnDebugProfileChrome(debugProfilePath, cdpPort, log);
+
+            await Task.Delay(2000, ct).ConfigureAwait(false);
+
             var chromeProcess = Process.Start(new ProcessStartInfo
             {
                 FileName = chromePath,
-                Arguments = $"--remote-debugging-port={DebugPort} --user-data-dir=\"{debugProfilePath}\" --no-first-run --no-default-browser-check",
+                Arguments = $"--remote-debugging-port={cdpPort} --user-data-dir=\"{debugProfilePath}\" --no-first-run --no-default-browser-check",
                 UseShellExecute = false,
             });
 
@@ -91,7 +93,7 @@ public static class CookieRetriever
                 try
                 {
                     browser = await playwright.Chromium.ConnectOverCDPAsync(
-                        $"http://127.0.0.1:{DebugPort}").ConfigureAwait(false);
+                        $"http://127.0.0.1:{cdpPort}").ConfigureAwait(false);
                     break;
                 }
 #pragma warning disable CA1031
@@ -211,6 +213,99 @@ public static class CookieRetriever
         // Verify with account/get
         var verified = await VerifyAsync(sapisid, cookieHeader, log).ConfigureAwait(false);
         return verified;
+    }
+
+    /// <summary>
+    /// True when <paramref name="commandLine"/> is a browser started against
+    /// <paramref name="profileDir"/>. Pure, so the boundary it enforces is unit-testable without
+    /// starting a process.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Matches on <c>--user-data-dir=</c> and NOT on the process name. A name match is what made the
+    /// old code able to reach Radio Console's kiosk. The trailing-separator and quoted forms are both
+    /// accepted because Chrome is invoked both ways on this box; a bare prefix match is NOT used, or
+    /// <c>~/.config/gv-bridge-chrome</c> would match <c>~/.config/gv-bridge-chrome-backup</c>.
+    /// </remarks>
+    internal static bool IsOurDebugProfileProcess(string? commandLine, string? profileDir)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine) || string.IsNullOrWhiteSpace(profileDir))
+            return false;
+
+        var dir = profileDir.TrimEnd('/', '\\');
+        // ⛔ An empty result means the caller passed "/" (or only separators). Under the old
+        // terminator-set logic that produced the form "--user-data-dir=" and matched EVERY
+        // browser on the box. Refuse rather than match broadly: this predicate decides what
+        // gets killed, so its degenerate case must be "nothing", never "everything".
+        if (dir.Length == 0) return false;
+
+        // ⛔ EXTRACT THE VALUE AND COMPARE IT WHOLE. The previous version accepted any of
+        // ' ', '\0', '/', '"' or '\'' as a terminator, which meant "--user-data-dir=<ours>/x"
+        // matched <ours> — a DIFFERENT profile treated as ours — and
+        // "--user-data-dir=<ours>/../../.config/radio-kiosk-chrome" resolved to Radio
+        // Console's kiosk while returning true. Found in pre-merge review 2026-09-09.
+        // Comparing the whole value cannot have that class of bug at all.
+        const string flag = "--user-data-dir=";
+        var searchFrom = 0;
+        while (true)
+        {
+            var idx = commandLine.IndexOf(flag, searchFrom, StringComparison.Ordinal);
+            if (idx < 0) return false;
+
+            var start = idx + flag.Length;
+            var quoted = start < commandLine.Length && (commandLine[start] == '"' || commandLine[start] == '\'');
+            var quote = quoted ? commandLine[start] : '\0';
+            if (quoted) start++;
+
+            var end = start;
+            while (end < commandLine.Length)
+            {
+                var c = commandLine[end];
+                if (quoted ? c == quote : (c == ' ' || c == '\0')) break;
+                end++;
+            }
+
+            var value = commandLine[start..end].TrimEnd('/', '\\');
+            // Ordinal, not OrdinalIgnoreCase: Linux paths are case-sensitive, and treating
+            // them otherwise would let a differently-cased sibling profile match.
+            if (value.Length > 0 && string.Equals(value, dir, StringComparison.Ordinal))
+                return true;
+
+            searchFrom = idx + flag.Length;
+        }
+    }
+
+    private static void KillOwnDebugProfileChrome(string profileDir, int cdpPort, Action<string> log)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            // ⛔ Refuse rather than fall back to a name match. There is no safe way to identify our own
+            // browser here, and the failure mode of guessing is killing someone else's.
+            log($"Not Linux: refusing to kill any browser by process name. If CDP port {cdpPort} is busy, "
+                + $"close the browser using {profileDir} by hand and re-run.");
+            return;
+        }
+
+        var killed = 0;
+        foreach (var procDir in Directory.EnumerateDirectories("/proc"))
+        {
+            if (!int.TryParse(Path.GetFileName(procDir), out var pid)) continue;
+
+            string cmdline;
+            try { cmdline = File.ReadAllText(Path.Combine(procDir, "cmdline")).Replace('\0', ' '); }
+#pragma warning disable CA1031
+            catch { continue; }   // the process exited, or is not ours to read
+#pragma warning restore CA1031
+
+            if (!IsOurDebugProfileProcess(cmdline, profileDir)) continue;
+
+            try { Process.GetProcessById(pid).Kill(); killed++; }
+#pragma warning disable CA1031
+            catch { /* best effort */ }
+#pragma warning restore CA1031
+        }
+        log(killed > 0
+            ? $"Killed {killed} browser process(es) using {profileDir}."
+            : $"No browser is using {profileDir}; killed nothing.");
     }
 
     private static async Task<bool> VerifyAsync(string sapisid, string cookieHeader, Action<string> log)

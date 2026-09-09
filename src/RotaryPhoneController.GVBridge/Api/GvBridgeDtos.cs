@@ -69,7 +69,16 @@ public record GvBridgeStatusDto(
   [property: JsonPropertyName("psidtsMintedAtUtc")] DateTime? PsidtsMintedAtUtc = null,
   [property: JsonPropertyName("browserSessionValidatedAt")] DateTime? BrowserSessionValidatedAt = null,
   [property: JsonPropertyName("browserSessionAgeSeconds")] long? BrowserSessionAgeSeconds = null,
-  [property: JsonPropertyName("browserSessionStale")] bool BrowserSessionStale = false);
+  [property: JsonPropertyName("browserSessionStale")] bool BrowserSessionStale = false,
+  // Added by the 2026-09-09 GV session alarm work. browserSessionStale is a derived read of ONE value
+  // of this enum: when Chrome is DEAD the outcome is Unreachable, so the BOOLEAN READS FALSE on the
+  // worst state. The boolean stays — Radio Console consumes it — and this reports the whole enum
+  // beside it. One of: NotAttempted, Unreachable, Stale, Succeeded, TornDown.
+  //
+  // ⚠ APPENDED LAST, deliberately. GVBridgeControllerTests pins this payload's field names AND their
+  // order as a cross-repo contract; appending is what keeps every existing name in its existing
+  // position. Do not insert it next to browserSessionStale because they read well together.
+  [property: JsonPropertyName("browserRefreshOutcome")] string BrowserRefreshOutcome = "NotAttempted");
 
 /// <summary>
 /// Payload for POST /api/gvbridge/cookies. Accepts individual fields

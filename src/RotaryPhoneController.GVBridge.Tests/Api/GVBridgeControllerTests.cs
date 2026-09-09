@@ -155,8 +155,39 @@ public class GVBridgeControllerTests
         "browserSessionValidatedAt",
         "browserSessionAgeSeconds",
         "browserSessionStale",
+        // Appended 2026-09-09 by the GV session alarm work. LAST, deliberately: appending is what
+        // keeps every name above in its existing position.
+        "browserRefreshOutcome",
       },
       names);
+  }
+
+  [Fact]
+  public void GetStatus_ExposesBrowserRefreshOutcome_AndTheBooleanIsUnchangedBesideIt()
+  {
+    // ⛔ The point of this test is the PAIR, not the new field. browserSessionStale is a derived read of
+    // one enum value: on Unreachable — Chrome gone, the worst state — the boolean is FALSE. A consumer
+    // keyed on the boolean alone shows green. Asserting both together is what pins that the string
+    // carries information the boolean structurally cannot.
+    var controller = CreateController();
+
+    var result = controller.GetStatus();
+
+    var okResult = Assert.IsType<OkObjectResult>(result);
+    var json = JsonSerializer.Serialize(okResult.Value);
+    using var doc = JsonDocument.Parse(json);
+    var root = doc.RootElement;
+
+    Assert.True(root.TryGetProperty("browserRefreshOutcome", out var outcome));
+    Assert.Equal(JsonValueKind.String, outcome.ValueKind);
+
+    // An inactive adapter has attempted nothing. NOT "Succeeded", and not absent: a consumer must be
+    // able to tell "never tried" from "tried and worked".
+    Assert.Equal("NotAttempted", outcome.GetString());
+
+    // The existing boolean is untouched beside it — same name, same type, same value.
+    Assert.True(root.TryGetProperty("browserSessionStale", out var stale));
+    Assert.Equal(JsonValueKind.False, stale.ValueKind);
   }
 
   [Fact]
