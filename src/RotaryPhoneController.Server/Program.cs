@@ -28,14 +28,21 @@ if (args.Contains("gv-login"))
 
     var config = new ConfigurationBuilder()
         .AddJsonFile("appsettings.json", optional: true)
+        // ⚠ ADDED: the box's authoritative settings live in appsettings.Production.json — it is the file
+        // the deploy deliberately does NOT overwrite. Reading only appsettings.json meant gv-login could
+        // resolve a different CDP port (and different cookie paths) than the running service uses, which
+        // is the same class of defect as the hardcoded 9222 it is being fixed alongside.
+        .AddJsonFile("appsettings.Production.json", optional: true)
         .Build();
     var gvConfig = config.GetSection("GVBridge");
 
     var cookiePath = gvConfig["CookieFilePath"] ?? "data/gv-cookies.enc";
     var keyPath = gvConfig["CookieKeyFilePath"] ?? "data/gv-key.bin";
+    // Default 9224 — GVBridgeConfig.ChromeCdpPort's own default, and the port the bridge listens on.
+    var cdpPort = int.TryParse(gvConfig["ChromeCdpPort"], out var configuredPort) ? configuredPort : 9224;
 
     var result = await RotaryPhoneController.GVBridge.Auth.CookieRetriever.RetrieveAndSaveAsync(
-        cookiePath, keyPath,
+        cookiePath, keyPath, cdpPort,
         msg => logger.LogInformation("{Message}", msg));
 
     if (result)
