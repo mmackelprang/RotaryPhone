@@ -149,6 +149,41 @@ and the HT801 address, in addition to the BT keys above.
 confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
 
 
+## ⚠️ OPEN — `/api/gvbridge/event` has no route, but two middlewares still special-case it (found 2026-09-09)
+
+**Status:** ⚠️ **OPEN — needs an owner decision.** Found while fixing the `/api/*` fallback below;
+**not** introduced by it. Left in place deliberately rather than fixed in an unrelated PR.
+
+**There is no controller route for `/api/gvbridge/event`.** No `[HttpPost("event")]`, no
+`[Route("event")]` — anywhere. Two middlewares nonetheless still carve it out:
+
+- `Program.cs:395-412` — a bespoke CORS block that answers its `OPTIONS` preflight with `204`.
+- `GvBridgeAuthMiddleware.cs:38-40` — an **auth-gate exemption**, so the path is deliberately open.
+
+`docs/superpowers/specs/2026-03-27-gv-api-migration-design.md:222` lists *"Service worker HTTP relay
+for call events — no longer needed (signaler handles detection)"* under **What Gets Deleted**, and
+there is no extension source (no `manifest.json`) in the repo. So this is vestigial wiring for a
+relay that was removed by design; the middleware carve-outs outlived the endpoint.
+
+**Why it stayed invisible:** a `POST` here used to hit the SPA fallback and return **`200` with
+`index.html`** — so any caller checking `response.ok` was told it succeeded. The `/api/*` 404 fix
+below makes it honest:
+
+```
+POST /api/gvbridge/event  →  404 application/json  {"error":"No API route matches POST /api/gvbridge/event"}
+```
+
+**This is a second instance of the same disease as the fix below**, found by the fix: a success code
+covering a failure. Anything still posting call events here has been silently failing, and was
+already failing before the 404 change — the change only makes it audible.
+
+**Two things for the owner to decide:**
+1. **Is anything still POSTing here?** If yes, it has been broken for some time and needs a route,
+   not a fallback. If no (which the design doc implies), both carve-outs should be deleted.
+2. **The auth exemption is the part that matters.** It punches a permanent hole in the
+   `/api/gvbridge/*` gate for a path that does not exist. Harmless today — there is nothing behind
+   it to reach — but a future route added at that path would be **born unauthenticated**, silently.
+
 ## Unmatched `/api/*` returned HTTP 200 with `index.html` instead of a 404 (RESOLVED 2026-09-09)
 
 **Status:** ✅ Resolved by `fix/api-404-not-spa-fallback`.
