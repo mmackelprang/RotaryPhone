@@ -35,17 +35,31 @@ public class GvBridgeAuthMiddlewareTests
     [Fact] public async Task GateOn_NonGvBridgePath_NotGated()
         => Assert.Equal(200, await Invoke("/api/phone/status", header: null, configuredKey: "k"));
 
-    [Fact] public async Task GateOn_GvBridgeEventPath_NotGated()  // extension content-script endpoint stays open
-        => Assert.Equal(200, await Invoke("/api/gvbridge/event", header: null, configuredKey: "k"));
+    // /api/gvbridge/event was exempt from the gate until 2026-09-09, for a browser-extension relay
+    // that had been deleted by design in March 2026. The exemption outlived the endpoint and left a
+    // permanent hole in the gate for a path with no route — so a route later added there would have
+    // been born unauthenticated. These three pin that the hole is closed and stays closed: /event is
+    // now gated exactly like any other /api/gvbridge/* path, with no special case.
+    [Fact] public async Task GateOn_GvBridgeEventPath_IsGated_401()
+        => Assert.Equal(401, await Invoke("/api/gvbridge/event", header: null, configuredKey: "k"));
 
-    [Fact] public async Task GateOn_GvBridgeEventSubPath_NotGated()  // a real sub-path of /event stays open
-        => Assert.Equal(200, await Invoke("/api/gvbridge/event/status", header: null, configuredKey: "k"));
+    [Fact] public async Task GateOn_GvBridgeEventSubPath_IsGated_401()
+        => Assert.Equal(401, await Invoke("/api/gvbridge/event/status", header: null, configuredKey: "k"));
 
-    // Regression (review MEDIUM-1): a sibling route whose name merely STARTS WITH "event" is NOT the
-    // exempt content-script endpoint — it must still be gated. The old Contains("/gvbridge/event") match
-    // would have wrongly exempted it; the segment-anchored check gates it.
+    // A sibling whose name merely STARTS WITH "event". It was already gated (review MEDIUM-1 anchored
+    // the old exemption to a segment boundary), and it stays gated now that no exemption exists at all.
     [Fact] public async Task GateOn_GvBridgeEventSiblingPath_IsGated_401()
         => Assert.Equal(401, await Invoke("/api/gvbridge/eventlog", header: null, configuredKey: "k"));
+
+    // A valid header must still pass on the formerly-exempt path — proving it is genuinely gated
+    // rather than hard-denied, which a blanket 401 would also satisfy.
+    [Fact] public async Task GateOn_GvBridgeEventPath_WithValidHeader_200()
+        => Assert.Equal(200, await Invoke("/api/gvbridge/event", header: "k", configuredKey: "k"));
+
+    // The gate is default-off: with no key configured, the formerly-exempt path behaves like every
+    // other one and is not gated. Pins that removing the carve-out did not change LAN-mode behaviour.
+    [Fact] public async Task GateOff_GvBridgeEventPath_NotGated()
+        => Assert.Equal(200, await Invoke("/api/gvbridge/event", header: null, configuredKey: ""));
 
     // Mark-read routes (ADR §6.2 Q8): no special auth posture — the PR5 prefix gate auto-covers them.
     // These prove a future middleware change can't silently un-gate the GV account-write routes.

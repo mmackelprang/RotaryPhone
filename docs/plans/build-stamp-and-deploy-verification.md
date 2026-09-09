@@ -153,9 +153,14 @@ so `Program.cs` needs **no change**.
 
 ### 3.3 Auth: anonymous, deliberately, with a regression test pinning it
 
-`GvBridgeAuthMiddleware` gates **only** paths starting `/api/gvbridge` (exempting
-`/api/gvbridge/event`). A route at `/api/health/version` is therefore ungated **with no code
-change**. That is the right outcome, for three reasons:
+`GvBridgeAuthMiddleware` gates **only** paths starting `/api/gvbridge`. A route at
+`/api/health/version` is therefore ungated **with no code change**. That is the right outcome, for
+three reasons:
+
+> ⚠ **Updated 2026-09-09.** This paragraph previously added "(exempting `/api/gvbridge/event`)". That
+> exemption has been removed — the gate now covers every `/api/gvbridge/*` path with no exceptions.
+> The reasoning below is unaffected: `/api/health/version` is outside the `/api/gvbridge` prefix, so
+> it stays ungated for the reasons given, not because of any carve-out.
 
 1. The endpoint's job is to be read by a deploy script and by Radio Console **without
    credentials**. Requiring the header would put the deploy check behind the same secret whose
