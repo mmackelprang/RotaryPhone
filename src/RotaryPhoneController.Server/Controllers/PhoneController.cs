@@ -111,13 +111,28 @@ public class PhoneController : ControllerBase
             }
             : null;
 
-    /// <summary>Acknowledges (dismisses) the stored bell failure for a phone so it does not reappear after a reload.</summary>
+    /// <summary>
+    /// Acknowledges (dismisses) the stored bell failure for a phone so it does not reappear after a
+    /// reload. <b>Idempotent:</b> always 200 with <c>acknowledged: true</c> — including a repeat ack
+    /// and an ack of a phone with no stored failure — so a client may retry it freely.
+    /// </summary>
     [HttpPost("bell-failure/ack")]
     public IActionResult AcknowledgeBellFailure([FromQuery] string phoneId = "default")
     {
-        // Idempotent by design: nothing to acknowledge is a 200 with acknowledged=false, not a 404.
-        var acknowledged = _bellFailureTracker.Acknowledge(phoneId);
-        return Ok(new { acknowledged });
+        // The response reports the POST-CONDITION — the failure is acknowledged — NOT whether this
+        // particular call was the one that changed it. So a repeat ack and an ack of an absent
+        // failure are both 200 {"acknowledged": true}, because
+        // docs/handoffs/radioconsole-bell-failure-reply.md §5 told Radio Console exactly that and
+        // invited them to "retry freely on a flaky network". The delta is still worth knowing, but it
+        // belongs in the log, not on a wire contract a consumer was told is a post-condition.
+        var stateChanged = _bellFailureTracker.Acknowledge(phoneId);
+
+        if (stateChanged)
+            _logger.LogInformation("Bell failure acknowledged for {PhoneId} — a live note was cleared", phoneId);
+        else
+            _logger.LogDebug("Bell failure ack for {PhoneId} was a no-op — already acked, or none stored", phoneId);
+
+        return Ok(new { acknowledged = true });
     }
 
     [HttpPost("simulate/incoming")]
