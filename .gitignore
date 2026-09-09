@@ -97,3 +97,9 @@ src/RotaryPhoneController.WebUI/wwwroot/assets/
 src/RotaryPhoneController.WebUI/wwwroot/index.html
 src/RotaryPhoneController.WebUI/wwwroot/vite.svg
 src/RotaryPhoneController.WebUI/wwwroot/*.styles.css
+
+# Claude Code machine-local settings. This is where Claude Code auto-saves
+# "don't ask again" approvals, so it accumulates per-machine permission grants
+# and must not be shared. Project-wide permissions belong in .claude/settings.json,
+# which IS tracked. Untracked on 2026-09-09; it had been committed by mistake.
+.claude/settings.local.json
