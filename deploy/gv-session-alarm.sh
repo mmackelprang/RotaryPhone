@@ -27,6 +27,17 @@
 # an exit code.
 set -uo pipefail
 
+# ⚠ PIN THE LOCALE. `${s:0:N}` is CHARACTER-based under a UTF-8 locale and BYTE-based
+# under C/POSIX, and a systemd USER unit inherits whatever the user manager has —
+# commonly nothing, so LANG is unset and the C locale applies. Measured 2026-09-09:
+# the same 150-character action truncated to 300 valid UTF-8 bytes under C.UTF-8 and to
+# 200 bytes of INVALID UTF-8 under C, cut mid-character. jq replaced the broken
+# sequence with U+FFFD — mojibake in a delivered alert — and a stricter encoder would
+# have refused the message outright, which is the silent non-delivery this whole script
+# exists to prevent. Latent while every action string is ASCII; this file's own copy is
+# full of — ⚠ ⛔, and truncate_action exists FOR the future edit.
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 VERSION="1"
 SOURCE_NAME="rotaryphone"
 
@@ -75,6 +86,24 @@ for required in ROTARYPHONE_GATEWAY_URL ROTARYPHONE_GATEWAY_TOKEN; do
 done
 
 STATUS_URL="${GV_ALARM_STATUS_URL:-http://127.0.0.1:5004/api/gvbridge/status}"
+# ⚠ THE PORT AND PROFILE ARE INTERPOLATED HERE, and the C# interpolates them too
+# (`{Port}` <- _config.ChromeCdpPort). The copy-drift guard's fragments deliberately stop
+# just SHORT of the number — "CHROME WAS UNREACHABLE on CDP port" — so interpolation
+# cannot break the quotation. The consequence is that the number itself is NOT pinned by
+# any guard: a box configured with a different ChromeCdpPort would be told to check the
+# wrong port, at the worst possible moment, with every check green. One variable rather
+# than five literals is what makes that a single edit instead of a hunt.
+# ⛔ These are the alarm's BEST KNOWN VALUES, not authority. The service's config is
+# authoritative; if they ever disagree, the service wins and this is the bug.
+GV_CDP_PORT="${GV_ALARM_CDP_PORT:-9224}"
+# ⛔ THE THREE VERBATIM HEREDOCS BELOW KEEP THEIR LITERAL 9224, and that is correct:
+# the number is inside a QUOTATION of the service, and editing text inside a quotation
+# to make it agree with local config is how a quotation stops being one. Instead, a
+# disagreement is made LOUD here — the operator is told the advice they are about to
+# read names a different port than the one configured.
+if [ "$GV_CDP_PORT" != "9224" ]; then
+    log "WARNING: GV_ALARM_CDP_PORT=${GV_CDP_PORT}, but the service wording quoted in this alarm names 9224. The quoted text is reproduced verbatim and is NOT rewritten; read the port from the service's own config, not from the quotation."
+fi
 GATEWAY_URL="${ROTARYPHONE_GATEWAY_URL%/}"
 
 for tool in curl jq; do
@@ -92,6 +121,15 @@ INCIDENT_THREAD_KEY=""
 INCIDENT_OPENED_AT=""
 PENDING_CONDITION=""
 PENDING_POLLS=0
+# ⛔ SEPARATE FROM THE KEY, and it has to be. The key used to be persisted the moment
+# it was generated, before the root post was attempted — so a gateway refusing at the
+# instant an incident opened left the key on disk, and the next cycle saw a non-empty
+# key and never re-attempted the root. The result was an alert threaded under a root
+# that does not exist, and a later RESOLVED — which is deliberately routed to the QUIET
+# lane, and is only safe there because it threads under an alert the owner saw —
+# replying into nothing. A gateway that is down when an incident opens is a correlated
+# failure, not an exotic one. Found in pre-merge review 2026-09-09.
+THREAD_ROOT_DELIVERED=0
 
 if [ -r "$STATE_FILE" ]; then
     # shellcheck disable=SC1090
@@ -111,6 +149,7 @@ write_state() {
         printf 'INCIDENT_OPENED_AT=%q\n'    "$INCIDENT_OPENED_AT"
         printf 'PENDING_CONDITION=%q\n'     "$PENDING_CONDITION"
         printf 'PENDING_POLLS=%q\n'         "$PENDING_POLLS"
+        printf 'THREAD_ROOT_DELIVERED=%q\n' "$THREAD_ROOT_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
     return 0
@@ -232,8 +271,8 @@ post_notify() {
 
     NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED + 1))
 
-    resp="$(curl -sS --max-time 15 -X POST \
-        -H "Authorization: Bearer ${ROTARYPHONE_GATEWAY_TOKEN}" \
+    resp="$(printf 'header = "Authorization: Bearer %s"\n' "$ROTARYPHONE_GATEWAY_TOKEN" \
+        | curl -sS --max-time 15 -X POST --config - \
         -H 'Content-Type: application/json' \
         -w $'\n%{http_code}' \
         --data-binary "$payload" \
@@ -388,17 +427,29 @@ severity_for() {
 # it is only safe to be quiet BECAUSE it threads under an alert the owner was
 # already notified about. A RESOLVED that opens a new thread is invisible, and
 # the owner is left believing an incident is still open.
+#
+# ⚠ RETRYABLE. The key is minted only when there is not one already, so a retry after
+# a failed root post reuses the SAME key and the thread identity never moves. The
+# dedupe_key is derived from that key, so a gateway that did receive an earlier attempt
+# collapses the retry rather than showing two roots.
 open_incident_thread() {
-    INCIDENT_THREAD_KEY="${SOURCE_NAME}-gv-session-$(date -u +%Y%m%dT%H%M%SZ)"
-    INCIDENT_OPENED_AT="$(now_utc)"
-    post_notify "info" \
+    if [ -z "$INCIDENT_THREAD_KEY" ]; then
+        INCIDENT_THREAD_KEY="${SOURCE_NAME}-gv-session-$(date -u +%Y%m%dT%H%M%SZ)"
+        INCIDENT_OPENED_AT="$(now_utc)"
+    else
+        log "re-attempting the incident thread root for ${INCIDENT_THREAD_KEY} — the previous attempt was not delivered, and an alert threaded under a root that does not exist leaves its RESOLVED invisible."
+    fi
+    if post_notify "info" \
         "[${SOURCE_NAME}] 🧵 GV session — browser session incident" \
-        "Subject: the box's Chrome Google Voice session (profile \`~/.config/gv-bridge-chrome\`, CDP 9224) on \`radio\`.
+        "Subject: the box's Chrome Google Voice session (profile \`~/.config/gv-bridge-chrome\`, CDP ${GV_CDP_PORT}) on \`radio\`.
 Closes when: \`browserRefreshOutcome\` returns \`Succeeded\` after an owner re-login.
 Identifiers: thread \`${INCIDENT_THREAD_KEY}\`, status \`${STATUS_URL}\`, opened ${INCIDENT_OPENED_AT}." \
         "" \
         "${SOURCE_NAME}-gv-session-thread-${INCIDENT_THREAD_KEY}" \
         "$INCIDENT_THREAD_KEY"
+    then
+        THREAD_ROOT_DELIVERED=1
+    fi
 }
 
 # --- Decide and post ----------------------------------------------------------
@@ -407,6 +458,14 @@ Identifiers: thread \`${INCIDENT_THREAD_KEY}\`, status \`${STATUS_URL}\`, opened
 # not that three things happened. The underlying condition here persists for
 # HOURS, so an every-tick alarm would be almost entirely repetition.
 if [ "$condition" = "ignore" ]; then
+    # ⚠ KNOWN AND ACCEPTED: TornDown while an incident is OPEN posts nothing and leaves
+    # the incident open. That is right for a restart — the teardown is not a fault, and
+    # the incident is still true — but a PERMANENT teardown means no all-clear ever
+    # arrives and the thread stays open forever. Not resolved here because "the service
+    # stopped and is never coming back" is indistinguishable from "it is restarting"
+    # from inside a 5-minute poll; the next real poll after a restart reclassifies, and
+    # the gateway dead-man covers a service that never returns. Raised in pre-merge
+    # review 2026-09-09; recorded rather than guessed at.
     log "outcome=TornDown — service teardown, not a fault. Nothing posted."
 elif [ "$condition" = "$LAST_POSTED_CONDITION" ]; then
     log "condition unchanged since the last post (${condition}); nothing posted."
@@ -428,6 +487,7 @@ Action: none." \
             LAST_POSTED_CONDITION="ok"
             INCIDENT_THREAD_KEY=""
             INCIDENT_OPENED_AT=""
+            THREAD_ROOT_DELIVERED=0
         fi
     else
         # Healthy, and no incident was ever open. Post nothing at all.
@@ -435,7 +495,17 @@ Action: none." \
         LAST_POSTED_CONDITION="ok"
     fi
 else
-    [ -z "$INCIDENT_THREAD_KEY" ] && open_incident_thread
+    # ⚠ THE ALERT'S dedupe_key IS PER-CONDITION, NOT PER-INCIDENT, and that is deliberate
+    # (spec §4.4: "Keys chosen per condition, never per message"). Note the asymmetry with
+    # the thread root and the RESOLVED, whose keys DO embed INCIDENT_THREAD_KEY: if the
+    # real gateway dedupes with any persistence window, the SAME condition recurring weeks
+    # later would be silently dropped. The stub models no dedupe at all, so this is
+    # untested here by construction.
+    # ⛔ Confirm against the real gateway in Task 17, and correct it if a genuine
+    # recurrence is swallowed. Raised in pre-merge review 2026-09-09.
+
+    # Open the thread, OR re-attempt a root whose earlier post was refused.
+    [ "$THREAD_ROOT_DELIVERED" = "1" ] || open_incident_thread
     post_notify \
         "$(severity_for "$condition")" \
         "$(title_for "$condition")" \
@@ -471,8 +541,8 @@ refresh_heartbeat() {
         --arg grace    "$HEARTBEAT_GRACE" \
         '{source:$source, check_id:$check_id, schedule:$schedule, grace:$grace}')" || return 1
 
-    resp="$(curl -sS --max-time 15 -X POST \
-        -H "Authorization: Bearer ${ROTARYPHONE_GATEWAY_TOKEN}" \
+    resp="$(printf 'header = "Authorization: Bearer %s"\n' "$ROTARYPHONE_GATEWAY_TOKEN" \
+        | curl -sS --max-time 15 -X POST --config - \
         -H 'Content-Type: application/json' \
         -w $'\n%{http_code}' \
         --data-binary "$payload" \

@@ -39,10 +39,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _record(self, kind, code, body):
+    def _record(self, kind, code, body, received=None):
+        # ⛔ TWO COPIES, DELIBERATELY. `body` is what the gateway KEPT after applying
+        # its own rules; `received` is what the alarm actually SENT, byte for byte.
+        #
+        # They differ for exactly the reason this stub exists: on severity=info the
+        # gateway SILENTLY DROPS `action` and `timestamp`. A test that asserts "the
+        # alarm did not send an action on an info message" against the KEPT copy
+        # cannot fail — the stub removed the field before recording it, whatever the
+        # alarm did. That test passed while the alarm sent a real action on an info
+        # message. Found in pre-merge review 2026-09-09.
+        #
+        # Rule: assert against `received` for what the ALARM did, and against `body`
+        # for what the GATEWAY would have delivered.
         with open(ARGS.log, "a") as fh:
             fh.write(json.dumps({
                 "t": time.time(), "kind": kind, "status": code, "body": body,
+                "received": body if received is None else received,
             }) + "\n")
 
     def _authed(self):
@@ -103,7 +116,7 @@ class Handler(BaseHTTPRequestHandler):
             # Silently dropped. No error, no warning — which is what makes it a trap.
             stored.pop("action", None)
             stored.pop("timestamp", None)
-        self._record("notify", 202, stored)
+        self._record("notify", 202, stored, received=body)
         self._send(202, {"queued": True})
 
     def _heartbeat(self, body):

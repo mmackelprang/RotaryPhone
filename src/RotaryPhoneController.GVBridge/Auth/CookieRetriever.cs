@@ -232,18 +232,46 @@ public static class CookieRetriever
             return false;
 
         var dir = profileDir.TrimEnd('/', '\\');
-        foreach (var form in new[] { $"--user-data-dir={dir}", $"--user-data-dir=\"{dir}\"" })
+        // ⛔ An empty result means the caller passed "/" (or only separators). Under the old
+        // terminator-set logic that produced the form "--user-data-dir=" and matched EVERY
+        // browser on the box. Refuse rather than match broadly: this predicate decides what
+        // gets killed, so its degenerate case must be "nothing", never "everything".
+        if (dir.Length == 0) return false;
+
+        // ⛔ EXTRACT THE VALUE AND COMPARE IT WHOLE. The previous version accepted any of
+        // ' ', '\0', '/', '"' or '\'' as a terminator, which meant "--user-data-dir=<ours>/x"
+        // matched <ours> — a DIFFERENT profile treated as ours — and
+        // "--user-data-dir=<ours>/../../.config/radio-kiosk-chrome" resolved to Radio
+        // Console's kiosk while returning true. Found in pre-merge review 2026-09-09.
+        // Comparing the whole value cannot have that class of bug at all.
+        const string flag = "--user-data-dir=";
+        var searchFrom = 0;
+        while (true)
         {
-            var idx = commandLine.IndexOf(form, StringComparison.Ordinal);
-            if (idx < 0) continue;
-            // The next character must end the value, or "…/gv-bridge-chrome" would match
-            // "…/gv-bridge-chrome-backup".
-            var after = idx + form.Length;
-            if (after >= commandLine.Length) return true;
-            var c = commandLine[after];
-            if (c is ' ' or '\0' or '/' or '"' or '\'') return true;
+            var idx = commandLine.IndexOf(flag, searchFrom, StringComparison.Ordinal);
+            if (idx < 0) return false;
+
+            var start = idx + flag.Length;
+            var quoted = start < commandLine.Length && (commandLine[start] == '"' || commandLine[start] == '\'');
+            var quote = quoted ? commandLine[start] : '\0';
+            if (quoted) start++;
+
+            var end = start;
+            while (end < commandLine.Length)
+            {
+                var c = commandLine[end];
+                if (quoted ? c == quote : (c == ' ' || c == '\0')) break;
+                end++;
+            }
+
+            var value = commandLine[start..end].TrimEnd('/', '\\');
+            // Ordinal, not OrdinalIgnoreCase: Linux paths are case-sensitive, and treating
+            // them otherwise would let a differently-cased sibling profile match.
+            if (value.Length > 0 && string.Equals(value, dir, StringComparison.Ordinal))
+                return true;
+
+            searchFrom = idx + flag.Length;
         }
-        return false;
     }
 
     private static void KillOwnDebugProfileChrome(string profileDir, int cdpPort, Action<string> log)

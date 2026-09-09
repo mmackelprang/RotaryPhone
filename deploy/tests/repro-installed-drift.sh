@@ -112,6 +112,31 @@ echo "=== extra: bad --group is a usage error, not a pass ==="
 bash "$CHECK" --group nonsense --ship-dir "$SHIP" >/dev/null 2>&1
 check "bad group -> exit 2" "2" "$?"
 
+echo "=== extra: an option with no value must FAIL, not HANG ==="
+# ⛔ `shift 2` with one argument left shifts nothing and returns non-zero; with `set -e`
+# off that spins forever. Run over ssh from the deploy, that hangs the deploy with no
+# output at all. Found in pre-merge review 2026-09-09 (exit 124 under `timeout`).
+# ⚠ `timeout` is the instrument on purpose: asserting the exit code alone would hang
+# this harness rather than fail it.
+timeout 8 bash "$CHECK" --group >/dev/null 2>&1
+check "trailing --group -> exit 2, and does NOT hang" "2" "$?"
+timeout 8 bash "$CHECK" --group alarm --ship-dir >/dev/null 2>&1
+check "trailing --ship-dir -> exit 2, and does NOT hang" "2" "$?"
+timeout 8 bash "$CHECK" --group alarm --manifest >/dev/null 2>&1
+check "trailing --manifest -> exit 2, and does NOT hang" "2" "$?"
+
+echo "=== extra: CANNOT DETERMINE (2) outranks DRIFT (1), whatever the file order ==="
+# ⛔ Plain `rc=` kept whichever failure came LAST, so an unreadable manifest entry on
+# one file followed by ordinary drift on another reported the TAMER state. "I could not
+# tell" is the more alarming answer and must survive.
+build_world
+grep -v 'gv-session-alarm.sh' "$MAN" > "$MAN.tmp" && mv "$MAN.tmp" "$MAN"   # file 1 -> unrecorded (2)
+echo "# tampered" >> "$HOME/.config/systemd/user/gv-session-alarm.timer"    # file 3 -> drift (1)
+rc="$(run)"
+check "a 2 followed by a 1 still exits 2" "2" "$rc"
+check "…and BOTH are reported, not just the last" "2" \
+      "$(grep -c '⚠ \[drift-check\]' "$WORK/out.txt")"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL ${cases} CASES PASSED"; else echo "FAILURES PRESENT (${cases} cases run)"; fi
 exit "$fail"

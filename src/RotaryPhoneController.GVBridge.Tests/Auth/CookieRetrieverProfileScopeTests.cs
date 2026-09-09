@@ -53,4 +53,46 @@ public class CookieRetrieverProfileScopeTests
     [InlineData("chrome", "")]
     public void EmptyInputsMatchNothing(string? cmd, string? dir)
         => Assert.False(CookieRetriever.IsOurDebugProfileProcess(cmd, dir));
+
+    [Fact]
+    public void ARootProfileDirMatchesNothing_RatherThanEverything()
+    {
+        // ⛔ "/" trims to the empty string. Under the old terminator-set logic that built the
+        // form "--user-data-dir=" and matched EVERY browser on the box. This predicate decides
+        // what gets KILLED, so its degenerate case must be "nothing", never "everything".
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess(RadioKioskChrome, "/"));
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess(GvBridgeChrome, "/"));
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess(GvBridgeChrome, "///"));
+    }
+
+    [Fact]
+    public void ASubdirectoryOfOurProfileIsNotOurProfile()
+    {
+        // The old code accepted '/' as a value terminator, so "<ours>/anything" matched <ours>.
+        const string dir = "/home/mmack/.local/share/RotaryPhone/chrome-debug-profile";
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess($"chrome --user-data-dir={dir}/other", dir));
+    }
+
+    [Fact]
+    public void ATraversalOutOfOurProfileCannotReachTheKiosk()
+    {
+        // ⛔ The nastiest form the terminator-set logic allowed: a value that STARTS with our
+        // directory, is accepted because the next character is '/', and actually resolves to
+        // Radio Console's kiosk profile.
+        const string dir = "/home/mmack/.local/share/RotaryPhone/chrome-debug-profile";
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess(
+            $"/usr/bin/google-chrome --user-data-dir={dir}/../../../../.config/radio-kiosk-chrome", dir));
+    }
+
+    [Fact]
+    public void ASecondUserDataDirFlagIsStillExamined()
+    {
+        // Chrome takes the last --user-data-dir wins; either way, a command line carrying ours
+        // anywhere must match, and one carrying only someone else's must not.
+        const string dir = "/home/mmack/.local/share/RotaryPhone/chrome-debug-profile";
+        Assert.True(CookieRetriever.IsOurDebugProfileProcess(
+            $"chrome --user-data-dir=/tmp/other --user-data-dir={dir}", dir));
+        Assert.False(CookieRetriever.IsOurDebugProfileProcess(
+            "chrome --user-data-dir=/tmp/other --user-data-dir=/home/mmack/.config/radio-kiosk-chrome", dir));
+    }
 }

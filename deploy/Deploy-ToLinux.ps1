@@ -506,17 +506,32 @@ if (-not $NoRestart) {
 # bash. Nothing here invokes a local interpreter.
 ssh $SshTarget "bash ${TargetPath}/deploy/install-gv-session-alarm.sh"
 $alarmInstallExit = $LASTEXITCODE
-if ($alarmInstallExit -ne 0) { throw "the GV session alarm installer failed (exit $alarmInstallExit) -- the alarm is NOT installed" }
+
+# ⛔ DO NOT throw here. The drift check below is the ONLY thing that states what is
+# actually on the box, and a failed install is exactly when the operator needs that
+# statement most. The installer runs under `set -euo pipefail` and installs three files
+# in sequence, so a failure on the second or third leaves a PARTIAL install -- and
+# throwing first would report "the installer failed" while saying nothing about what is
+# now installed. That is this repo's own failure class, arrived at from the tidy end.
+if ($alarmInstallExit -ne 0) {
+  Write-Host "  the GV session alarm installer FAILED (exit $alarmInstallExit) -- reading the installed state before aborting:" -ForegroundColor Red
+}
 
 # Conditional by construction: these print one quiet line when everything matches, and a
 # ⚠ block naming the action only when it does not. Never an unconditional banner -- a
 # warning that fires on a healthy deploy trains the operator to scroll past the one run
 # where it means something, which is exactly what the old "Cannot unlink" line did here.
-ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group alarm"
+#
+# ⚠ --ship-dir is passed explicitly. The script's default happens to equal the default
+# $TargetPath, so omitting it agreed only by coincidence of two defaults -- and a
+# -TargetPath override would have had the check read a DIFFERENT tree's manifest and
+# report confidently about the wrong box directory.
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group alarm --ship-dir '${TargetPath}/deploy'"
 $alarmDriftExit = $LASTEXITCODE
+if ($alarmInstallExit -ne 0) { throw "the GV session alarm installer failed (exit $alarmInstallExit) -- the drift report above states what is actually on the box" }
 if ($alarmDriftExit -ne 0) { throw "the alarm's installed state does not match what was shipped (exit $alarmDriftExit) -- see the drift report above" }
 
-ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group bridge"
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group bridge --ship-dir '${TargetPath}/deploy'"
 $bridgeDriftExit = $LASTEXITCODE
 # ⛔ NOT a throw. ~/bin/gv-bridge-ensure.sh's staleness is real -- measured 2026-09-09, the
 # installed copy is from Aug 18 -- but it is not this deploy's to fix, and fixing it is

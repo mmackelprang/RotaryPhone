@@ -39,11 +39,21 @@ GROUP=""
 SHIP_DIR="/opt/rotary-phone/deploy"
 MANIFEST=""
 
+# ⚠ `shift 2` with only ONE argument left shifts NOTHING and returns non-zero. `set -e`
+# is deliberately off in this script, so the loop would spin forever on a trailing
+# `--group` with no value — and run over ssh from the deploy that hangs the deploy
+# indefinitely with no output. The worst possible shape for a script whose whole thesis
+# is "absence is not success". Each option therefore REQUIRES its value explicitly.
+# Found in pre-merge review 2026-09-09; reproduced as `timeout 8 … --group` -> exit 124.
+need_value() {
+    [ $# -ge 2 ] || { echo "⚠ [drift-check] $1 requires a value" >&2; exit 2; }
+}
 while [ $# -gt 0 ]; do
     case "$1" in
-        --group)    GROUP="${2:-}"; shift 2 ;;
-        --ship-dir) SHIP_DIR="${2:-}"; shift 2 ;;
-        --manifest) MANIFEST="${2:-}"; shift 2 ;;
+        --group)    need_value "$@"; GROUP="$2";    shift 2 ;;
+        --ship-dir) need_value "$@"; SHIP_DIR="$2"; shift 2 ;;
+        --manifest) need_value "$@"; MANIFEST="$2"; shift 2 ;;
+        -h|--help)  sed -n '2,34p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -73,11 +83,18 @@ if [ ! -r "$MANIFEST" ]; then
     exit 2
 fi
 
+rc=0
+# ⚠ 2 (CANNOT DETERMINE) outranks 1 (DRIFT) and must not be overwritten by a later
+# file's lesser result. Plain `rc=` kept whichever failure came LAST, so a missing
+# manifest entry on file 1 followed by ordinary drift on file 2 exited 1 — reporting
+# the tamer of the two states. "I could not tell" is the more alarming answer, and it
+# is the one this script exists to make impossible to miss.
+set_rc() { [ "$1" -gt "$rc" ] && rc="$1"; return 0; }
+
 expected_of() { awk -v f="$1" '$2 == f { print $1 }' "$MANIFEST" | head -n1; }
 digest_of()   { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 stamp_of()    { date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown"; }
 
-rc=0
 matched=0
 total=${#PAIRS[@]}
 
@@ -93,20 +110,20 @@ for pair in "${PAIRS[@]}"; do
     if [ -z "$want" ]; then
         echo "⚠ [drift-check] ${GROUP}: CANNOT DETERMINE — ${rel} is not in the manifest."
         echo "    ACTION: the deploy shipped a file it did not record, or recorded none. Re-deploy."
-        rc=2; continue
+        set_rc 2; continue
     fi
     if [ -z "$have_ship" ]; then
         echo "⚠ [drift-check] ${GROUP}: ${shipped} is MISSING or unreadable on the box."
         echo "    The deploy reported success but the file is not here. ACTION: re-run the deploy;"
         echo "    a transfer that fails after the manifest is written leaves exactly this state."
-        rc=2; continue
+        set_rc 2; continue
     fi
     if [ "$have_ship" != "$want" ]; then
         echo "⚠ [drift-check] ${GROUP}: ${rel} SHIPPED COPY IS STALE — /opt does not match the repo."
         echo "    repo    sha256 ${want}"
         echo "    shipped sha256 ${have_ship}   mtime $(stamp_of "$shipped")"
         echo "    The transfer did not land. ACTION: re-run the deploy and check the sync step."
-        rc=1; continue
+        set_rc 1; continue
     fi
     if [ -z "$have_inst" ]; then
         echo "⚠ [drift-check] ${GROUP}: ${installed} is NOT INSTALLED."
@@ -117,7 +134,7 @@ for pair in "${PAIRS[@]}"; do
         else
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-session-alarm.sh"
         fi
-        rc=1; continue
+        set_rc 1; continue
     fi
     if [ "$have_inst" != "$have_ship" ]; then
         echo "⚠ [drift-check] ${GROUP}: ${installed} DIFFERS from the shipped copy."
@@ -129,7 +146,7 @@ for pair in "${PAIRS[@]}"; do
         else
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-session-alarm.sh"
         fi
-        rc=1; continue
+        set_rc 1; continue
     fi
     matched=$((matched + 1))
 done

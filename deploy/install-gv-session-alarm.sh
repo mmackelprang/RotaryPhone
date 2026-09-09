@@ -118,6 +118,26 @@ else
     log "         session. --enable below will fail until a user bus exists."
 fi
 
+# ⚠ LINGERING IS A SILENT-DEATH MODE FOR A USER TIMER, so it is REPORTED rather than
+# assumed. Without it the user manager stops when the last session ends, and
+# gv-session-alarm.timer simply does not fire — while every file check above passes and
+# the deploy prints success. Measured on `radio` 2026-09-09: Linger=no. It works there
+# today only because the box holds a graphical session; that is a circumstance, not a
+# guarantee, and the gateway dead-man is what actually covers it.
+#
+# ⛔ NOT enabled automatically. `loginctl enable-linger` changes the login behaviour of a
+# box shared with Radio Console; that is the owner's call, not an installer's.
+LINGER="$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || echo unknown)"
+if [ "$LINGER" = "yes" ]; then
+    log "lingering is ON — the timer will fire with nobody logged in."
+else
+    log "⚠ lingering is ${LINGER}. This is a USER timer: with no session open the user"
+    log "  manager stops and the alarm SILENTLY DOES NOT RUN, while every file check"
+    log "  here still passes. It works while the box holds a graphical session."
+    log "  The gateway dead-man is what covers the gap. To close it properly:"
+    log "      sudo loginctl enable-linger $(id -un)"
+fi
+
 if [ "$ENABLE_TIMER" -eq 1 ]; then
     if [ ! -r "${HOME}/.rotaryphone-env" ]; then
         fail "refusing --enable: ${HOME}/.rotaryphone-env is missing. The alarm exits non-zero without it by design, so enabling now would fail every 5 minutes. Create the env file first."

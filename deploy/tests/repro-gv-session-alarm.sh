@@ -72,7 +72,21 @@ done
 serve() { printf '%s' "$1" > "$WORK/status.json"; printf '%s' "${2:-200}" > "$WORK/status.code"; }
 run()   { bash "$ALARM" >/dev/null 2>"$WORK/err.txt"; echo "$?"; }
 # Only messages the gateway ACCEPTED and queued. A 422 is not a delivery.
+#
+# ⛔ delivered() is what the gateway KEPT. received() is what the ALARM SENT.
+# Use received() for any claim about the alarm's own behaviour: the gateway strips
+# `action`/`timestamp` from an info message before recording, so a test asserting
+# "the alarm sent no action on info" against delivered() CANNOT FAIL. It did not,
+# for a while — see the note in gv-alarm-gateway-stub.py's _record.
 delivered() { jq -c 'select(.kind=="notify" and .status==202) | .body' "$GW_LOG" 2>/dev/null; }
+received()  { jq -c 'select(.kind=="notify" and .status==202) | .received' "$GW_LOG" 2>/dev/null; }
+# The delivered BODY for one condition's alert/warning message.
+body_of() { jq -r --arg d "rotaryphone-gv-session-$1" \
+    'select(.kind=="notify" and .status==202) | select(.body.dedupe_key==$d) | .body.body' "$GW_LOG" 2>/dev/null; }
+sev_of()  { jq -r --arg d "rotaryphone-gv-session-$1" \
+    'select(.kind=="notify" and .status==202) | select(.body.dedupe_key==$d) | .body.severity' "$GW_LOG" 2>/dev/null; }
+# Does the delivered body for CONDITION contain SUBSTRING?
+body_has() { case "$(body_of "$1")" in *"$2"*) echo yes ;; *) echo no ;; esac; }
 hb()    { curl -s --max-time 5 "http://127.0.0.1:8099/v1/heartbeat/rotaryphone"; }
 hb_count() { hb | jq -r '.refresh_count // 0' 2>/dev/null || echo 0; }
 reset() { : > "$GW_LOG"; rm -f "$GV_ALARM_STATE_FILE"; }
@@ -192,9 +206,30 @@ check "forced 422 -> NO alert was delivered for that dedupe" "0" \
       "$(delivered | jq -r 'select(.dedupe_key=="rotaryphone-gv-session-browser_stale")' | wc -l)"
 
 echo "=== Task 9 — the silent info drop is not relied on ==="
-# The 🧵 thread root is an info message. It must carry no action key at all.
-check "no info message carries an action" "0" \
-      "$(delivered | jq -r 'select(.severity=="info") | select(has("action"))' | wc -l)"
+# ⛔ READ received(), NOT delivered(). The gateway strips `action` from an info
+# message BEFORE recording it, so the same assertion against delivered() cannot
+# fail and passed for a while against an alarm that was sending one.
+check "the ALARM sends no action on an info message" "0" \
+      "$(received | jq -r 'select(.severity=="info") | select(has("action"))' | wc -l)"
+# And prove the instrument itself is pointed at something: there IS an info message
+# in this log, so the 0 above is a real absence rather than an empty population.
+check "…and there was at least one info message to check" "yes" \
+      "$([ "$(received | jq -r 'select(.severity=="info")' | jq -s length)" -ge 1 ] && echo yes || echo no)"
+
+echo "=== Task 9 — the bearer token is NOT in any process's argv ==="
+# ⛔ `radio` is SHARED with Radio Console, and /proc/<pid>/cmdline is world-readable.
+# A token passed as `-H "Authorization: Bearer ..."` is visible to every user on the
+# box for the life of each call, 288 times a day. Note the irony this PR contains:
+# CookieRetriever.KillOwnDebugProfileChrome reads every process's cmdline for exactly
+# this reason. Found in pre-merge review 2026-09-09; the header is fed on stdin now.
+#
+# ⚠ Asserted against the SOURCE, because the call is far too short-lived to catch by
+# sampling /proc — a sampling test here would pass by missing it, which is worse than
+# no test at all.
+check "no curl invocation interpolates the token into an argument" "0" \
+      "$(grep -c -- '-H "Authorization: Bearer' "$ALARM")"
+check "…and the token reaches curl through --config on stdin" "2" \
+      "$(grep -c -- '--config -' "$ALARM")"
 
 echo "=== Task 9 — a transport failure is a first-class failure ==="
 start_gateway --fail-notify 500
@@ -236,6 +271,33 @@ check "dedupe_keys differ" "different" \
 before="$(delivered | wc -l)"
 run >/dev/null
 check "ok after a resolved incident is silent" "$before" "$(delivered | wc -l)"
+
+echo "=== Task 10 — a REFUSED thread root is re-attempted, not silently abandoned ==="
+# ⛔ The failure this guards against, measured in pre-merge review 2026-09-09: the
+# thread key used to be persisted the instant it was minted, BEFORE the root post was
+# attempted. A gateway refusing at the moment an incident opened therefore left a key
+# on disk with no root behind it, and the next cycle's `[ -z "$key" ]` test found the
+# key and never re-attempted. The alert then threaded under a root that does not
+# exist — and the later RESOLVED, which is routed to the QUIET lane precisely because
+# it threads under an alert the owner saw, replies into nothing.
+#
+# A gateway that is down when an incident opens is a CORRELATED failure, not an
+# exotic one. That is what makes this worth a test.
+start_gateway --fail-notify 500
+reset
+serve '{"browserRefreshOutcome":"Stale"}'
+rc="$(run)"
+check "root refused -> cycle exits 1" "1" "$rc"
+start_gateway                       # the gateway comes back
+serve '{"browserRefreshOutcome":"Stale"}'
+run >/dev/null
+roots="$(delivered | jq -r 'select(.title|test("🧵"))' | jq -s length)"
+check "the thread root IS delivered on the next cycle" "1" "$roots"
+root_thread="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+alert_thread="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "…and the alert threads under that very root" "$root_thread" "$alert_thread"
+check "…with no second root minted" "1" \
+      "$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | sort -u | wc -l)"
 
 echo "=== Task 10 — the thread key survives, and its loss is demonstrated ==="
 reset
@@ -285,9 +347,101 @@ check "…all under ONE thread_key" "1" \
 check "…and TWO distinct dedupe_keys (per condition, and Stale recurs)" "2" \
       "$(delivered | jq -r 'select(.severity=="alert") | .dedupe_key' | sort -u | wc -l)"
 
-echo "=== Task 10 — no severity in any title ==="
-check "no title carries its own severity marker" "0" \
-      "$(delivered | jq -r '.title' | grep -cE '\[ALERT\]|\[WARN\]|\[INFO\]|ACTION:')"
+echo "=== Task 10 — THE DELIVERED BODY, and the severity that routes it ==="
+# ⛔ THIS BLOCK IS THE ONE THAT CERTIFIES THE ARC'S ACTUAL DELIVERABLE, and it was
+# missing from the first version of this harness. Pre-merge review 2026-09-09 proved
+# what that cost: `body_for()` could be replaced with `body_for() { : ; }` — deleting
+# every word the service says, including "ACTION: re-login at voice.google.com." —
+# and this file still printed ALL CASES PASSED. The copy-drift guard did not catch it
+# either, because it greps the SOURCE FILE, not the wire.
+#
+#   the copy guard proves the sentence is IN THE SCRIPT.
+#   only this block proves the sentence is IN THE MESSAGE.
+#
+# Likewise severity: only browser_stale was ever pinned, and only as a jq selector.
+# Every other condition could be routed to `info` — the owner's QUIET, does-not-notify
+# lane — with no test noticing. Including service_unreachable, which this script's own
+# comment calls "the case in-process detection structurally cannot cover".
+reset
+serve '{"browserRefreshOutcome":"Stale"}';       run >/dev/null
+check "browser_stale severity"  "alert" "$(sev_of browser_stale)"
+check "browser_stale body quotes the service verbatim" "yes" \
+      "$(body_has browser_stale 'Google refused it. The working on-disk set was NOT overwritten.')"
+check "browser_stale body carries the service's own REMEDY" "yes" \
+      "$(body_has browser_stale 'ACTION: re-login at voice.google.com.')"
+check "browser_stale body says the phone still works" "yes" \
+      "$(body_has browser_stale 'The phone still works.')"
+
+serve '{"browserRefreshOutcome":"Unreachable","browserSessionStale":false}'; run >/dev/null
+check "browser_unreachable severity" "alert" "$(sev_of browser_unreachable)"
+check "browser_unreachable body quotes the service verbatim" "yes" \
+      "$(body_has browser_unreachable 'CHROME WAS UNREACHABLE on CDP port')"
+check "browser_unreachable body says the login was never tested" "yes" \
+      "$(body_has browser_unreachable 'so the Google login was never tested.')"
+# ⭐ The sentence that is the whole reason browserRefreshOutcome exists.
+check "browser_unreachable body warns the boolean reads false here" "yes" \
+      "$(body_has browser_unreachable 'reads **false** in this state')"
+
+reset
+serve '{"browserRefreshOutcome":"NotAttempted"}'
+run >/dev/null; run >/dev/null; run >/dev/null      # MIN_POLLS_TO_POST=3
+check "not_attempted severity" "warning" "$(sev_of not_attempted)"
+check "not_attempted body quotes the service verbatim" "yes" \
+      "$(body_has not_attempted 'the browser was NEVER CONSULTED')"
+
+reset
+serve '{"available":true,"browserSessionStale":false}'; run >/dev/null
+check "field_missing severity" "warning" "$(sev_of field_missing)"
+check "field_missing body names the missing field" "yes" \
+      "$(body_has field_missing 'no `browserRefreshOutcome` field')"
+check "field_missing body refuses to default to green" "yes" \
+      "$(body_has field_missing 'rather than defaulting to green')"
+
+reset
+serve '{"browserRefreshOutcome":"Hibernating"}'; run >/dev/null
+check "unknown_outcome severity" "warning" "$(sev_of unknown_outcome)"
+check "unknown_outcome body names the value it did not recognise" "yes" \
+      "$(body_has unknown_outcome 'Hibernating')"
+
+# ⛔ service_unreachable is an ALERT, not info. It is the case in-process detection
+# structurally cannot cover; routing it to the quiet lane would make the one outage
+# nobody else can report also the one nobody is told about.
+reset
+GV_ALARM_STATUS_URL="$DEAD_URL" bash "$ALARM" >/dev/null 2>&1
+check "service_unreachable severity" "alert" "$(sev_of service_unreachable)"
+check "service_unreachable body refuses to imply the session is fine" "yes" \
+      "$(body_has service_unreachable 'this is not a report that the session is fine')"
+
+# Every condition message carries a non-trivial body — not just the timestamp line.
+# ⚠ Measure the LENGTH OF EACH BODY, not of each output line: `jq -r .body` prints a
+# multi-line string across many lines, so counting short LINES counts word-wrapping.
+check "no delivered alert/warning has an empty or timestamp-only body" "0" \
+      "$(delivered | jq -r 'select(.severity=="alert" or .severity=="warning") | .body | length' \
+         | awk '$1 < 80 { n++ } END { print n+0 }')"
+
+echo "=== Task 10 — no severity in any title, across EVERY condition ==="
+# ⛔ The gateway prepends its own severity_prefix(). A title carrying its own renders it
+# twice, with the two vocabularies free to disagree — measured on the sibling project as
+# "ℹ️ [INFO] [pmtrader] ℹ️ INFO · …".
+#
+# ⚠ Rebuilt from a CLEAN log that is made to contain every condition's title. The first
+# version grepped whatever the previous block happened to leave behind, so
+# field_missing, unknown_outcome and service_unreachable were never examined at all —
+# and it matched only bracket forms this title format could not produce anyway.
+reset
+serve '{"browserRefreshOutcome":"Stale"}';        run >/dev/null
+serve '{"browserRefreshOutcome":"Unreachable"}';  run >/dev/null
+serve '{"browserRefreshOutcome":"Hibernating"}';  run >/dev/null
+serve '{"available":true}';                       run >/dev/null
+GV_ALARM_STATUS_URL="$DEAD_URL" bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Succeeded"}';    run >/dev/null
+titles="$(delivered | jq -r '.title')"
+check "every condition contributed a title" "yes" \
+      "$([ "$(printf '%s\n' "$titles" | wc -l)" -ge 6 ] && echo yes || echo no)"
+check "no title carries a severity word or marker" "0" \
+      "$(printf '%s\n' "$titles" | grep -ciE '\[?(alert|warn|warning|info|critical|resolved)\]?[[:space:]]*[:·|-]|^(alert|warn|info)\b|ACTION:')"
+check "every title starts with the [rotaryphone] source tag" "0" \
+      "$(printf '%s\n' "$titles" | grep -cv '^\[rotaryphone\] ')"
 
 echo "=== Task 11 — the dead-man, read back from the gateway ==="
 # ⛔ Every row reads GET /v1/heartbeat/rotaryphone. Verifying the refresh RAN and
@@ -342,6 +496,13 @@ check "forced 422 -> refresh_count does NOT move" "$before" "$(hb_count)"
 echo "=== Task 11 — unwritable state SUPPRESSES the dead-man ==="
 RO="$WORK/readonly"
 mkdir -p "$RO"; chmod 500 "$RO"
+# ⛔ chmod is a NO-OP for root (CAP_DAC_OVERRIDE), which would make this case pass
+# vacuously in a root container rather than failing visibly. Prove the precondition
+# before asserting on it — an unwritable-directory test that can write is not a test.
+if : > "$RO/probe" 2>/dev/null; then
+    rm -f "$RO/probe"
+    check "PRECONDITION: the read-only dir is actually unwritable" "unwritable" "writable (running as root?)"
+fi
 before="$(hb_count)"
 serve '{"browserRefreshOutcome":"Succeeded"}'
 GV_ALARM_STATE_FILE="$RO/sub/alarm.state" bash "$ALARM" >/dev/null 2>"$WORK/err.txt"

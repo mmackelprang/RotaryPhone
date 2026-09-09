@@ -70,7 +70,7 @@ def main(path):
 
     noise = {}
     for r in rows:
-        if r["outcome"] in ("Unreachable", "NotAttempted", "ABSENT", "UNREACHABLE"):
+        if r["outcome"] in ("Unreachable", "NotAttempted", "ABSENT", "UNREACHABLE", "UNPARSEABLE"):
             noise[r["outcome"]] = noise.get(r["outcome"], 0) + 1
 
     print(f"Samples            : {len(rows)}  ({len(healthy)} with outcome=Succeeded)")
