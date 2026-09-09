@@ -217,6 +217,38 @@ and the HT801 address, in addition to the BT keys above.
 > — making the restore unconditional, or wrapping it in a `trap` — would have changed nothing and looked
 > like a fix. The chosen fix instead removes the file from the tar stream, so the property holds
 > whichever way the dance fails.
+>
+> ### ⛔ Second correction, same date — the BLAST RADIUS above is also wrong now
+>
+> This entry's headline, and the sentence *"the clobbered values include **`BluetoothAdapter: hci1`**
+> and `UseActualBluetoothHfp` … **This crosses the Radio Console audio boundary**"*, is **no longer
+> true**, and it is the reason this entry is called the most dangerous item on the list.
+>
+> **Measured 2026-09-09 against the current tree:** `src/RotaryPhoneController.Server/appsettings.Production.json`
+> carries `"UseActualBluetoothHfp": true` and `"BluetoothAdapter": "hci1"` — **identical to what the box
+> needs**. A template clobber does not change the adapter at all. It *was* true when written: `f222613`
+> ("use hci0 adapter in production config") set the template to `hci0`, and `1b56224` set it back to
+> `hci1` and silently falsified this paragraph.
+>
+> **What a clobber actually costs:** `GvPhoneNumber`, `EnableMarkRead` and the box's real HT801 address
+> — a silent GV/SMS outage, not an audio-boundary break. And if the config is missing *entirely*, the app
+> falls back to `appsettings.json`, which sets `UseActualBluetoothHfp: false`; that short-circuits
+> `BluetoothAdapterFactory.Create` before any adapter is chosen, so `hci0` is never touched. The service
+> then starts, `systemctl status` reports active, and the phone runs silently on
+> `MockBluetoothHfpAdapter` — a dead phone reported as a healthy deploy, which is harder to diagnose,
+> not easier.
+>
+> ⚠ **Kept as a correction rather than an edit, because the failure mode is the point:** anyone triaging
+> a future clobber from the text above would go looking at BlueZ and WirePlumber and find nothing wrong.
+> The fix is right either way — the file must stay box-owned because the template **can** drift back to
+> `hci0`, not because it currently has.
+>
+> ### 📌 On merge: flip this entry
+>
+> The status line below stays `🔴 OPEN` on the branch, deliberately — the defect is real until the fix
+> lands. **When `fix/deploy-honest-status` merges, this entry should move to RESOLVED and the "mandatory
+> manual step on every deploy" instruction must go with it**, since the deploy no longer touches the
+> file. Nothing automates that; it is a merge-checklist item.
 
 **Proposed fix (not done in PR #72 — deploy tooling, needs its own change + rollback story):**
 

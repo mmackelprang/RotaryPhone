@@ -4,9 +4,10 @@
 #
 # Why this exists: docs/KNOWN-ISSUES.md attributed the clobber to `set -e`
 # aborting the chain before the restore. That `set -e` is in the LOCAL script
-# (Deploy-ToLinux.ps1:125); the chain runs in the REMOTE shell, which does not
-# inherit it. Case A is the falsification. Cases B1 and B2 are the two ways the
-# clobber is actually produced. Case C is the fix.
+# (the `set -e -o pipefail` at the top of $syncScript); the chain runs in the
+# REMOTE shell, which does not inherit it. Case A is the falsification. Cases B1
+# and B2 are the two ways the clobber is actually produced. Case C is the fix, and
+# case D is whether the deploy can now TELL when the extract fails.
 #
 # ---------------------------------------------------------------------------
 # ⚠ CORRECTION 2026-09-09, measured while building this script.
@@ -53,18 +54,31 @@ build_fixture() {
     echo 'BOX-AUTHORITATIVE'   > "$WORK/dst/appsettings.Production.json"
     echo 'OLD-BINARY'          > "$WORK/dst/RotaryPhoneController.Server"
     echo 'OLD-ASSET'           > "$WORK/dst/wwwroot/assets/app.js"
-    # The archive as Deploy-ToLinux.ps1:126 builds it today: a './' member and a
-    # directory member for every directory.
+    # A .playwright tree, so the prune is exercised rather than assumed, and an empty
+    # directory so case D can assert the known empty-directory loss.
+    mkdir -p "$WORK/src/.playwright/package" "$WORK/src/emptydir"
+    echo 'PLAYWRIGHT' > "$WORK/src/.playwright/package/chromiumSwitches.js"
+    # The archive as the PRE-FIX code built it: `tar -C <dir> -czf - .`, which carries
+    # a './' member and a directory member for every directory.
     tar -C "$WORK/src" -czf "$WORK/payload.tgz" .
 }
 
-# The archive as Task 3 builds it: the config is not a member at all.
+# The archive as the SHIPPED code builds it. This must stay a verbatim copy of the
+# create side in deploy/Deploy-ToLinux.ps1's $syncScript -- files-only, no './'
+# member, no directory members.
+#
+# ⚠ It deliberately does NOT use the simpler `tar -C src --exclude=… -czf - .` form.
+# That form was the intermediate step (config excluded, directory members still
+# present), and an archive built that way STILL makes `tar -xzf --unlink-first` exit
+# 2 on its './' member -- so a test using it would print PASS while reproducing the
+# very failure the shipped code exists to remove. Measured: with the './' form,
+# extraction prints "tar: .: Cannot unlink: Invalid argument" and exits 2.
 build_fixed_archive() {
-    tar -C "$WORK/src" --exclude=./appsettings.Production.json --exclude=./.playwright \
-        -czf "$WORK/fixed.tgz" .
+    ( cd "$WORK/src" && find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 \
+        | tar --null --exclude=./appsettings.Production.json -czf "$WORK/fixed.tgz" -T - )
 }
 
-echo "=== Case A: the chain exactly as Deploy-ToLinux.ps1:126-130 builds it ==="
+echo "=== Case A: the chain exactly as the PRE-FIX code built it ==="
 # Expected: tar exits 2 on the directory members, every regular file is extracted
 # anyway, the restore mv RUNS and succeeds, and the chain exits 0. The chain exit
 # of 0 is Defect 4: it is chmod's status, not tar's.
@@ -167,8 +181,8 @@ echo "=== Case C-B1 / C-B2: the fix re-run against BOTH clobber fixtures ==="
 # 2026-09-09 satisfied it while the defect was present. These do not.
 
 # C-B1: first deploy, stale backup present. The fixed chain must not create the
-# config at all -- Deploy-ToLinux.ps1:142-148 scps the template in on a genuine
-# first deploy, and that is the only path that should ever write this file.
+# config at all -- Deploy-ToLinux.ps1's RP_CFG_MISSING probe scps the template in
+# on a genuine first deploy, and that is the only path that should ever write it.
 build_fixture
 build_fixed_archive
 rm -f "$WORK/dst/appsettings.Production.json"
@@ -194,6 +208,55 @@ chmod 0755 "$WORK/ro"
 echo "C-B2: config=$cb2_cfg  sha_unchanged=$([ "$cb2_before" = "$cb2_after" ] && echo yes || echo no)"
 [ "$cb2_before" = "$cb2_after" ] && [ "$cb2_cfg" = "BOX-AUTHORITATIVE" ]
 check "C-B2" $? "(the fixture that clobbers the old chain cannot reach the file at all)"
+echo ""
+
+echo "=== Case D: the chain can now report its own failure (Defect 4) ==="
+# Cases A-C are about WHAT lands on the box. This one is about whether the deploy can
+# TELL. The old remote compound ended in chmod, so it reported chmod's status -- 0 --
+# while tar had exited 2, on every single run. Two properties, and the negative
+# control is the one that matters: a check never seen to fail is not known to work.
+build_fixture
+build_fixed_archive
+
+# D1: archive shape. No './' member and no directory members is what lets
+# --unlink-first stop failing; the config and .playwright must still be absent.
+d_dirs=$(tar -tzf "$WORK/fixed.tgz" | grep -c '/$')
+d_dot=$(tar -tzf "$WORK/fixed.tgz" | grep -cx '\./')
+d_prod=$(tar -tzf "$WORK/fixed.tgz" | grep -c 'appsettings.Production.json')
+d_pw=$(tar -tzf "$WORK/fixed.tgz" | grep -c '\.playwright')
+echo "D1: dir_members=$d_dirs  dot_member=$d_dot  prod_config=$d_prod  playwright=$d_pw"
+[ "$d_dirs" -eq 0 ] && [ "$d_dot" -eq 0 ] && [ "$d_prod" -eq 0 ] && [ "$d_pw" -eq 0 ]
+check "D1" $? "(files-only; nothing for --unlink-first to fail on, prune and exclude both applied)"
+
+# D2: a GOOD extract exits 0 and prints NOTHING. The four "Cannot unlink" lines the
+# old shape printed on every successful deploy are what trained the operator to scroll
+# past a failing deploy.
+mkdir -p "$WORK/dst"
+d_err="$(sh -c "set -e; tar -xzf '$WORK/fixed.tgz' --unlink-first -C '$WORK/dst'; chmod +x '$WORK/dst/RotaryPhoneController.Server'" 2>&1 >/dev/null)"
+d_ok=$?
+echo "D2: chain_exit=$d_ok  stderr='${d_err}'"
+[ "$d_ok" -eq 0 ] && [ -z "$d_err" ]
+check "D2" $? "(exit 0 and silent -- no Cannot unlink noise on a successful deploy)"
+
+# D3: ⭐ THE NEGATIVE CONTROL. Point the extract at a directory that does not exist.
+# The old chain reports 0 here because chmod runs last and succeeds; the new one must
+# report non-zero, which is what makes the PowerShell throw in Deploy-ToLinux.ps1 fire
+# and leaves the service on its prior binary.
+sh -c "tar -xzf '$WORK/fixed.tgz' --unlink-first -C '$WORK/nonexistent' 2>/dev/null; chmod +x '$WORK/dst/RotaryPhoneController.Server'"
+d_old=$?
+sh -c "set -e; tar -xzf '$WORK/fixed.tgz' --unlink-first -C '$WORK/nonexistent' 2>/dev/null; chmod +x '$WORK/dst/RotaryPhoneController.Server'"
+d_new=$?
+echo "D3: old_chain_exit=$d_old (ends in chmod, no set -e)   new_chain_exit=$d_new"
+[ "$d_old" -eq 0 ] && [ "$d_new" -ne 0 ]
+check "D3" $? "(the criterion the old chain fails: a failed extract is now visible)"
+
+# D4: the known, accepted limitation. A files-only member list cannot carry an EMPTY
+# directory. Asserted rather than assumed so the day the publish output gains one that
+# matters, this test says so instead of the box silently missing a directory.
+d_empty=$(tar -tzf "$WORK/fixed.tgz" | grep -c 'emptydir')
+echo "D4: empty_dir_members=$d_empty  (expected 0 -- documented limitation, not a bug)"
+[ "$d_empty" -eq 0 ]
+check "D4" $? "(empty directories are dropped; see the comment in Deploy-ToLinux.ps1)"
 echo ""
 
 if [ "$FAILED" -eq 0 ]; then

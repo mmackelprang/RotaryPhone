@@ -35,11 +35,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The box's appsettings.Production.json is authoritative (docs/HT801-ADDRESS.md)
-         and carries BluetoothAdapter: hci1, which crosses the Radio Console audio
-         boundary. The SDK's default appsettings*.json Content glob would otherwise
-         ship the repo TEMPLATE inside the publish artifact, so every sync path has to
-         remember to exclude it. This makes no artifact able to carry it at all.
+    <!-- The box's appsettings.Production.json is authoritative (docs/HT801-ADDRESS.md):
+         it carries GvPhoneNumber, EnableMarkRead and the real HT801 address, none of
+         which are in the template. The SDK's default appsettings*.json Content glob
+         would otherwise ship the repo TEMPLATE inside the publish artifact, so every
+         sync path has to remember to exclude it. This makes no artifact able to carry
+         it at all.
+
+         Note the BT keys are NOT the reason, despite what docs/KNOWN-ISSUES.md said
+         until 2026-09-09: the template currently carries the same hci1 the box needs,
+         so a clobber does not change the adapter. The reason this file must stay
+         box-owned is that the template CAN drift back (it was hci0 at f222613), not
+         that it currently has.
 
          This does NOT make the sync-path excludes redundant, and they stay.
          Measured on SDK 10.0.400, and the behaviour is narrower than it looks:

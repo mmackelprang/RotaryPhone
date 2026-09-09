@@ -26,6 +26,22 @@ install and the #78/#79 deploy come first. This fixes the tooling that will run 
 `UseActualBluetoothHfp`. That **crosses the audio boundary into Radio Console** and nothing in the
 deploy surfaces it. This is the single most dangerous item in the repo's KNOWN-ISSUES.
 
+> ⛔ **Corrected 2026-09-09 during pre-merge review — this paragraph is no longer true.** The repo
+> template now carries `UseActualBluetoothHfp: true` and `BluetoothAdapter: hci1`, **identical to what
+> the box needs**, so a clobber does not change the adapter and does not cross the audio boundary. It
+> was true when written (`f222613` set the template to `hci0`); `1b56224` set it back to `hci1` and
+> silently falsified it.
+>
+> **What a clobber actually costs:** `GvPhoneNumber`, `EnableMarkRead` and the box's real HT801 address
+> — a silent GV/SMS outage. A *missing* config is different again: the app falls back to
+> `appsettings.json` with `UseActualBluetoothHfp: false`, which short-circuits
+> `BluetoothAdapterFactory.Create` before any adapter is chosen, so the phone runs silently on
+> `MockBluetoothHfpAdapter` while `systemctl status` reports active.
+>
+> The fix is unaffected — the file must stay box-owned because the template **can** drift back, not
+> because it currently has. But a future triage starting from the sentence above would go looking at
+> BlueZ and WirePlumber and find nothing wrong, which is why this is corrected rather than left.
+
 ### ⛔ Re-derive the mechanism before fixing it
 
 `KNOWN-ISSUES.md` states that `set -e -o pipefail` aborts the chain before the restore `mv`. **Treat

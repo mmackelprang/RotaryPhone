@@ -1328,6 +1328,55 @@ Claude-Session: https://claude.ai/code/session_01PJcw41E87SDxrugC3mKKLf
 
 ---
 
+## 3b. Deliberately NOT fixed in this PR — from the 2026-09-09 pre-merge review
+
+Each of these was found, measured, and left alone on purpose. Recorded so the next person inherits the
+finding rather than re-deriving it.
+
+### F1 — extracted directories take their mode from the remote umask · **owner decision**
+
+With directory members gone from the archive (Task 4), GNU tar creates missing parents at
+`0777 & ~umask` rather than at the archived mode. Measured: a source directory at `700` extracted as
+`775` under `umask 0002`, which is what this box runs (`setup-gvbridge.sh` documents it). **No live
+impact** — every directory in the current publish tree already exists on the box — but any *new* one
+would land group-writable.
+
+The one-word fix is `umask 022;` at the head of the remote chain. It is **not** applied because tar also
+applies the umask to the **file** modes it restores, so that one word silently re-permissions every file
+the extract writes on a production box shared with another service. That is a permissions change with its
+own blast radius, and it belongs to the owner rather than to a PR about exit codes.
+
+### F2 — nothing removes a pre-existing `/tmp/rp-prod.bak` · **affects Task 12's acceptance**
+
+The backup/restore dance is gone, so nothing *creates* one — but nothing deletes a leftover either. Two
+consequences:
+
+- **Task 12 step 3 asserts `/tmp/rp-prod.bak` must be ABSENT.** On a box carrying a stranded B2-era
+  backup that assertion **fails for the wrong reason**. Either clear it by hand once before the UAT, or
+  relax the criterion to "mtime not updated".
+- That file contains the production config — **GV number and HT801 address — world-readable in `/tmp`**.
+  Worth deleting on its own merits.
+
+Not added to the deploy because it is a box-side deletion, and this session was scoped out of box changes.
+
+### F3 — `scp -r scripts/` is now a hard abort · **informational**
+
+Task 4b correctly made it throw. Note what that means in practice: it ships
+`scripts/bin/Debug/net10.0/.playwright/**` with no exclusion (§0.6, and the Out-of-scope note below), so
+it is the largest and most transient-failure-prone transfer in the deploy, and it now aborts at a point
+where the binary has already landed and the service has **not** been restarted. Correct behaviour;
+just know it before the first post-merge deploy. Excluding that tree is still the real fix.
+
+### F4 ⛔ SECURITY, pre-existing and out of scope — a plaintext credential in a public repo
+
+`src/RotaryPhoneController.Server/appsettings.Production.json:45` commits
+`"HT801AdminPassword": "Admin001"`, and `docs/KNOWN-ISSUES.md` states this repo is public. It predates
+this PR and this PR does not touch the file's contents — but it does change how that file is published,
+which is the cheapest moment to notice. **Rotating a live credential is the owner's call**, so nothing
+here does it. Route it to an env var or user-secret and rotate the device password.
+
+---
+
 ## 4. Out of scope
 
 - Radio Console's `setup-kiosk.sh` gap — theirs, tracked on their side.

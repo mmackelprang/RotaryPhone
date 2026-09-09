@@ -116,10 +116,23 @@ backup_if_changed() {
 #
 # NOTE: do not "verify" a replacement by comparing inode numbers. Measured 2026-09-09:
 # the freed inode was immediately REUSED by the new file.
+#
+# The staging file is cleaned up on BOTH failure paths. This script runs under
+# `set -euo pipefail`, so without the guards a failed install (ENOSPC, quota) would
+# abort leaving a PARTIAL file at mode 0600, and a failed mv would abort leaving a
+# complete one -- in ~/bin, ~/.config/systemd/user, ~/.config/autostart and ~/Desktop,
+# which is a kiosk screen the owner looks at. Leaving debris there is the exact
+# problem Task 13 removed from backup_if_changed; re-introducing it here would be a
+# poor trade. `if ! cmd` suspends errexit for the tested command, which is why the
+# cleanup can run at all.
+#
+# It also matters for the NEXT run: a stranded "${dest}.new" owned by another uid
+# (one run under sudo, say) makes the following install fail, which under set -e now
+# aborts the whole installer where the old code would have quietly succeeded.
 install_atomic() {
     local src="$1" dest="$2" mode="$3"
-    install -m "$mode" "$src" "${dest}.new"
-    mv -f "${dest}.new" "$dest"
+    if ! install -m "$mode" "$src" "${dest}.new"; then rm -f "${dest}.new"; return 1; fi
+    if ! mv -f "${dest}.new" "$dest";            then rm -f "${dest}.new"; return 1; fi
 }
 
 install_file() {
