@@ -423,12 +423,51 @@ works.
    at the moment of delivery, announce a re-delivery as a REVISION rather than a first delivery, and
    prefer a new filename over rewriting a file that has already been announced.**
 
-⚠ **Address sessions by their real names, not owner-supplied nicknames.** On the channel's first use,
-both nicknames were wrong: this session is **`rotaryphone-a3`**, not "Phone", and five peer sessions are
-named "Radio" with only one running. **A message to a name that does not resolve looks, from the
-sender's side, exactly like the recipient ignoring them** — the same not-sent/not-received ambiguity the
-lane exists to remove, reappearing in the new carrier. Confirm the exact address string with the peer
-and record it here when it changes.
+### ⛔ Channel addresses are bridge-local and DIRECTIONAL — there is no single "real" name
+
+⚠ **An earlier version of this section said "address sessions by their real names, not owner-supplied
+nicknames", and named `rotaryphone-a3`. That was wrong, and following it would have broken the
+channel.** It is corrected here rather than deleted, because the reasoning behind the error is the
+point: each side sees a Remote Control **alias** for the other, and **neither side's true session name
+is visible to its counterpart.** There is no one real name to write down — there is a **pair of
+aliases, one per direction.**
+
+| Direction | Address to use | Evidence |
+|---|---|---|
+| Radio Console → RotaryPhone | **`Phone`** | Verified working twice; `rotaryphone-a3` does **not appear** in Radio Console's peer list at all |
+| RotaryPhone → Radio Console | **`Radio [b4d661]`** | Verified working; does **not appear** in Radio Console's own list, and their true name is `rtest-48` |
+
+**Each side must use the name IT sees, not the name the counterpart reports for itself.** Our true name
+is `rotaryphone-a3 [cf3532]`; theirs is `rtest-48 [528579]`; **neither is usable by the other.** Ambiguity
+is resolved locally: we see five peers named "Radio" and disambiguate to the one running.
+
+⚠ **An alias that stops resolving fails silently and looks exactly like the counterpart going quiet** —
+the same not-sent/not-received ambiguity the file lane exists to remove, reappearing in the new carrier.
+**On any "delivery not confirmed", re-run `ListAgents` and re-derive the alias; do not conclude the
+other side is ignoring you.** Resending against a re-derived address is the mitigation until there is
+something better. Note also that a "not confirmed" result is **not** proof of non-delivery: on
+2026-09-09 a message reported unconfirmed had in fact arrived in full.
+
+### The hash has a defined domain: worktree bytes in the recipient's inbound directory
+
+⛔ **Never hash a git object.** On 2026-09-09 the two sides computed different hashes for identical
+content — Radio Console hashed the committed blob, RotaryPhone hashed the file on disk — which would
+fire a false mismatch on a perfectly good delivery and be **indistinguishable from a real one.**
+
+**The hash is computed over the file as it sits in the recipient's inbound directory.** That is the only
+artefact both sides can point at; a git blob is a per-repository *normalised* artefact whose bytes may
+differ from the delivered file.
+
+⚠ **Verified on our side rather than assumed, because the diagnosis was offered as line-ending
+normalisation and that is not what happens here:** for the file in question our worktree hash and our
+blob hash are **identical** (`a8d627aac3e28a44`) and the file contains **zero CRLF**. The divergence was
+entirely on the sender's side. **The rule holds regardless — but not for the stated reason**, so do not
+rely on "both repos normalise the same way". Hash the delivered file; that is the whole rule.
+
+⭐ **Carry line count as well as hash, because they fail differently.** Line count survives line-ending
+normalisation and the hash does not. On 2026-09-09 the line counts agreed (186 and 242) while the hashes
+did not — **that disagreement between the two fields is what identified the problem as encoding rather
+than content.** A hash alone would have said only "mismatch".
 
 ### Cross-repo traffic: batch by default (agreed 2026-09-08)
 
