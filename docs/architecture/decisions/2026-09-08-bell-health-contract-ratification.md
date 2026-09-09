@@ -347,12 +347,20 @@ where a ~5 s window remains and their §7f handling (record the sticky note, no 
    against a running server, not only in tests: a real bell failure was driven through the detection
    path, acknowledged, the process `pkill`ed, and the note came back with `acknowledged: true` and every
    field byte-identical.
-   **⚠ A THIRD instance of the same failure class was found while testing this and is still open.** The
-   delivered reply §5 also promises that acking an *already-acked or absent* failure returns
-   `200 {"acknowledged": true}`, and invites clients to "retry freely on a flaky network". The code
-   returns `{"acknowledged": false}` — confirmed live in both cases. It is pre-existing and untouched by
-   this work, but changing a response body RadioConsole consumes needs the owner, so it was deliberately
-   not fixed here.
+   **⚠ A THIRD instance of the same failure class was found while testing this.** The delivered reply §5
+   also promises that acking an *already-acked or absent* failure returns `200 {"acknowledged": true}`,
+   and invites clients to "retry freely on a flaky network". The code returned `{"acknowledged": false}` —
+   confirmed live in both cases. It was pre-existing and untouched by that work, because changing a
+   response body RadioConsole consumes needs the owner.
+   **→ DECIDED and SHIPPED in PR #79: fix the code, not the promise.** A repeat ack and an ack of an
+   absent failure both return `{"acknowledged": true}`. The reasoning that settled it: what we published
+   is a **post-condition** — *the failure is acknowledged* — not a **delta** — *you were the one who
+   changed it*. The endpoint was answering the delta. The tracker still reports the delta internally
+   (it is a useful log line, and `BellFailureTrackerTests.Acknowledge_ReturnsFalse_WhenNothingToAcknowledge`
+   is unchanged); what changed is that it no longer leaks onto a wire contract that promised otherwise.
+   ⚠ **All three instances of this failure class are now closed, and all three were closed by making the
+   code true rather than by retracting the document.** That is a pattern worth noticing: on this contract
+   the delivered prose has twice been a better specification than the delivered code.
 3. **§5 — unifying `CallStateChanged`** is a coordinated cross-repo breaking deploy. Not schedulable
    from this side alone.
 
