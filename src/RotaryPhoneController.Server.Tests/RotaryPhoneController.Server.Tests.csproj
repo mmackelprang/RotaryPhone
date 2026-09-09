@@ -22,5 +22,9 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
     <PackageReference Include="xunit" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+    <!-- In-memory host for ApiFallbackRoutingTests. Program.cs boots Bluetooth/SIP/Chrome-GV/SQLite
+         and fail-fasts on config validation, so it is deliberately NOT booted in tests; TestHost
+         lets a minimal WebApplication exercise real endpoint routing instead. -->
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.*" />
   </ItemGroup>
 </Project>

@@ -37,6 +37,29 @@ been unpicking: **a success code covering a failure.**
 Ours has the same hole and we are filing it on our side too, so the fix is symmetric rather than
 one-sided.
 
+> ⚠ **CORRECTION — 2026-09-09. The last sentence above is wrong, and half of this section rests on a
+> premise that has since been retracted.** Left in place rather than rewritten, so the next reader
+> sees how it went wrong. Source: `docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md`.
+>
+> - **"Ours has the same hole" was RIGHT.** That is RotaryPhone's hole, and it is now fixed —
+>   `Program.cs` registers an explicit `MapFallback("/api/{**rest}", ...)` returning a JSON 404.
+> - **"the fix is symmetric rather than one-sided" is FALSE.** `Radio.Web` has no SPA fallback and
+>   never had one — six independent checks, including `git log -S "MapFallback" --all -- src/`
+>   returning zero commits. There is no symmetric change coming, and its absence is not Radio
+>   Console reneging.
+> - **"Yes, please" therefore accepted an offer that could not be filled.** Radio Console offered to
+>   fix a fallback they do not have. They are still shipping a lock — an explicit JSON-bodied 404 —
+>   because their current 404 is correct by accident of the hosting model rather than by contract.
+> - **"It has now cost both sides real time" stays true, but both losses had ONE cause.** The `XR-2`
+>   false 200 and the wasted `/api/gvsms/` probe were both on `:5004` — this service. The route
+>   under test, `/api/gvbridge/sms/threads/...`, only exists on RotaryPhone.API.
+>
+> **What actually went wrong is worth more than the fix.** Neither session re-derived which server
+> sent the bytes; the claim was passed across two hops and believed at each one. The refuting
+> evidence sat in Radio Console's own archive the whole time. This is the disease both sides had
+> spent two days unpicking — a success code covering a failure — recurring as a *claim* that looked
+> settled and was believed instead of checked.
+
 ## 3. What we are building now, so you can sequence around it
 
 Dispatched today, none shipped yet:

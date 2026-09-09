@@ -430,6 +430,28 @@ app.MapHub<RotaryHub>("/hub");
 app.MapGVTrunk();
 app.MapGVBridge();
 
+// An unmatched /api/* path must 404 as JSON, NOT fall through to the SPA shell below.
+//
+// Why this exists: a bare MapFallbackToFile served index.html — HTTP 200, text/html — to every
+// unmatched /api/* request. A success code covering a failure. It cost a day of cross-repo
+// debugging in Sep 2026 (docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md), because a
+// JSON caller probing a wrong path got 200 back and concluded the route existed.
+//
+// The body is the point. An empty 404 is what the caller could not act on; { error = ... } matches
+// the shape already used across the GVBridge/GVTrunk controllers.
+//
+// ⚠ Do NOT replace this with UseStatusCodePagesWithReExecute("/not-found"). The .NET 10 template
+// ships it and the docs steer you to it, but it re-executes into the Blazor/SPA pipeline and gives
+// every /api/* 404 an HTML body — this same bug through the front door, with the tests still green.
+//
+// Precedence note: this wins over the SPA fallback by route-template specificity (the literal "api"
+// segment beats the SPA's catch-all `{*path:nonfile}`), NOT by being registered first — both are
+// registered at the same fallback order. Registering it first documents intent; it is not what
+// makes it work. ApiFallbackRoutingTests pins the actual resulting behaviour in both directions.
+app.MapFallback("/api/{**rest}", (HttpContext ctx) => Results.Json(
+    new { error = $"No API route matches {ctx.Request.Method} {ctx.Request.Path}" },
+    statusCode: StatusCodes.Status404NotFound));
+
 // Fallback to React SPA in wwwroot/index.html
 app.MapFallbackToFile("index.html");
 

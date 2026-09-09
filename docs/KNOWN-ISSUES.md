@@ -149,6 +149,83 @@ and the HT801 address, in addition to the BT keys above.
 confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
 
 
+## ⚠️ OPEN — `/api/gvbridge/event` has no route, but two middlewares still special-case it (found 2026-09-09)
+
+**Status:** ⚠️ **OPEN — needs an owner decision.** Found while fixing the `/api/*` fallback below;
+**not** introduced by it. Left in place deliberately rather than fixed in an unrelated PR.
+
+**There is no controller route for `/api/gvbridge/event`.** No `[HttpPost("event")]`, no
+`[Route("event")]` — anywhere. Two middlewares nonetheless still carve it out:
+
+- `Program.cs:395-412` — a bespoke CORS block that answers its `OPTIONS` preflight with `204`.
+- `GvBridgeAuthMiddleware.cs:38-40` — an **auth-gate exemption**, so the path is deliberately open.
+
+`docs/superpowers/specs/2026-03-27-gv-api-migration-design.md:222` lists *"Service worker HTTP relay
+for call events — no longer needed (signaler handles detection)"* under **What Gets Deleted**, and
+there is no extension source (no `manifest.json`) in the repo. So this is vestigial wiring for a
+relay that was removed by design; the middleware carve-outs outlived the endpoint.
+
+**Why it stayed invisible:** a `POST` here used to hit the SPA fallback and return **`200` with
+`index.html`** — so any caller checking `response.ok` was told it succeeded. The `/api/*` 404 fix
+below makes it honest:
+
+```
+POST /api/gvbridge/event  →  404 application/json  {"error":"No API route matches POST /api/gvbridge/event"}
+```
+
+**This is a second instance of the same disease as the fix below**, found by the fix: a success code
+covering a failure. Anything still posting call events here has been silently failing, and was
+already failing before the 404 change — the change only makes it audible.
+
+**Two things for the owner to decide:**
+1. **Is anything still POSTing here?** If yes, it has been broken for some time and needs a route,
+   not a fallback. If no (which the design doc implies), both carve-outs should be deleted.
+2. **The auth exemption is the part that matters.** It punches a permanent hole in the
+   `/api/gvbridge/*` gate for a path that does not exist. Harmless today — there is nothing behind
+   it to reach — but a future route added at that path would be **born unauthenticated**, silently.
+
+## Unmatched `/api/*` returned HTTP 200 with `index.html` instead of a 404 (RESOLVED 2026-09-09)
+
+**Status:** ✅ Resolved by `fix/api-404-not-spa-fallback`.
+**Symptom (was):** `Program.cs` ended in a bare `app.MapFallbackToFile("index.html")`, so **any**
+unmatched `/api/*` path returned **`200 text/html`** — the React SPA shell — to a caller that asked
+for JSON. A typo'd or wrong-shaped API path looked like a success.
+**Impact (was):** A success code covering a failure, in the one place a caller has no way to
+second-guess it. `GetFromJsonAsync` throws on the content type, gets logged as a parse failure, and
+the caller concludes the *data* was bad rather than the *route*. It burned a probe on each side of
+the RotaryPhone/Radio Console boundary in a single day.
+
+**Fixed by** registering an explicit `MapFallback("/api/{**rest}", ...)` ahead of the SPA fallback,
+returning `404` with `{ "error": "No API route matches <method> <path>" }` and
+`Content-Type: application/json`. Verified against the running service:
+
+```
+GET /api/gvsms/          → 404 application/json  {"error":"No API route matches GET /api/gvsms/"}
+GET /settings/audio      → 200 text/html         (SPA shell, unchanged)
+GET /api/contacts        → 200 application/json  (real routes unaffected)
+```
+
+⚠️ **Do NOT "modernise" this to `UseStatusCodePagesWithReExecute("/not-found")`.** The .NET 10
+template ships it and current Microsoft docs steer you toward it, but it re-executes into the SPA
+pipeline and gives every `/api/*` 404 an **HTML body** — this same defect back through the front
+door, **with every test still green.** Flagged by Radio Console's own investigation before we hit it.
+
+**The misattribution is the more useful lesson.** For a day both repos recorded this as *Radio
+Console's* fallback; Radio Console filed it as `UI-11` and offered to fix it on their side. `Radio.Web`
+has no SPA fallback and never had one — `git log -S "MapFallback" --all -- src/` returns zero commits
+there. Both incidents were on `:5004`, and the route under test (`/api/gvbridge/sms/threads/...`)
+only exists here. **Neither session re-derived which server sent the bytes**; the refuting evidence
+sat in Radio Console's own archive the whole time. Full retraction and the corrected records:
+`docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md`, plus annotations in
+`docs/handoffs/2026-09-08-radioconsole-{bell-persistence-and-404,incident-and-corrections}.md` and
+`docs/prompts/2026-09-08-radioconsole-ack-2-and-three-rows.md`.
+
+⚠️ **Two pre-existing verification steps changed meaning** and were annotated in place:
+`docs/plans/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md` A7 (now expects `404 application/json`,
+not `200 text/html`) and `docs/plans/build-stamp-and-deploy-verification.md` P2, **which this fix
+silently weakened** — it detected an unregistered route by content-type alone, and a missing route
+now answers `404 application/json`, satisfying its PASS condition. It now asserts the status line.
+
 ## Voicemail routes 404 a recording that exists, during a GV auth blackout (RESOLVED 2026-09-08)
 
 **Status:** ✅ Resolved by the XR-6 PR (`fix/gv-voicemail-blackout-404`).
