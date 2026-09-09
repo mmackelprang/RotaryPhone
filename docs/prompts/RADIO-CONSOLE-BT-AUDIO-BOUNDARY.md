@@ -346,9 +346,60 @@ bluetoothctl -- select 10:91:D1:FE:00:46
 ### If RotaryPhone needs Radio Console to change something:
 
 1. Update this boundary doc with what's needed and why (in the Change Log)
-2. If code changes are needed in Radio Console, create a file at `D:\prj\RTest\RTest\docs\` describing the request
+2. If code changes are needed in Radio Console, create a file at
+   **`D:\prj\RTest\RTest\docs\queue\inbound\`**, named `<date>-rotaryphone-<slug>.md`
+   (agreed 2026-09-08; adjacent to the board it corrects, out of the row-dossier namespace)
 3. Tell the user to switch to the Radio Console session and reference the prompt file
 4. After Radio Console completes the work, it updates this boundary doc's Change Log
+
+⚠ **Write the file. Do not hand the content to the owner as chat text.** On 2026-09-08 a reply was
+composed and relayed verbally instead of written to the lane; the receiving session transcribed it from
+the relay and marked it as a transcription. A reply that is complete, correct and undelivered is the
+failure this lane exists to close.
+
+### Cross-repo traffic: batch by default (agreed 2026-09-08)
+
+**Default: ONE file per side per day.** Immediate delivery is the exception and must earn itself.
+
+⚡ **Send immediately** — these change what the other side is doing *right now*:
+
+1. **A retraction of advice already given.** Two qualified on 2026-09-08: our `degraded`/`authBlackout`
+   guidance, which would have left their banner silent through an 83-minute outage, and their
+   `psidtsAgeSeconds` doctrine, which we found in their documents.
+2. **A wire or contract change, before it deploys.** `Ht801IpAddress` becoming nullable reached them in
+   time to fix their rendering first — they render `?? "--"`, which reads as *absence*, exactly the
+   misreading our own doc comment warns against. After the deploy it would have shipped a panel saying
+   "no HT801" when the truth was "not yet resolved."
+3. **A defect found in the other side's code.** `GV-12` and `UI-10` were both found by reading their
+   logs during our outage. That is a gift; it should not wait for a digest.
+4. **Anything that blocks or unblocks a row the other side can claim today.**
+5. **An incident while it is in progress.**
+
+📦 **Batch everything else** — status, progress, "queued not started", fixes to rows the other side is
+not working on, and framing corrections that do not change the build. A useful test: **if the first
+sentence is "so you can sequence around it", it is a digest by definition.**
+
+**Three habits that are not negotiable:**
+
+- **Name what you independently verified, not merely what you concluded.** This is what caught the
+  `rp-deploy` premise, the `psidtsAgeSeconds` lie, and their `--` rendering. An unverified claim
+  propagates just as readily inside a batch as in an urgent file.
+- **Acknowledge every reply on the board, naming what the receiver checked.** An unacknowledged reply is
+  then *visibly* undelivered rather than silently so — which is how `XR-2` sat open for six weeks while
+  it was fixed and deployed.
+- **Say "merged" or "deployed". Never "landed" or "shipped."** Both sessions adopted this independently
+  on 2026-09-08, having each been caught by it in opposite directions.
+
+**Why the sessions stay separate.** Considered and rejected on 2026-09-08. The findings that mattered
+most came from the seam: each side audited the other's claims because it could not assume them. A single
+session has no reason to re-derive its own beliefs and would carry one set of blind spots — the
+`psidtsAgeSeconds` doctrine was "twice-confirmed" and believed for six weeks, and it took someone who
+did not hold it to look. The boundary is also a safety property: separate sessions must write a boundary
+change *down*; one session can violate it silently.
+
+**One agreed exception:** a change that genuinely spans both repos and must land together — a
+wire-format change on both sides at once — is simpler and safer held by one session. Say so explicitly
+when claiming it.
 
 ### Shared system-level changes (BlueZ, systemd, udev):
 
