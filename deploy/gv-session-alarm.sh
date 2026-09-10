@@ -540,8 +540,20 @@ fi
 #
 # ⚠ LOWER-CASE ONLY. `grace` is case-sensitive: "30M" is a 422, and a 422 here
 # means THE CHECK IS NEVER REGISTERED — no dead-man at all, silently.
+#
+# ⛔ `schedule` IS NOT A BARE DURATION. MEASURED 2026-09-10 against the live
+# gateway: sending "5m" returns
+#     422 {"detail":"bad schedule '5m' (use weekdays | daily | every:<N><s|m|h|d>)"}
+# and the check is never registered. "every:5m" returns 200 and reads back from
+# GET /v1/heartbeat/rotaryphone with a real next_deadline.
+#
+# ⚠ THIS SHIPPED AS "5m" BECAUSE IT WAS ONLY EVER TESTED AGAINST THE REPO'S OWN
+# STUB, WHICH VALIDATES NOTHING AND SO ACCEPTED A FORMAT THE REAL GATEWAY REFUSES.
+# A stub proves the POST is made; it cannot prove the POST is accepted. Do not
+# treat a green run against the stub as evidence the dead-man exists — read the
+# check back from the gateway instead.
 HEARTBEAT_CHECK_ID="${GV_ALARM_HEARTBEAT_CHECK_ID:-gv-session-alarm}"
-HEARTBEAT_SCHEDULE="${GV_ALARM_HEARTBEAT_SCHEDULE:-5m}"
+HEARTBEAT_SCHEDULE="${GV_ALARM_HEARTBEAT_SCHEDULE:-every:5m}"
 HEARTBEAT_GRACE="${GV_ALARM_HEARTBEAT_GRACE:-30m}"
 
 refresh_heartbeat() {
@@ -569,7 +581,7 @@ refresh_heartbeat() {
     fi
     case "$http" in
         2*) log "heartbeat refreshed http=${http} schedule=${HEARTBEAT_SCHEDULE} grace=${HEARTBEAT_GRACE}"; return 0 ;;
-        *)  log "HEARTBEAT FAILED: http=${http}. THERE IS NO DEAD-MAN until this succeeds — check grace/schedule case (lower-case only). Gateway said: ${out}"
+        *)  log "HEARTBEAT FAILED: http=${http}. THERE IS NO DEAD-MAN until this succeeds. Two known causes: grace must be lower-case only ('30M' is a 422), and schedule is NOT a bare duration ('5m' is a 422; use 'every:5m'). ⚠ Believe the gateway's verbatim words below over both — on 2026-09-10 this line named only the lower-case rule while the actual fault was schedule format, and the relay is what led anywhere. Gateway said: ${out}"
             return 1 ;;
     esac
 }

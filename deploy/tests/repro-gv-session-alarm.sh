@@ -471,7 +471,14 @@ check "service down but REPORTED -> exit 0" "0" "$rc"
 check "service down but REPORTED -> refresh_count STILL increments" "$((before + 1))" "$(hb_count)"
 
 check "grace reached the gateway as lower-case 30m" "30m" "$(hb | jq -r '.grace')"
-check "schedule reached the gateway as lower-case 5m" "5m" "$(hb | jq -r '.schedule')"
+# ⛔ WAS "5m", AND THAT ASSERTION PINNED A DEFECT. The real gateway rejects a bare
+# duration: 422 {"detail":"bad schedule '5m' (use weekdays | daily | every:<N><s|m|h|d>)"},
+# which means NO DEAD-MAN AT ALL, silently. This test passed anyway because its oracle is
+# the stub in this directory, which validates nothing and accepts any string — so a green
+# run here certified a value the live gateway refuses. Measured against the live gateway
+# 2026-09-10: "every:5m" -> 200, and reads back from GET /v1/heartbeat/rotaryphone with a
+# real next_deadline. ⚠ A stub can prove the POST was MADE. It cannot prove it was ACCEPTED.
+check "schedule reached the gateway in every:<N><unit> form" "every:5m" "$(hb | jq -r '.schedule')"
 check "check_id reached the gateway" "gv-session-alarm" "$(hb | jq -r '.check_id')"
 
 echo "=== Task 11 — a failed notify SUPPRESSES the dead-man ==="
