@@ -87,6 +87,11 @@ Write-Host ""
 # PRE-FLIGHT -- prove the INTERPRETER and the TRANSPORT before anything touches
 # the box.
 #
+# ⚠ Scope of the claim: "before anything WRITES TO ${TargetPath}". The pre-flight is
+# itself a box-write -- one probe file in /tmp, removed in a finally -- because proving
+# a transfer requires transferring something. It is not a no-op on the box, and the
+# messages below say so rather than claiming "nothing has been done".
+#
 # ⛔ WHY IT RUNS HERE AND NOT SOMEWHERE MORE CONVENIENT
 #
 # [2/4] runs `sudo mkdir -p` and `chown -R` on ${TargetPath}. That is a WRITE to
@@ -113,8 +118,15 @@ function Get-RpDeployBashCandidates {
   $c += 'C:\msys64\usr\bin\bash.exe'
   # De-duplicate while preserving order; a repeated candidate would be probed twice
   # and reported twice in the failure message for no benefit.
-  $seen = @{}
-  $c | Where-Object { $_ -and -not $seen.ContainsKey($_) -and ($seen[$_] = $true) }
+  #
+  # ⚠ Written as a boring loop rather than a Where-Object with an assignment inside its
+  # predicate. The clever form works (verified on 5.1), but if it ever stopped yielding a
+  # value it would filter out EVERY candidate, and the failure would surface as a throw
+  # whose "Candidates probed, in order:" list is empty -- an unusually opaque failure to
+  # buy with three saved lines.
+  $out = @()
+  foreach ($p in $c) { if ($p -and ($out -notcontains $p)) { $out += $p } }
+  $out
 }
 
 function Test-RpDeployBash {
@@ -122,7 +134,11 @@ function Test-RpDeployBash {
     Probe ONE candidate against what the sync script actually requires. Returns
     @{ ok = <bool>; why = <string> }.
 
-    ⚠ THIS RUNS THE REAL PIPE, NOT `command -v`, and that is the whole design.
+    ⚠ THIS RUNS A REPRESENTATIVE PIPE, NOT `command -v`, and that is the whole design.
+    Representative, not identical: the real one adds `-prune -o`, the \( … \) grouping
+    and `--exclude`. It is GNU-specific enough to reject a non-GNU find/tar, which is
+    its stated job -- `-maxdepth 1` alone is fatal to Windows FIND.EXE -- and the claim
+    is scoped to that rather than to "the real pipe".
     Measured on this workstation 2026-09-10: inside C:\msys64\usr\bin\bash.exe,
     `command -v find` SUCCEEDS -- it inherits the Windows PATH and resolves
     C:\Windows\System32\FIND.EXE. The pipe then dies with
@@ -194,19 +210,35 @@ Write-Host "[pre-flight] proving the interpreter and the transport..." -Foregrou
 # without this a network outage would blame every candidate in turn and print a
 # confident, wrong diagnosis.
 #
-# ssh.exe/scp.exe are the one thing this script may take from PATH: they live in
-# C:\WINDOWS\System32\OpenSSH on the MACHINE path, which every PowerShell
-# inherits regardless of how it was launched. Only `bash` is unsafe.
-foreach ($req in @('ssh', 'scp')) {
-  if (-not (Get-Command $req -ErrorAction SilentlyContinue)) {
-    throw "PRE-FLIGHT FAILED: '$req' is not on PATH. Expected C:\WINDOWS\System32\OpenSSH\$req.exe (machine PATH). Nothing has been done to ${TargetHost}."
+# ssh/scp are the one thing this script takes from PATH. An OpenSSH is guaranteed to
+# be PRESENT -- C:\WINDOWS\System32\OpenSSH is on the MACHINE path, which every
+# PowerShell inherits regardless of launch context -- but that is not the same as
+# PATH RESOLVING to it, and the difference is not idle here: a PowerShell launched
+# from Git Bash (the configuration deploys historically worked from) puts
+# C:\Program Files\Git\usr\bin early on PATH, and Git ships its own ssh.exe/scp.exe
+# there, with a different HOME and known_hosts. That is the very distinction argued
+# for bash's own ssh further down.
+#
+# It is not a defect, because the probes below and the deploy's ~15 later calls
+# resolve the SAME ssh -- consistent by construction. So the rule is: prove whichever
+# ssh PATH resolves, and SAY WHICH ONE, rather than assert which one it must be.
+$sshSource = (Get-Command ssh -ErrorAction SilentlyContinue)
+$scpSource = (Get-Command scp -ErrorAction SilentlyContinue)
+foreach ($req in @(@{n='ssh'; c=$sshSource}, @{n='scp'; c=$scpSource})) {
+  if (-not $req.c) {
+    throw "PRE-FLIGHT FAILED: '$($req.n)' is not on PATH. Expected at least C:\WINDOWS\System32\OpenSSH\$($req.n).exe (machine PATH). Nothing has been done to ${TargetHost}."
   }
 }
 
+# ⚠ BatchMode=yes makes this gate STRICTER than the deploy's own calls, none of which
+# set it. That is deliberate -- a deploy must not stop to ask for a passphrase halfway
+# through -- but it means exit 255 with no output here usually indicates auth rather
+# than reachability, and the message must not misdiagnose that. Misreporting one cause
+# as another is the thing this ordering exists to prevent, one level down.
 $sshProbe = ssh -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "echo RPPF_REMOTE_OK"
 $sshProbeExit = $LASTEXITCODE
 if ($sshProbeExit -ne 0 -or "$sshProbe".Trim() -ne 'RPPF_REMOTE_OK') {
-  throw "PRE-FLIGHT FAILED: cannot reach ${SshTarget} over ssh (exit $sshProbeExit, said '$("$sshProbe".Trim())'). Nothing has been done to ${TargetHost}."
+  throw "PRE-FLIGHT FAILED: 'ssh -o BatchMode=yes' to ${SshTarget} failed (exit $sshProbeExit, said '$("$sshProbe".Trim())') using $($sshSource.Source). Exit 255 with no output usually means NON-INTERACTIVE AUTH is unavailable -- agent not loaded, passphrase-protected key, or an unknown host key -- rather than an unreachable box. Nothing has been done to ${TargetHost}."
 }
 
 # --- 2. Non-interactive sudo -----------------------------------------------
@@ -214,6 +246,13 @@ if ($sshProbeExit -ne 0 -or "$sshProbe".Trim() -ne 'RPPF_REMOTE_OK') {
 # [2/4] runs `sudo mkdir -p` + `sudo chown -R`, and [4/4] runs `sudo mv`,
 # `daemon-reload` and `enable`. ssh with no tty cannot answer a password prompt,
 # so a box whose sudoers changed fails at [2/4] -- i.e. mid-write. Ask now.
+#
+# ⚠ Scope of the claim: this proves GENERIC non-interactive sudo, not those four
+# specific commands. A command-restricted sudoers grant could pass `sudo -n true` and
+# still prompt for `sudo mkdir` (or, more likely, fail this and block a deploy that
+# would have worked). Both directions are safe here -- the box grants blanket NOPASSWD
+# -- but the check answers "can this user sudo at all", which is a narrower question
+# than "will [2/4] and [4/4] succeed".
 $sudoProbe = ssh $SshTarget "sudo -n true >/dev/null 2>&1 && echo RPPF_SUDO_OK || echo RPPF_SUDO_PROMPT"
 $sudoProbeExit = $LASTEXITCODE
 if ($sudoProbeExit -ne 0 -or "$sudoProbe".Trim() -ne 'RPPF_SUDO_OK') {
@@ -230,25 +269,53 @@ if ($sudoProbeExit -ne 0 -or "$sudoProbe".Trim() -ne 'RPPF_SUDO_OK') {
 #
 # /tmp, not ${TargetPath}: the pre-flight must not create the very directory
 # [2/4] exists to create, or it would mask a failure there.
+#
+# ⚠ The GUID names the remote file too, NOT $PID. Windows PIDs are small and recycled,
+# /tmp is shared, and both operators authenticate as the same user -- so two concurrent
+# deploys could read each other's token and report "did not read back intact" on a
+# healthy box. A unique value is already in hand; use it for both ends.
 $probeToken  = "RPPF-" + [guid]::NewGuid().ToString('N')
-$probeLocal  = Join-Path ([System.IO.Path]::GetTempPath()) ("rp-preflight-probe-" + $PID + ".txt")
-$probeRemote = "/tmp/rp-preflight-probe-$PID.txt"
+$probeLocal  = Join-Path ([System.IO.Path]::GetTempPath()) "rp-preflight-probe-$probeToken.txt"
+$probeRemote = "/tmp/rp-preflight-probe-$probeToken.txt"
 [System.IO.File]::WriteAllText($probeLocal, $probeToken, (New-Object System.Text.UTF8Encoding($false)))
 try {
-  # Slash-converted like every other scp in this file: passed raw, a Windows path
-  # reaches scp as "C:\..." and scp reads the leading "C:" as a REMOTE HOST.
+  # Slash-converted for consistency with the rest of this file. ⚠ NOT because the
+  # built-in Windows scp.exe requires it: two long-standing scp calls further down
+  # (the service unit, the first-deploy config) pass RAW backslash paths and have
+  # always worked, so the "scp reads the leading C: as a REMOTE HOST" rule stated
+  # elsewhere in this file is a property of Git-Bash/Cygwin/WSL scp builds, not of
+  # C:\WINDOWS\System32\OpenSSH\scp.exe. Corrected here rather than repeated.
   scp ($probeLocal -replace '\\', '/') "${SshTarget}:${probeRemote}" | Out-Null
   $probeScpExit = $LASTEXITCODE
   if ($probeScpExit -ne 0) {
-    throw "PRE-FLIGHT FAILED: scp to ${SshTarget} failed (exit $probeScpExit). The transport cannot carry a file; NOT proceeding to [2/4], which would write to ${TargetPath} first. Nothing has been done to ${TargetHost}."
+    throw "PRE-FLIGHT FAILED: scp to ${SshTarget} failed (exit $probeScpExit) using $($scpSource.Source). The transport cannot carry a file; NOT proceeding to [2/4], which would write to ${TargetPath}. Nothing has been written to ${TargetPath}; a partial ${probeRemote} may remain."
   }
-  $probeEcho = ssh $SshTarget "cat '$probeRemote'; rm -f '$probeRemote'"
+  # ⛔ `cat` ALONE, and the cleanup as a separate call. The old form was
+  # `cat '...'; rm -f '...'` -- semicolons, so ssh returned RM's status, which is 0
+  # essentially always. A failed cat reported exit 0 and the message printed "exit 0"
+  # while saying the read-back failed. That is the same last-command-wins masking this
+  # file documents for the tar chain and the paired chmods; the content comparison was
+  # the real gate, and the exit code beside it was decorative.
+  $probeEcho = ssh $SshTarget "cat '$probeRemote'"
   $probeEchoExit = $LASTEXITCODE
   if ($probeEchoExit -ne 0 -or "$probeEcho".Trim() -ne $probeToken) {
-    throw "PRE-FLIGHT FAILED: the file scp'd to ${SshTarget}:${probeRemote} did not read back intact (exit $probeEchoExit, got '$("$probeEcho".Trim())', expected '$probeToken'). Nothing has been done to ${TargetHost}."
+    throw "PRE-FLIGHT FAILED: the file scp'd to ${SshTarget}:${probeRemote} did not read back intact (exit $probeEchoExit, got '$("$probeEcho".Trim())', expected '$probeToken'). Nothing has been written to ${TargetPath}; ${probeRemote} may remain."
   }
 } finally {
   Remove-Item $probeLocal -ErrorAction SilentlyContinue
+  # Best-effort, and in the finally so an abort between the scp and the read-back does
+  # not leave the file behind either. Its status is deliberately not checked: failing
+  # to tidy /tmp must never fail a deploy.
+  #
+  # ⛔ NO `2>$null` here. Redirecting a native command's stderr is precisely what wraps
+  # it into ErrorRecords, and under the $ErrorActionPreference = "Stop" set at the top
+  # of this file the first one becomes a terminating NativeCommandError -- so the
+  # "best-effort" cleanup would abort the deploy, and would do it from inside a FINALLY,
+  # replacing the real pre-flight diagnosis with a cleanup error. Relax the preference
+  # instead, exactly as the `systemctl status` display at the end of this file does.
+  $eapCleanup = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { ssh $SshTarget "rm -f '$probeRemote'" | Out-Null } catch { } finally { $ErrorActionPreference = $eapCleanup }
 }
 
 # --- 4. The interpreter -----------------------------------------------------
@@ -311,7 +378,7 @@ $($bashTried -join "`n")
 
 A candidate must (a) resolve the msys-style path '$repoMsys', (b) run
 'find -print0 | tar --null -T -' with GNU tools, and (c) reach ${SshTarget} with
-its OWN ssh. `bash` from PATH is NOT considered: on this machine it resolves to
+its OWN ssh. 'bash' from PATH is NOT considered: on this machine it resolves to
 the WSL launcher, which fails (a).
 
 Fix by INSTALLING a usable interpreter (Git for Windows provides one at
@@ -321,17 +388,32 @@ Fix by INSTALLING a usable interpreter (Git for Windows provides one at
 ⛔ Do NOT "fix" this by adding a directory to PATH -- that is a machine-global,
 cross-repo mutation.
 
-Nothing has been done to ${TargetHost}.
+Nothing has been written to ${TargetPath} on ${TargetHost}.
 "@
 }
 
+# ⚠ ACCEPTED TRADE-OFF, recorded rather than discovered later. Because the interpreter
+# is resolved unconditionally and the candidate list is four fixed install locations,
+# a workstation with a WORKING rsync path and Git installed somewhere unanticipated --
+# portable Git, scoop, C:\Git -- now refuses to deploy where it previously would have
+# synced over rsync and never touched bash. The escape hatch is $env:RP_DEPLOY_BASH,
+# and the failure names it. The alternative considered and declined was appending
+# `(Get-Command bash).Source` as a LAST candidate: the probe rejects the WSL launcher
+# on evidence, so it would be safe -- but "resolve explicitly rather than take whatever
+# PATH yields" is the requirement this change exists to satisfy, and quietly restoring
+# a PATH lookup at the bottom of the list is not this session's call to make.
 Write-Host "  interpreter: $DeployBash" -ForegroundColor Green
-Write-Host "  transport:   ssh + scp round trip to ${SshTarget} verified by content, sudo -n OK" -ForegroundColor Green
+Write-Host "  ssh/scp:     $($sshSource.Source)" -ForegroundColor Green
+Write-Host "  transport:   scp round trip to ${SshTarget} verified by content, sudo -n OK" -ForegroundColor Green
 
 if ($PreflightOnly) {
   Write-Host ""
   Write-Host "=== Pre-flight OK (-PreflightOnly: stopping before the build) ===" -ForegroundColor Green
-  return
+  # ⛔ `exit 0`, not `return`. $LASTEXITCODE here is whatever the last native call left,
+  # and -PreflightOnly deliberately probes EVERY candidate -- so a rejected one leaves it
+  # non-zero on a pre-flight that PASSED. A wrapper or CI step reading %ERRORLEVEL% would
+  # read failure from success: a check answering a different question than the one asked.
+  exit 0
 }
 
 # --- Step 1: Build ---
