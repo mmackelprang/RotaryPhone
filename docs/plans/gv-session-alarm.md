@@ -2768,3 +2768,120 @@ is ever shipped. A sampler that cannot reach the box cannot sample it.
 existing `chmod 755` applies, and it lands in the drift manifest for free. The **analyser** stays in
 `deploy/tools/` deliberately — it runs on the deploying machine against a CSV pulled off the box, so it
 has no reason to ship.
+
+---
+
+## 8. What the deploy and the install found — Tasks 5, 16, 17
+
+*Recorded 2026-09-10 by the Builder session that ran the first real deploy of this arc. Every statement
+below was read off the box or off a build, never off a repo file, per §1.*
+
+### 8.1 ✅ Task 5 is DONE — every acceptance criterion met
+
+Deployed from a **clean native Windows PowerShell 5.1** (PATH reset to the persistent registry value, in
+which `bash` provably resolves to `C:\WINDOWS\system32\bash.exe`, the WSL launcher), with `-NoRestart`
+because a 15-hour cannibalisation experiment was mid-flight.
+
+| Criterion | Measured |
+|---|---|
+| `~/bin/gv-session-alarm.sh` exists, mode `755`, sha256 == shipped | ✅ `31975dae…` both ends, mode 755 |
+| `list-unit-files` shows both units, **not enabled** | ✅ `.service static`, `.timer disabled` |
+| `--print-config` runs from the **installed** path | ✅ reports `env_file … (MISSING)` |
+| drift-check `alarm: 3/3` with no `⚠` | ✅ |
+| ⛔ `~/bin/gv-bridge-ensure.sh` byte-identical to before | ✅ `fd04f1ff…` before **and** after |
+| ⛔ `gv-bridge-watchdog.timer` still active, NEXT within 2 min | ✅ active, NEXT 1m30s |
+
+⭐ **§7.2 confirmed a second time, on the alarm's own timer.**
+`systemctl --user list-timers --all 'gv-session-alarm.*'` → **`0 timers listed`, exit 0**, while
+`list-unit-files` shows it. Task 5's literal bullet is still uncorrected in place at §2; §7.2 is right
+and the bullet is wrong. Note the exit code is **0** — a check that merely runs this and reads its status
+passes on a timer that is not there.
+
+### 8.2 ⛔ Task 16 is BLOCKED, and Task 17 with it — the token does not exist
+
+`~/.rotaryphone-env` is **MISSING** and no `rotaryphone`-scoped gateway token exists. The installer's own
+gate refused `--enable`, which is the designed behaviour (§0.8), so **the timer is installed and
+deliberately not enabled.** Nothing in Task 17 can run: every one of its six acceptances is observed as a
+*delivered message* or a *gateway read-back*, and there is no gateway credential.
+
+**What the owner must provide — this is the whole blocking list:**
+
+1. A **`rotaryphone`-scoped** bearer token for the gateway at `http://192.168.86.47:8085`.
+   ⛔ Not `AITRADER_GATEWAY_TOKEN` — it would mis-attribute the source and collide in the gateway's
+   routing config.
+2. Then, on the box: write `~/.rotaryphone-env` (mode `600`) with `ROTARYPHONE_GATEWAY_URL` and
+   `ROTARYPHONE_GATEWAY_TOKEN`, run the positive control, then
+   `bash /opt/rotary-phone/deploy/install-gv-session-alarm.sh --enable`.
+
+### 8.3 ⭐ What WAS proven without the token — the alarm fires, end to end
+
+The **installed** `~/bin/gv-session-alarm.sh` was run against the **live** service and a **real receiver**
+(the repo's own gateway stub, on the box). Not a dry run:
+
+- classified the live condition correctly: `outcome=FIELD_MISSING condition=field_missing age=985 polls=1`;
+- **delivered two notifies** (`http=202`): a thread root at `info`, then the `warning` **inside that
+  thread**;
+- **registered the dead-man**: `schedule=5m`, `grace=30m`, lower-case, `refresh_count=1`, read back from
+  the receiver;
+- exited **0**.
+
+And through systemd, with no token: `systemctl --user start gv-session-alarm.service` → `ActiveState=failed`,
+`ExecMainStatus=1`, journal carries the designed `FATAL: … is missing or unreadable …` line. **Silence is
+not a valid state, demonstrated rather than asserted.**
+
+⚠ **What this does NOT prove, and Task 17 still must:** that a message reaches a human. The stub
+implements no delivery, routing or auth against the real gateway.
+
+⚠ The UAT redirected `GV_ALARM_STATE_FILE`. A stub run that wrote `LAST_POSTED_CONDITION` into the real
+state file would have **suppressed the first real alarm**, because posting is transition-only. The real
+state file was asserted absent afterwards.
+
+### 8.4 ⛔ The box is running a build that predates `browserRefreshOutcome` — and that is now ALARMED, not silent
+
+`curl … /api/gvbridge/status | jq 'has("browserRefreshOutcome")'` → **`false`**. PR #85 merged, this deploy
+put the new `.dll` on disk, and the **running process is from 2026-09-09 17:33:36** and was deliberately
+not restarted. So `merged ≠ deployed ≠ installed` has a fourth link on this box: **≠ running.**
+
+⭐ The alarm's *first live run* diagnosed this by itself and titled it
+*"[rotaryphone] GV session — the box is running an older build"*. The `field_missing` branch (§Task 8) is
+doing exactly the job it was written for.
+
+⛔ **Reading `browserRefreshOutcome` as `null` is NOT the same as it being absent**, and `jq '.field'`
+cannot tell them apart — it prints `null` for both. Use `has()`. This is the same shape as the
+`browserSessionStale`-reads-false trap in the boundary doc.
+
+**Clearing it needs a `rotary-phone` restart, which is the owner's call while the experiment runs.**
+
+### 8.5 ⛔ Two instruments in this repo were pointed at the SDK's generic apphost
+
+`RotaryPhoneController.Server` is a 78KB native launcher; the application is the 115KB
+`RotaryPhoneController.Server.dll` beside it. Measured by building both trees:
+
+```
+commit 1c8a22c (no browserRefreshOutcome)   apphost f500cf157697de69   .dll b89b31d80eaa717f
+this branch    (has browserRefreshOutcome)  apphost f500cf157697de69   .dll a723b269258689df
+```
+
+**Byte-identical apphost, different application.** Two places relied on it, both now fixed:
+
+1. `Deploy-ToLinux.ps1`'s post-sync verification hashed only the apphost. Its own comment records the
+   upgrade from `stat -c %s` to sha256 — a real upgrade that kept hashing the file that cannot change.
+2. The alarm's `field_missing` **ACTION text** told the operator to
+   `sha256sum /opt/rotary-phone/RotaryPhoneController.Server` — advice that yields a green light on the
+   stale build, inside the alert whose subject is a stale build.
+
+⭐ The `.dll` is a genuine build identity: the SDK stamps HEAD's commit sha into it (verified —
+`+4e28629ecd24c98…` matches `git rev-parse HEAD`), and two builds of identical source are byte-identical.
+
+### 8.6 📌 Three smaller things, recorded
+
+- **`Linger=no` on this box.** The installer says so loudly. The alarm is a **user** timer: with no
+  graphical session the user manager stops and it silently does not fire, while every file check passes.
+  The gateway dead-man is the only cover. `sudo loginctl enable-linger mmack` is the owner's call.
+- **`ssh-mcp`'s `exec` hangs on `sudo`** — twice, 1800s idle-timeout each, on `sudo -n true`, which
+  cannot block. Windows `ssh.exe` ran the identical command in under a second. The box work here used
+  `ssh.exe`, which is also the transport the deploy itself uses.
+- **`/opt/rotary-phone/ChromeExtension` is loaded by the live bridge Chrome** (`--load-extension=`) and
+  **does not exist in this repo at all** — the deploy's extension block is skipped by `Test-Path`. It is
+  deployed-and-not-in-source, the inverse of §0.9's failure. Not this arc's to fix; recorded because
+  nothing else records it.

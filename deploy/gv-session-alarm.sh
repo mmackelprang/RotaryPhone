@@ -404,7 +404,19 @@ action_for() {
       browser_unreachable) echo 'pgrep -f "user-data-dir=$HOME/.config/gv-bridge-chrome"; if absent: ~/bin/gv-bridge-ensure.sh' ;;
       not_attempted)       echo "check the CDP wiring and that Chrome answers on port 9224" ;;
       service_unreachable) echo "systemctl status rotary-phone on radio" ;;
-      field_missing)       echo "check what build is deployed: sha256sum /opt/rotary-phone/RotaryPhoneController.Server" ;;
+      # ⛔ NOT `sha256sum …/RotaryPhoneController.Server`, which is what this line
+      # said until 2026-09-10. That file is the SDK's generic apphost: measured the
+      # same day, commit 1c8a22c (no browserRefreshOutcome) and the build that has it
+      # produce a BYTE-IDENTICAL apphost, f500cf157697de69, while the .dll beside it
+      # differs. So the advice sent an operator to a file that cannot distinguish the
+      # two builds — an ACTION that yields a green light on the stale one, inside the
+      # alert whose whole subject is a stale build.
+      #
+      # And a file hash is the wrong quantity anyway: field_missing means the RUNNING
+      # PROCESS predates the field, which a hash of anything on disk cannot show. A
+      # deploy can land the new build and leave the old one running — that is exactly
+      # this box's state as this was written. Compare the two timestamps instead.
+      field_missing)       echo "the RUNNING service predates the field. Compare: systemctl show rotary-phone -p ExecMainStartTimestamp   vs   stat -c %y /opt/rotary-phone/RotaryPhoneController.Server.dll" ;;
       unknown_outcome)     echo "read the journal: journalctl --user -u gv-session-alarm -n 50" ;;
       *)                   echo "" ;;
     esac

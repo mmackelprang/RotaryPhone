@@ -21,15 +21,23 @@
 .PARAMETER Logs
   Tail journalctl after restart.
 
+.PARAMETER PreflightOnly
+  Run the pre-flight gate (interpreter + ssh/scp transport + sudo) and stop
+  before the build. Touches nothing on the target beyond one probe file in /tmp,
+  which it removes. Use it to answer "would a deploy work from this shell?"
+  without deploying.
+
 .EXAMPLE
   .\deploy\Deploy-ToLinux.ps1
   .\deploy\Deploy-ToLinux.ps1 -TargetHost radio -Runtime linux-x64
   .\deploy\Deploy-ToLinux.ps1 -Logs
+  .\deploy\Deploy-ToLinux.ps1 -PreflightOnly
 #>
 [CmdletBinding()]
 param(
   [switch]$NoRestart,
   [switch]$Logs,
+  [switch]$PreflightOnly,
   [string]$TargetHost = "radio",
   [string]$TargetUser = "mmack",
   [string]$TargetPath = "/opt/rotary-phone",
@@ -74,6 +82,339 @@ Write-Host "=== Rotary Phone Deploy ===" -ForegroundColor Cyan
 Write-Host "Target:  ${SshTarget}:${TargetPath}"
 Write-Host "Runtime: $Runtime"
 Write-Host ""
+
+# =============================================================================
+# PRE-FLIGHT -- prove the INTERPRETER and the TRANSPORT before anything touches
+# the box.
+#
+# ⚠ Scope of the claim: "before anything WRITES TO ${TargetPath}". The pre-flight is
+# itself a box-write -- one probe file in /tmp, removed in a finally -- because proving
+# a transfer requires transferring something. It is not a no-op on the box, and the
+# messages below say so rather than claiming "nothing has been done".
+#
+# ⛔ WHY IT RUNS HERE AND NOT SOMEWHERE MORE CONVENIENT
+#
+# [2/4] runs `sudo mkdir -p` and `chown -R` on ${TargetPath}. That is a WRITE to
+# a live, shared box, and until 2026-09-10 it ran before anything had established
+# that this machine could transfer a single byte. The sibling project on this same
+# box ran exactly that shape on 2026-09-09: it STOPPED SERVICES at its step 2 and
+# only discovered at its step 3 that it could not transfer. Every sync error was
+# therefore an outage rather than a failed deploy. Proving capability first is the
+# entire point, and it costs about four seconds.
+#
+# It runs before the BUILD as well, which is free -- the build takes ~a minute and
+# nothing asked below depends on its output. Failing after a successful build is
+# merely wasteful; failing after [2/4] is an incident.
+# =============================================================================
+
+function Get-RpDeployBashCandidates {
+  # Order matters: first usable wins. An explicit override comes first so an
+  # operator can pin an interpreter without editing this file or touching PATH.
+  $c = @()
+  if ($env:RP_DEPLOY_BASH) { $c += $env:RP_DEPLOY_BASH }
+  if ($env:ProgramFiles)        { $c += (Join-Path $env:ProgramFiles        'Git\bin\bash.exe') }
+  if (${env:ProgramFiles(x86)}) { $c += (Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe') }
+  if ($env:LOCALAPPDATA)        { $c += (Join-Path $env:LOCALAPPDATA        'Programs\Git\bin\bash.exe') }
+  $c += 'C:\msys64\usr\bin\bash.exe'
+  # De-duplicate while preserving order; a repeated candidate would be probed twice
+  # and reported twice in the failure message for no benefit.
+  #
+  # ⚠ Written as a boring loop rather than a Where-Object with an assignment inside its
+  # predicate. The clever form works (verified on 5.1), but if it ever stopped yielding a
+  # value it would filter out EVERY candidate, and the failure would surface as a throw
+  # whose "Candidates probed, in order:" list is empty -- an unusually opaque failure to
+  # buy with three saved lines.
+  $out = @()
+  foreach ($p in $c) { if ($p -and ($out -notcontains $p)) { $out += $p } }
+  $out
+}
+
+function Test-RpDeployBash {
+  <#
+    Probe ONE candidate against what the sync script actually requires. Returns
+    @{ ok = <bool>; why = <string> }.
+
+    ⚠ THIS RUNS A REPRESENTATIVE PIPE, NOT `command -v`, and that is the whole design.
+    Representative, not identical: the real one adds `-prune -o`, the \( … \) grouping
+    and `--exclude`. It is GNU-specific enough to reject a non-GNU find/tar, which is
+    its stated job -- `-maxdepth 1` alone is fatal to Windows FIND.EXE -- and the claim
+    is scoped to that rather than to "the real pipe".
+    Measured on this workstation 2026-09-10: inside C:\msys64\usr\bin\bash.exe,
+    `command -v find` SUCCEEDS -- it inherits the Windows PATH and resolves
+    C:\Windows\System32\FIND.EXE. The pipe then dies with
+    "FIND: Parameter format not correct". An existence probe SELECTS that
+    interpreter; only running the pipe rejects it. This repo has a name for the
+    difference: a truthful instrument pointed at the wrong quantity.
+
+    ⚠ AND IT RUNS THE INTERPRETER'S OWN ssh. The tar-pipe's remote half is
+    `... | ssh '<target>' 'set -e; tar -xzf - ...'` -- an ssh resolved INSIDE
+    bash, which is NOT the Windows ssh.exe the rest of this script uses. Different
+    binary, different HOME, different known_hosts. Measured 2026-09-10: with
+    C:\msys64\usr\bin prepended so its own GNU tools win, msys64 bash PASSES the
+    find|tar probe and then its ssh fails "Host key verification failed" (255).
+    A probe that stopped at find|tar would have selected it, and the deploy would
+    have died at the remote half -- after [2/4] had already written to the box.
+    Proving `ssh.exe` works proves nothing about this; they are different programs.
+  #>
+  param([string]$Exe, [string]$RepoMsys, [string]$Target)
+
+  if ([string]::IsNullOrWhiteSpace($Exe)) { return @{ ok = $false; why = 'empty path' } }
+  if (-not (Test-Path -LiteralPath $Exe)) { return @{ ok = $false; why = 'not present on this machine' } }
+
+  $body = @"
+set -e -o pipefail
+cd '$RepoMsys' || { echo RPPF_FAIL_CD; exit 10; }
+find . -maxdepth 1 -type f -print0 | tar --null -czf - -T - > /dev/null || { echo RPPF_FAIL_PIPE; exit 11; }
+ssh -o BatchMode=yes -o ConnectTimeout=10 '$Target' 'echo RPPF_REMOTE_OK' > /dev/null || { echo RPPF_FAIL_SSH; exit 12; }
+echo RPPF_OK
+"@
+
+  # LF-only, no BOM -- the same requirement the sync script itself has.
+  $probePath = Join-Path ([System.IO.Path]::GetTempPath()) ("rp-preflight-" + [guid]::NewGuid().ToString('N') + ".sh")
+  [System.IO.File]::WriteAllText($probePath, ($body -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+  # ⛔ $ErrorActionPreference MUST be relaxed around this call, for the reason this
+  # file already documents at the `systemctl status` display near the end: `2>&1` on
+  # a NATIVE command surfaces its stderr as ErrorRecords, and under
+  # $ErrorActionPreference = "Stop" the first one becomes a terminating
+  # NativeCommandError. Every REJECTED candidate writes to stderr by definition, so
+  # without this the first bad candidate would ABORT THE DEPLOY instead of being
+  # rejected and passed over -- turning a working fallback chain into a hard stop.
+  $eapPrev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $out  = & $Exe $probePath 2>&1 | ForEach-Object { "$_" }
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $eapPrev
+    Remove-Item $probePath -ErrorAction SilentlyContinue
+  }
+
+  $joined = ($out -join ' ')
+  if ($code -eq 0 -and $joined -match 'RPPF_OK') { return @{ ok = $true; why = 'ok' } }
+
+  $why =
+    if     ($joined -match 'RPPF_FAIL_CD')   { "cannot resolve the msys-style path '$RepoMsys' -- this is what the WSL launcher does" }
+    elseif ($joined -match 'RPPF_FAIL_PIPE') { "'find -print0 | tar --null -T -' failed -- its PATH resolves a non-GNU find/tar (msys64 without its own /usr/bin first hits Windows FIND.EXE)" }
+    elseif ($joined -match 'RPPF_FAIL_SSH')  { "its OWN ssh cannot reach ${Target} -- a different binary, HOME and known_hosts from ssh.exe" }
+    else   { "exit ${code}: " + (($out | Select-Object -First 3) -join ' / ') }
+  return @{ ok = $false; why = $why }
+}
+
+Write-Host "[pre-flight] proving the interpreter and the transport..." -ForegroundColor Yellow
+
+# --- 1. The Windows ssh transport ------------------------------------------
+#
+# Checked FIRST so that "the box is unreachable" is never misreported as "no
+# usable bash". The interpreter probe below also opens an ssh connection, so
+# without this a network outage would blame every candidate in turn and print a
+# confident, wrong diagnosis.
+#
+# ssh/scp are the one thing this script takes from PATH. An OpenSSH is guaranteed to
+# be PRESENT -- C:\WINDOWS\System32\OpenSSH is on the MACHINE path, which every
+# PowerShell inherits regardless of launch context -- but that is not the same as
+# PATH RESOLVING to it, and the difference is not idle here: a PowerShell launched
+# from Git Bash (the configuration deploys historically worked from) puts
+# C:\Program Files\Git\usr\bin early on PATH, and Git ships its own ssh.exe/scp.exe
+# there, with a different HOME and known_hosts. That is the very distinction argued
+# for bash's own ssh further down.
+#
+# It is not a defect, because the probes below and the deploy's ~15 later calls
+# resolve the SAME ssh -- consistent by construction. So the rule is: prove whichever
+# ssh PATH resolves, and SAY WHICH ONE, rather than assert which one it must be.
+$sshSource = (Get-Command ssh -ErrorAction SilentlyContinue)
+$scpSource = (Get-Command scp -ErrorAction SilentlyContinue)
+foreach ($req in @(@{n='ssh'; c=$sshSource}, @{n='scp'; c=$scpSource})) {
+  if (-not $req.c) {
+    throw "PRE-FLIGHT FAILED: '$($req.n)' is not on PATH. Expected at least C:\WINDOWS\System32\OpenSSH\$($req.n).exe (machine PATH). Nothing has been done to ${TargetHost}."
+  }
+}
+
+# ⚠ BatchMode=yes makes this gate STRICTER than the deploy's own calls, none of which
+# set it. That is deliberate -- a deploy must not stop to ask for a passphrase halfway
+# through -- but it means exit 255 with no output here usually indicates auth rather
+# than reachability, and the message must not misdiagnose that. Misreporting one cause
+# as another is the thing this ordering exists to prevent, one level down.
+$sshProbe = ssh -o BatchMode=yes -o ConnectTimeout=10 $SshTarget "echo RPPF_REMOTE_OK"
+$sshProbeExit = $LASTEXITCODE
+if ($sshProbeExit -ne 0 -or "$sshProbe".Trim() -ne 'RPPF_REMOTE_OK') {
+  throw "PRE-FLIGHT FAILED: 'ssh -o BatchMode=yes' to ${SshTarget} failed (exit $sshProbeExit, said '$("$sshProbe".Trim())') using $($sshSource.Source). Exit 255 with no output usually means NON-INTERACTIVE AUTH is unavailable -- agent not loaded, passphrase-protected key, or an unknown host key -- rather than an unreachable box. Nothing has been done to ${TargetHost}."
+}
+
+# --- 2. Non-interactive sudo -----------------------------------------------
+#
+# [2/4] runs `sudo mkdir -p` + `sudo chown -R`, and [4/4] runs `sudo mv`,
+# `daemon-reload` and `enable`. ssh with no tty cannot answer a password prompt,
+# so a box whose sudoers changed fails at [2/4] -- i.e. mid-write. Ask now.
+#
+# ⚠ Scope of the claim: this proves GENERIC non-interactive sudo, not those four
+# specific commands. A command-restricted sudoers grant could pass `sudo -n true` and
+# still prompt for `sudo mkdir` (or, more likely, fail this and block a deploy that
+# would have worked). Both directions are safe here -- the box grants blanket NOPASSWD
+# -- but the check answers "can this user sudo at all", which is a narrower question
+# than "will [2/4] and [4/4] succeed".
+$sudoProbe = ssh $SshTarget "sudo -n true >/dev/null 2>&1 && echo RPPF_SUDO_OK || echo RPPF_SUDO_PROMPT"
+$sudoProbeExit = $LASTEXITCODE
+if ($sudoProbeExit -ne 0 -or "$sudoProbe".Trim() -ne 'RPPF_SUDO_OK') {
+  throw "PRE-FLIGHT FAILED: passwordless sudo is not available for ${TargetUser} on ${TargetHost} (exit $sudoProbeExit, said '$("$sudoProbe".Trim())'). [2/4] and [4/4] both need it and cannot answer a prompt. Nothing has been done to ${TargetHost}."
+}
+
+# --- 3. A REAL transfer, verified by content -------------------------------
+#
+# ⛔ The owner's requirement is "prove we can transfer", and an exit code is not
+# that proof -- it is what a program CLAIMED. This ships a token to the box and
+# reads it back, so the assertion is about a byte that made the round trip. It is
+# the same discipline as the post-sync sha256 further down, applied BEFORE the
+# first write rather than after the last one.
+#
+# /tmp, not ${TargetPath}: the pre-flight must not create the very directory
+# [2/4] exists to create, or it would mask a failure there.
+#
+# ⚠ The GUID names the remote file too, NOT $PID. Windows PIDs are small and recycled,
+# /tmp is shared, and both operators authenticate as the same user -- so two concurrent
+# deploys could read each other's token and report "did not read back intact" on a
+# healthy box. A unique value is already in hand; use it for both ends.
+$probeToken  = "RPPF-" + [guid]::NewGuid().ToString('N')
+$probeLocal  = Join-Path ([System.IO.Path]::GetTempPath()) "rp-preflight-probe-$probeToken.txt"
+$probeRemote = "/tmp/rp-preflight-probe-$probeToken.txt"
+[System.IO.File]::WriteAllText($probeLocal, $probeToken, (New-Object System.Text.UTF8Encoding($false)))
+try {
+  # Slash-converted for consistency with the rest of this file. ⚠ NOT because the
+  # built-in Windows scp.exe requires it: two long-standing scp calls further down
+  # (the service unit, the first-deploy config) pass RAW backslash paths and have
+  # always worked, so the "scp reads the leading C: as a REMOTE HOST" rule stated
+  # elsewhere in this file is a property of Git-Bash/Cygwin/WSL scp builds, not of
+  # C:\WINDOWS\System32\OpenSSH\scp.exe. Corrected here rather than repeated.
+  scp ($probeLocal -replace '\\', '/') "${SshTarget}:${probeRemote}" | Out-Null
+  $probeScpExit = $LASTEXITCODE
+  if ($probeScpExit -ne 0) {
+    throw "PRE-FLIGHT FAILED: scp to ${SshTarget} failed (exit $probeScpExit) using $($scpSource.Source). The transport cannot carry a file; NOT proceeding to [2/4], which would write to ${TargetPath}. Nothing has been written to ${TargetPath}; a partial ${probeRemote} may remain."
+  }
+  # ⛔ `cat` ALONE, and the cleanup as a separate call. The old form was
+  # `cat '...'; rm -f '...'` -- semicolons, so ssh returned RM's status, which is 0
+  # essentially always. A failed cat reported exit 0 and the message printed "exit 0"
+  # while saying the read-back failed. That is the same last-command-wins masking this
+  # file documents for the tar chain and the paired chmods; the content comparison was
+  # the real gate, and the exit code beside it was decorative.
+  $probeEcho = ssh $SshTarget "cat '$probeRemote'"
+  $probeEchoExit = $LASTEXITCODE
+  if ($probeEchoExit -ne 0 -or "$probeEcho".Trim() -ne $probeToken) {
+    throw "PRE-FLIGHT FAILED: the file scp'd to ${SshTarget}:${probeRemote} did not read back intact (exit $probeEchoExit, got '$("$probeEcho".Trim())', expected '$probeToken'). Nothing has been written to ${TargetPath}; ${probeRemote} may remain."
+  }
+} finally {
+  Remove-Item $probeLocal -ErrorAction SilentlyContinue
+  # Best-effort, and in the finally so an abort between the scp and the read-back does
+  # not leave the file behind either. Its status is deliberately not checked: failing
+  # to tidy /tmp must never fail a deploy.
+  #
+  # ⛔ NO `2>$null` here. Redirecting a native command's stderr is precisely what wraps
+  # it into ErrorRecords, and under the $ErrorActionPreference = "Stop" set at the top
+  # of this file the first one becomes a terminating NativeCommandError -- so the
+  # "best-effort" cleanup would abort the deploy, and would do it from inside a FINALLY,
+  # replacing the real pre-flight diagnosis with a cleanup error. Relax the preference
+  # instead, exactly as the `systemctl status` display at the end of this file does.
+  $eapCleanup = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { ssh $SshTarget "rm -f '$probeRemote'" | Out-Null } catch { } finally { $ErrorActionPreference = $eapCleanup }
+}
+
+# --- 4. The interpreter -----------------------------------------------------
+#
+# ⛔ `bash` is NEVER taken from PATH, and putting a directory ON the PATH is NOT
+# an acceptable alternative fix. Measured on this workstation 2026-09-10 against
+# the PERSISTENT machine+user PATH read from the registry -- which is exactly what
+# a freshly-launched PowerShell gets, 54 entries:
+#
+#     HIT  C:\WINDOWS\system32\bash.exe                                (machine PATH)
+#     HIT  C:\Users\<u>\AppData\Local\Microsoft\WindowsApps\bash.exe   (user PATH)
+#     ---  BOTH ARE THE WSL LAUNCHER
+#     Git\bin  is NOT on the persistent PATH. Git\cmd IS, and holds no bash.exe.
+#
+# WSL bash reports uname=Linux, cannot resolve the msys-style /d/prj/... paths
+# this script passes, and cannot even OPEN a script named by a Windows path:
+# handed C:\Users\...\rp-deploy-sync.sh it strips the backslashes and exits 127
+# with "No such file or directory". Deploys have only ever worked from a
+# PowerShell LAUNCHED FROM GIT BASH, which inherits Git's paths -- a property of
+# that shell's ancestry, not of this machine. Running from a clean PowerShell is
+# a requirement, so the interpreter is resolved explicitly instead.
+#
+# ⛔ PATH is deliberately NOT mutated to fix this: that is a workstation-global,
+# cross-repo change, and it is precisely the property that let a sibling project's
+# rsync shim reach into this repo's transport selection and cause an outage on
+# 2026-09-09.
+#
+# ⚠ Resolved UNCONDITIONALLY, even when rsync is present, and that is deliberate.
+# The tar path is the FALLBACK that fires when rsync fails at runtime -- so it must
+# be proven BEFORE the primary is attempted, or it is not a fallback. Gating this
+# on `Get-Command rsync` would repeat the exact 2026-09-09 mistake: that call
+# truthfully reports rsync EXISTS and was read as "rsync works here".
+#
+# ⚠ A normal deploy stops at the first candidate that passes -- probing the rest
+# would cost ssh round trips for no decision. -PreflightOnly probes ALL of them and
+# reports each verdict, because that mode exists to answer "what does this machine
+# actually have, and why was each thing rejected?" A diagnostic that shows only the
+# winner cannot tell you that a candidate you believed in is quietly unusable.
+$repoMsys = ($RepoRoot -replace '\\', '/' -replace '^([A-Za-z]):', '/$1').ToLower()
+$DeployBash = $null
+$bashTried  = @()
+foreach ($cand in (Get-RpDeployBashCandidates)) {
+  if ($DeployBash -and -not $PreflightOnly) { break }
+  $r = Test-RpDeployBash -Exe $cand -RepoMsys $repoMsys -Target $SshTarget
+  if ($r.ok) {
+    if (-not $DeployBash) { $DeployBash = $cand }
+    if ($PreflightOnly) { Write-Host "  [candidate] USABLE   $cand" -ForegroundColor Green }
+  } else {
+    $bashTried += "    $cand`n        -> $($r.why)"
+    if ($PreflightOnly) { Write-Host "  [candidate] rejected $cand`n                   -> $($r.why)" -ForegroundColor DarkGray }
+  }
+}
+
+if (-not $DeployBash) {
+  throw @"
+PRE-FLIGHT FAILED: no usable bash interpreter for the tar-pipe sync path.
+
+Candidates probed, in order:
+$($bashTried -join "`n")
+
+A candidate must (a) resolve the msys-style path '$repoMsys', (b) run
+'find -print0 | tar --null -T -' with GNU tools, and (c) reach ${SshTarget} with
+its OWN ssh. 'bash' from PATH is NOT considered: on this machine it resolves to
+the WSL launcher, which fails (a).
+
+Fix by INSTALLING a usable interpreter (Git for Windows provides one at
+'C:\Program Files\Git\bin\bash.exe'), or point at one explicitly:
+    `$env:RP_DEPLOY_BASH = 'C:\path\to\bash.exe'
+
+⛔ Do NOT "fix" this by adding a directory to PATH -- that is a machine-global,
+cross-repo mutation.
+
+Nothing has been written to ${TargetPath} on ${TargetHost}.
+"@
+}
+
+# ⚠ ACCEPTED TRADE-OFF, recorded rather than discovered later. Because the interpreter
+# is resolved unconditionally and the candidate list is four fixed install locations,
+# a workstation with a WORKING rsync path and Git installed somewhere unanticipated --
+# portable Git, scoop, C:\Git -- now refuses to deploy where it previously would have
+# synced over rsync and never touched bash. The escape hatch is $env:RP_DEPLOY_BASH,
+# and the failure names it. The alternative considered and declined was appending
+# `(Get-Command bash).Source` as a LAST candidate: the probe rejects the WSL launcher
+# on evidence, so it would be safe -- but "resolve explicitly rather than take whatever
+# PATH yields" is the requirement this change exists to satisfy, and quietly restoring
+# a PATH lookup at the bottom of the list is not this session's call to make.
+Write-Host "  interpreter: $DeployBash" -ForegroundColor Green
+Write-Host "  ssh/scp:     $($sshSource.Source)" -ForegroundColor Green
+Write-Host "  transport:   scp round trip to ${SshTarget} verified by content, sudo -n OK" -ForegroundColor Green
+
+if ($PreflightOnly) {
+  Write-Host ""
+  Write-Host "=== Pre-flight OK (-PreflightOnly: stopping before the build) ===" -ForegroundColor Green
+  # ⛔ `exit 0`, not `return`. $LASTEXITCODE here is whatever the last native call left,
+  # and -PreflightOnly deliberately probes EVERY candidate -- so a rejected one leaves it
+  # non-zero on a pre-flight that PASSED. A wrapper or CI step reading %ERRORLEVEL% would
+  # read failure from success: a check answering a different question than the one asked.
+  exit 0
+}
 
 # --- Step 1: Build ---
 Write-Host "[1/4] Building for $Runtime..." -ForegroundColor Yellow
@@ -256,7 +597,13 @@ if (-not $synced) {
   $syncScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-deploy-sync.sh"
   [System.IO.File]::WriteAllText($syncScriptPath, $syncScript, (New-Object System.Text.UTF8Encoding($false)))
 
-  bash $syncScriptPath
+  # ⛔ $DeployBash, NEVER bare `bash`. On this workstation's persistent PATH `bash`
+  # is the WSL launcher, which cannot resolve '$publishMsys' and cannot even open a
+  # script named by a Windows path (exit 127, "No such file or directory"). The
+  # pre-flight resolved and PROVED this interpreter before anything touched the box;
+  # see the comment block above [1/4]. It is guaranteed non-null here -- the
+  # pre-flight throws rather than falling through.
+  & $DeployBash $syncScriptPath
   $syncExit = $LASTEXITCODE
   Remove-Item $syncScriptPath -ErrorAction SilentlyContinue
   if ($syncExit -ne 0) { throw "tar-pipe deploy failed (exit $syncExit) -- aborting (service NOT restarted; still on prior binary)" }
@@ -275,17 +622,64 @@ if (-not $synced) {
 #
 # No 2>/dev/null on the remote side: swallowing the error would blind the diagnostic
 # this throws on.
-$localBinHash = (Get-FileHash (Join-Path $PublishDir "RotaryPhoneController.Server") -Algorithm SHA256).Hash.ToLower()
-$remoteBinHash = ssh $SshTarget "sha256sum ${TargetPath}/RotaryPhoneController.Server | cut -d' ' -f1"
+#
+# ⛔ AND IT MUST HASH THE .dll, NOT ONLY THE APPHOST. Measured 2026-09-10, and this
+# is the same defect one level deeper than the note above:
+#
+#   commit 1c8a22c  (no browserRefreshOutcome)  ->  apphost f500cf157697de69  .dll b89b31d80eaa717f
+#   this branch     (has browserRefreshOutcome) ->  apphost f500cf157697de69  .dll a723b269258689df
+#
+# `RotaryPhoneController.Server` is the SDK's generic apphost -- a 78KB native
+# launcher patched with the app name. The application is the 115KB
+# `RotaryPhoneController.Server.dll` beside it. The apphost is therefore
+# BYTE-IDENTICAL ACROSS TWO BUILDS WHOSE C# DIFFERS, so hashing it answers
+# "did a launcher arrive?" and gets read as "did this build arrive?".
+#
+# That is exactly the class the comment above was written to close -- the fix went
+# from `stat -c %s` to sha256 and kept hashing the file that cannot change. The
+# upgrade was real and it did not move the check onto the right quantity.
+#
+# Both are verified: the apphost still catches a missing or truncated launcher, and
+# the .dll is the one that proves THIS BUILD landed. One ssh round trip for both.
+$verifyRel = @("RotaryPhoneController.Server", "RotaryPhoneController.Server.dll")
+$expected  = [ordered]@{}
+foreach ($rel in $verifyRel) {
+  $localPath = Join-Path $PublishDir $rel
+  if (-not (Test-Path -LiteralPath $localPath)) {
+    throw "sync verification FAILED: ${rel} is not in the local publish output at ${PublishDir}. The build did not produce what the deploy expects; the service has NOT been restarted."
+  }
+  $expected[$rel] = (Get-FileHash $localPath -Algorithm SHA256).Hash.ToLower()
+}
+$remoteHashOut = ssh $SshTarget ("cd '${TargetPath}' && sha256sum " + (($verifyRel | ForEach-Object { "'$_'" }) -join ' '))
 $hashExit = $LASTEXITCODE
 if ($hashExit -ne 0) {
-  throw "sync verification FAILED: could not hash ${TargetPath}/RotaryPhoneController.Server on ${TargetHost} (exit $hashExit). The service has NOT been restarted."
+  throw "sync verification FAILED: could not hash $($verifyRel -join ', ') under ${TargetPath} on ${TargetHost} (exit $hashExit). The service has NOT been restarted."
 }
-$remoteBinHash = "$remoteBinHash".Trim().ToLower()
-if ($remoteBinHash -ne $localBinHash) {
-  throw "sync verification FAILED: ${TargetPath}/RotaryPhoneController.Server hashes $remoteBinHash on ${TargetHost}, expected $localBinHash. The service has NOT been restarted."
+# Parse into name -> hash rather than trusting sha256sum's output ORDER. It happens to
+# echo the order it was given, but a check whose correctness rests on that would pass
+# for the wrong reason the day it does not.
+#
+# ⚠ Iterate the ARRAY; do NOT stringify it first. A native command's multi-line output
+# arrives as string[], and "$array" joins its elements with a SPACE, not a newline -- so
+# `"$remoteHashOut" -split "\r?\n"` yields ONE line holding both records and every
+# lookup misses. Measured here 2026-09-10: the two hashes were correct and matching, and
+# the check still threw. It failed CLOSED, which is the right direction, but a
+# verification that cannot pass is not a verification.
+$remoteHashes = @{}
+$remoteHashLines = @($remoteHashOut) | ForEach-Object { "$_" -split "`r?`n" } | Where-Object { $_.Trim() }
+foreach ($line in $remoteHashLines) {
+  $parts = $line.Trim() -split '\s+', 2
+  if ($parts.Count -eq 2) { $remoteHashes[$parts[1].Trim()] = $parts[0].Trim().ToLower() }
 }
-Write-Host "  Sync verified: binary on the box matches sha256 $($localBinHash.Substring(0,16))" -ForegroundColor Green
+foreach ($rel in $verifyRel) {
+  if (-not $remoteHashes.ContainsKey($rel)) {
+    throw "sync verification FAILED: ${TargetHost} did not report a hash for ${rel} (got: '$($remoteHashLines -join ' | ')'). Refusing to read an unanswered question as an answer. The service has NOT been restarted."
+  }
+  if ($remoteHashes[$rel] -ne $expected[$rel]) {
+    throw "sync verification FAILED: ${TargetPath}/${rel} hashes $($remoteHashes[$rel]) on ${TargetHost}, expected $($expected[$rel]). The service has NOT been restarted."
+  }
+}
+Write-Host "  Sync verified: apphost $($expected['RotaryPhoneController.Server'].Substring(0,16)) and app $($expected['RotaryPhoneController.Server.dll'].Substring(0,16)) match on the box" -ForegroundColor Green
 
 # Copy appsettings.Production.json only if it doesn't exist on target.
 #
