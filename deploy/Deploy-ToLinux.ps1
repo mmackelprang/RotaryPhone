@@ -540,17 +540,64 @@ if (-not $synced) {
 #
 # No 2>/dev/null on the remote side: swallowing the error would blind the diagnostic
 # this throws on.
-$localBinHash = (Get-FileHash (Join-Path $PublishDir "RotaryPhoneController.Server") -Algorithm SHA256).Hash.ToLower()
-$remoteBinHash = ssh $SshTarget "sha256sum ${TargetPath}/RotaryPhoneController.Server | cut -d' ' -f1"
+#
+# ⛔ AND IT MUST HASH THE .dll, NOT ONLY THE APPHOST. Measured 2026-09-10, and this
+# is the same defect one level deeper than the note above:
+#
+#   commit 1c8a22c  (no browserRefreshOutcome)  ->  apphost f500cf157697de69  .dll b89b31d80eaa717f
+#   this branch     (has browserRefreshOutcome) ->  apphost f500cf157697de69  .dll a723b269258689df
+#
+# `RotaryPhoneController.Server` is the SDK's generic apphost -- a 78KB native
+# launcher patched with the app name. The application is the 115KB
+# `RotaryPhoneController.Server.dll` beside it. The apphost is therefore
+# BYTE-IDENTICAL ACROSS TWO BUILDS WHOSE C# DIFFERS, so hashing it answers
+# "did a launcher arrive?" and gets read as "did this build arrive?".
+#
+# That is exactly the class the comment above was written to close -- the fix went
+# from `stat -c %s` to sha256 and kept hashing the file that cannot change. The
+# upgrade was real and it did not move the check onto the right quantity.
+#
+# Both are verified: the apphost still catches a missing or truncated launcher, and
+# the .dll is the one that proves THIS BUILD landed. One ssh round trip for both.
+$verifyRel = @("RotaryPhoneController.Server", "RotaryPhoneController.Server.dll")
+$expected  = [ordered]@{}
+foreach ($rel in $verifyRel) {
+  $localPath = Join-Path $PublishDir $rel
+  if (-not (Test-Path -LiteralPath $localPath)) {
+    throw "sync verification FAILED: ${rel} is not in the local publish output at ${PublishDir}. The build did not produce what the deploy expects; the service has NOT been restarted."
+  }
+  $expected[$rel] = (Get-FileHash $localPath -Algorithm SHA256).Hash.ToLower()
+}
+$remoteHashOut = ssh $SshTarget ("cd '${TargetPath}' && sha256sum " + (($verifyRel | ForEach-Object { "'$_'" }) -join ' '))
 $hashExit = $LASTEXITCODE
 if ($hashExit -ne 0) {
-  throw "sync verification FAILED: could not hash ${TargetPath}/RotaryPhoneController.Server on ${TargetHost} (exit $hashExit). The service has NOT been restarted."
+  throw "sync verification FAILED: could not hash $($verifyRel -join ', ') under ${TargetPath} on ${TargetHost} (exit $hashExit). The service has NOT been restarted."
 }
-$remoteBinHash = "$remoteBinHash".Trim().ToLower()
-if ($remoteBinHash -ne $localBinHash) {
-  throw "sync verification FAILED: ${TargetPath}/RotaryPhoneController.Server hashes $remoteBinHash on ${TargetHost}, expected $localBinHash. The service has NOT been restarted."
+# Parse into name -> hash rather than trusting sha256sum's output ORDER. It happens to
+# echo the order it was given, but a check whose correctness rests on that would pass
+# for the wrong reason the day it does not.
+#
+# ⚠ Iterate the ARRAY; do NOT stringify it first. A native command's multi-line output
+# arrives as string[], and "$array" joins its elements with a SPACE, not a newline -- so
+# `"$remoteHashOut" -split "\r?\n"` yields ONE line holding both records and every
+# lookup misses. Measured here 2026-09-10: the two hashes were correct and matching, and
+# the check still threw. It failed CLOSED, which is the right direction, but a
+# verification that cannot pass is not a verification.
+$remoteHashes = @{}
+$remoteHashLines = @($remoteHashOut) | ForEach-Object { "$_" -split "`r?`n" } | Where-Object { $_.Trim() }
+foreach ($line in $remoteHashLines) {
+  $parts = $line.Trim() -split '\s+', 2
+  if ($parts.Count -eq 2) { $remoteHashes[$parts[1].Trim()] = $parts[0].Trim().ToLower() }
 }
-Write-Host "  Sync verified: binary on the box matches sha256 $($localBinHash.Substring(0,16))" -ForegroundColor Green
+foreach ($rel in $verifyRel) {
+  if (-not $remoteHashes.ContainsKey($rel)) {
+    throw "sync verification FAILED: ${TargetHost} did not report a hash for ${rel} (got: '$($remoteHashLines -join ' | ')'). Refusing to read an unanswered question as an answer. The service has NOT been restarted."
+  }
+  if ($remoteHashes[$rel] -ne $expected[$rel]) {
+    throw "sync verification FAILED: ${TargetPath}/${rel} hashes $($remoteHashes[$rel]) on ${TargetHost}, expected $($expected[$rel]). The service has NOT been restarted."
+  }
+}
+Write-Host "  Sync verified: apphost $($expected['RotaryPhoneController.Server'].Substring(0,16)) and app $($expected['RotaryPhoneController.Server.dll'].Substring(0,16)) match on the box" -ForegroundColor Green
 
 # Copy appsettings.Production.json only if it doesn't exist on target.
 #
