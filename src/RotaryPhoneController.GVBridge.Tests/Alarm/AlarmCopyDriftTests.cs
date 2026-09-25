@@ -72,6 +72,77 @@ public class AlarmCopyDriftTests
             + Environment.NewLine + string.Join(Environment.NewLine, missing));
     }
 
+    /// <summary>
+    /// What the alarm's auto-relogin track and the auto-relogin breaker must agree on. The alarm
+    /// QUOTES the breaker's own reason text rather than composing one — which is the only reason
+    /// "THIS SCRIPT DETECTS NOTHING" survives auto-relogin — so the words themselves cannot drift:
+    /// they are read from the breaker's state file at run time. What CAN drift is everything the
+    /// alarm assumes in order to find them: the field names, the two state words, and the command
+    /// it tells a human to run.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ DELIBERATELY NOT THE PLAN'S LIST. docs/plans/gv-auto-relogin.md Task 14 proposed guarding
+    /// four sentences from the actuator's reason texts. The alarm reproduces none of them statically
+    /// (it quotes whatever the file says), so that guard would have pinned sentences to a file with
+    /// nothing on the other side of the quotation — and three of the four live in actuator code that
+    /// is not written until after the attended spike. Renaming BREAKER_REASON_TEXT, by contrast,
+    /// would leave the alarm posting "(the breaker recorded no reason text)" at the moment a human
+    /// most needs the reason; renaming TRIPPED would mute the relogin track entirely. Those are
+    /// the drifts guarded here.
+    /// </remarks>
+    [Fact]
+    public void TheAlarmReadsTheBreakerFileInTheBreakersOwnVocabulary()
+    {
+        var root = RepoRoot();
+        var alarmPath = Path.Combine(root, "deploy", "gv-session-alarm.sh");
+        var breakerPath = Path.Combine(root, "deploy", "gv-auto-relogin-breaker.sh");
+
+        // ⛔ PRESENCE, not absence — the same rule as the test above. If the breaker is ever
+        // removed this guard must fail and be deleted deliberately, not pass by having nothing
+        // to compare.
+        Assert.True(File.Exists(alarmPath), $"alarm script not found at {alarmPath}");
+        Assert.True(File.Exists(breakerPath), $"breaker not found at {breakerPath}");
+
+        var alarm = File.ReadAllText(alarmPath);
+        var breaker = File.ReadAllText(breakerPath);
+        var missing = new List<string>();
+
+        // 1. Every field the alarm reads is one the breaker writes, in the %q form the alarm's
+        //    subshell-source parse depends on.
+        foreach (var key in new[] { "BREAKER_STATE", "BREAKER_TRIPPED_AT", "BREAKER_REASON_TEXT" })
+        {
+            if (!alarm.Contains("$" + key, StringComparison.Ordinal))
+                missing.Add($"the alarm no longer reads {key} — update this guard deliberately if that is intended");
+            if (!breaker.Contains($"printf '{key}=%q\\n'", StringComparison.Ordinal))
+                missing.Add($"the breaker no longer writes {key} with printf %q — the alarm reads it by name");
+        }
+
+        // 2. The two state words the alarm branches on are the breaker's own.
+        foreach (var word in new[] { "TRIPPED", "ARMED" })
+        {
+            if (!alarm.Contains($"[ \"$relogin_state\" = \"{word}\" ]", StringComparison.Ordinal))
+                missing.Add($"the alarm no longer branches on the state word {word}");
+            if (!breaker.Contains($"BREAKER_STATE=\"{word}\"", StringComparison.Ordinal))
+                missing.Add($"the breaker no longer assigns the state word {word} — the alarm compares against it");
+        }
+
+        // 3. The command the alarm tells a human to run is the one the breaker's own reason texts
+        //    name, and the breaker still answers the flag.
+        const string resetCommand = "gv-auto-relogin.sh --reset";
+        if (!Flatten(alarm).Contains(resetCommand, StringComparison.Ordinal))
+            missing.Add($"the alarm no longer names '{resetCommand}'");
+        if (!Flatten(breaker).Contains(resetCommand, StringComparison.Ordinal))
+            missing.Add($"the breaker's reason texts no longer name '{resetCommand}' — the alarm tells a human to run it");
+        foreach (var flag in new[] { "--status)", "--reset)" })
+            if (!breaker.Contains(flag, StringComparison.Ordinal))
+                missing.Add($"the breaker no longer answers {flag.TrimEnd(')')} — the alarm's ACTION names it");
+
+        Assert.True(missing.Count == 0,
+            "The alarm's auto-relogin track and the breaker have drifted apart. The alarm would "
+            + "quote nothing, branch on nothing, or send a human to a command that does not exist:"
+            + Environment.NewLine + string.Join(Environment.NewLine, missing));
+    }
+
     /// <summary>Collapse newlines and runs of spaces, so line wrapping is not a difference.</summary>
     private static string Flatten(string s)
         => Regex.Replace(s.Replace("\r", "").Replace("\n", ""), " +", " ");
