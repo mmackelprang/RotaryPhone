@@ -1381,6 +1381,39 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// keeps the historical classification rather than gaining an unearned new claim.
     /// </para>
     /// </remarks>
+    /// <summary>The tab the bridge Chrome's Voice session lives in — what every CDP extraction here targets.</summary>
+    public const string BridgeChromeTargetUrl = "voice.google.com";
+
+    /// <summary>
+    /// Record why an extraction from the BRIDGE Chrome failed, classified by
+    /// <see cref="ClassifyFailedExtraction"/>. The one writer for a failed extraction, shared by recovery
+    /// rung 3 and the manual/cron <c>POST cookies/refresh-from-browser</c> endpoint.
+    /// </summary>
+    /// <remarks>
+    /// ⛔ MEASURED 2026-09-25 18:28–18:30 EDT: only rung 3 used to record this, and rung 3 runs only when
+    /// the phone's OWN cookies fail. The endpoint — which the 20-minute cron POSTs — returned 404 for a
+    /// signed-out Chrome while <c>/status</c> kept saying <c>Succeeded</c>, so a browser-only sign-out
+    /// never reached the alarm's <c>browser_signed_out</c> or the auto-relogin actuator.
+    /// <para>
+    /// ⚠ A STATUS WRITE AND NOTHING ELSE. No recovery, no re-activation, no availability change: the cron
+    /// calls this every 20 minutes and a failure must never cost the live call path anything.
+    /// </para>
+    /// <para>
+    /// Only for a failed extraction. Success is recorded by the adopt path from a LIVE probe
+    /// (<c>Succeeded</c> or <c>Stale</c>), because a successful extraction proves nothing about Google.
+    /// </para>
+    /// </remarks>
+    public void RecordFailedBrowserExtraction(CdpExtractionResult result, string source)
+    {
+        if (result.Success && result.Cookies != null)
+            throw new ArgumentException("A successful extraction is recorded by the adopt path, not here.", nameof(result));
+
+        _lastBrowserRefreshOutcome = ClassifyFailedExtraction(result);
+        _logger.LogWarning(
+            "GVApi: CDP cookie extraction from the bridge Chrome failed ({Source}): {Status} {Error} — recorded as {Outcome}",
+            source, result.Status, result.Error, _lastBrowserRefreshOutcome);
+    }
+
     internal static BrowserRefreshOutcome ClassifyFailedExtraction(CdpExtractionResult result) => result.Status switch
     {
         CdpExtractionStatus.MissingRequiredCookies or CdpExtractionStatus.NoCookies
@@ -1527,12 +1560,10 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
 
         try
         {
-            var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, "voice.google.com");
+            var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, BridgeChromeTargetUrl);
             if (!result.Success || result.Cookies == null)
             {
-                _lastBrowserRefreshOutcome = ClassifyFailedExtraction(result);
-                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error} — recorded as {Outcome}",
-                    result.Status, result.Error, _lastBrowserRefreshOutcome);
+                RecordFailedBrowserExtraction(result, "recovery rung 3");
                 return false;
             }
 
