@@ -130,6 +130,23 @@ PENDING_POLLS=0
 # replying into nothing. A gateway that is down when an incident opens is a correlated
 # failure, not an exotic one. Found in pre-merge review 2026-09-09.
 THREAD_ROOT_DELIVERED=0
+# ⛔ A SECOND, INDEPENDENT TRACK — not a value of LAST_POSTED_CONDITION.
+# The alarm posts on transition of a single condition string. If the auto-relogin
+# breaker's state competed in that same case, then once it tripped the condition would
+# stop changing and a genuine session death that followed would produce NO MESSAGE —
+# the alarm going mute in the state it exists for, correlated with the automation
+# breaking. See docs/plans/gv-auto-relogin.md §0.9.
+LAST_POSTED_RELOGIN_STATE=""
+# Which trip was posted. A human --reset followed by a fresh trip inside one 5-minute
+# poll never shows this script an ARMED state, so "still TRIPPED" alone would swallow
+# the second trip. Comparing the trip's own timestamp does not.
+LAST_POSTED_RELOGIN_TRIPPED_AT=""
+# The thread the relogin alert was posted into, persisted so the re-armed RESOLVED
+# replies into THAT thread — even when the session incident it joined has since
+# closed and INCIDENT_THREAD_KEY has been cleared. (The plan's draft fell back to a
+# key no message was ever posted under, which would leave the quiet RESOLVED invisible.)
+RELOGIN_THREAD_KEY=""
+RELOGIN_ROOT_DELIVERED=0
 
 if [ -r "$STATE_FILE" ]; then
     # shellcheck disable=SC1090
@@ -150,6 +167,10 @@ write_state() {
         printf 'PENDING_CONDITION=%q\n'     "$PENDING_CONDITION"
         printf 'PENDING_POLLS=%q\n'         "$PENDING_POLLS"
         printf 'THREAD_ROOT_DELIVERED=%q\n' "$THREAD_ROOT_DELIVERED"
+        printf 'LAST_POSTED_RELOGIN_STATE=%q\n' "$LAST_POSTED_RELOGIN_STATE"
+        printf 'LAST_POSTED_RELOGIN_TRIPPED_AT=%q\n' "$LAST_POSTED_RELOGIN_TRIPPED_AT"
+        printf 'RELOGIN_THREAD_KEY=%q\n'        "$RELOGIN_THREAD_KEY"
+        printf 'RELOGIN_ROOT_DELIVERED=%q\n'    "$RELOGIN_ROOT_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
     return 0
@@ -527,6 +548,116 @@ $(body_for "$condition")" \
         "${SOURCE_NAME}-gv-session-${condition}" \
         "$INCIDENT_THREAD_KEY"
     [ "$NOTIFY_FAILED" -eq 0 ] && LAST_POSTED_CONDITION="$condition"
+fi
+
+# --- The one new condition: auto-relogin unavailable ---------------------------
+# ⛔ TRANSPORT, NOT DETECTION. THIS SCRIPT DETECTS NOTHING stays true: the breaker
+# (deploy/gv-auto-relogin-breaker.sh) writes BREAKER_REASON_TEXT at the moment it
+# trips, in words aimed at a human, and this block quotes it verbatim. It does not
+# decide what a tripped breaker means, exactly as it does not decide what Stale means.
+#
+# ⚠ ABSENT IS NOT HEALTHY, and it is not unhealthy either. If auto-relogin is not
+# installed on this box there is no breaker file and nothing to report; the alarm must
+# not invent a condition out of a missing file. A file that exists but cannot be read
+# is logged, not posted: the actuator's own next run rewrites it as TRIPPED with its
+# own reason text (the breaker fails closed), and THAT is what this block reports.
+#
+# ⚠ READ BY SOURCING, IN A SUBSHELL — not by grep. The breaker writes every field with
+# printf %q, which renders a sentence as `Auto-relogin\ is\ stopped\ \(x\).`; only the
+# shell can turn that back into the words. The plan's grep|cut|sed parse would have
+# delivered the backslashes to a human (measured 2026-09-25). The subshell keeps the
+# file's assignments out of this script's own variables.
+RELOGIN_STATE_FILE="${GV_ALARM_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}"
+
+relogin_state="not_installed"
+relogin_tripped_at=""
+relogin_reason_text=""
+if [ -e "$RELOGIN_STATE_FILE" ]; then
+    relogin_fields="$(
+        BREAKER_STATE=""; BREAKER_TRIPPED_AT=""; BREAKER_REASON_TEXT=""
+        # shellcheck disable=SC1090
+        . "$RELOGIN_STATE_FILE" >/dev/null 2>&1 || exit 1
+        printf '%s\n%s\n%s' "$BREAKER_STATE" "$BREAKER_TRIPPED_AT" "$BREAKER_REASON_TEXT"
+    )" || relogin_fields=""
+    relogin_state="$(printf '%s\n' "$relogin_fields" | sed -n 1p)"
+    relogin_tripped_at="$(printf '%s\n' "$relogin_fields" | sed -n 2p)"
+    relogin_reason_text="$(printf '%s\n' "$relogin_fields" | sed -n '3,$p')"
+    [ -n "$relogin_state" ] || relogin_state="unreadable"
+fi
+
+if [ "$relogin_state" = "TRIPPED" ] \
+   && { [ "$LAST_POSTED_RELOGIN_STATE" != "TRIPPED" ] \
+        || [ "$LAST_POSTED_RELOGIN_TRIPPED_AT" != "$relogin_tripped_at" ]; }; then
+    # Reply into the open incident if there is one AND its root reached the owner, so
+    # "the session is dead" and "and automation will not fix it" read in one place.
+    # Otherwise open a thread of our own: a tripped breaker on a HEALTHY session is
+    # still an account-level event the owner must act on.
+    if [ -z "$RELOGIN_THREAD_KEY" ]; then
+        if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" = "1" ]; then
+            RELOGIN_THREAD_KEY="$INCIDENT_THREAD_KEY"
+            RELOGIN_ROOT_DELIVERED=1
+        else
+            RELOGIN_THREAD_KEY="${SOURCE_NAME}-gv-relogin-$(date -u +%Y%m%dT%H%M%SZ)"
+            RELOGIN_ROOT_DELIVERED=0
+        fi
+    fi
+    if [ "$RELOGIN_ROOT_DELIVERED" != "1" ]; then
+        # Same rule as the session track's open_incident_thread: every thread opens
+        # with a 🧵 Thread Title, and a refused root is re-attempted under the SAME key.
+        if post_notify "info" \
+            "[${SOURCE_NAME}] 🧵 GV auto-relogin — stopped" \
+            "Subject: the auto-relogin circuit breaker on \`radio\` (state \`${RELOGIN_STATE_FILE}\`).
+Closes when: a human re-arms it with \`gv-auto-relogin.sh --reset\`.
+Identifiers: thread \`${RELOGIN_THREAD_KEY}\`, tripped ${relogin_tripped_at:-at an unrecorded time}." \
+            "" \
+            "${SOURCE_NAME}-gv-relogin-thread-${RELOGIN_THREAD_KEY}" \
+            "$RELOGIN_THREAD_KEY"
+        then
+            RELOGIN_ROOT_DELIVERED=1
+        fi
+    fi
+    if [ "$RELOGIN_ROOT_DELIVERED" = "1" ]; then
+        # ⚠ The dedupe key names THIS TRIP (its timestamp), not the condition: a second
+        # trip weeks later is a new event and must not be swallowed by a gateway that
+        # remembers the first one.
+        if post_notify "alert" \
+            "[${SOURCE_NAME}] GV auto-relogin — stopped, needs a human" \
+            "$(now_utc) · relogin_unavailable
+Automatic re-login has stopped and will not resume on its own. In the actuator's own words:
+
+> ${relogin_reason_text:-(the breaker recorded no reason text)}
+
+⚠ This is reported **separately from** the session's own state: a stopped actuator and a dead session
+are two different facts, and either can be true without the other." \
+            "gv-auto-relogin.sh --status ; then --reset once the account is fixed" \
+            "${SOURCE_NAME}-gv-relogin-unavailable-${relogin_tripped_at:-unknown}" \
+            "$RELOGIN_THREAD_KEY"
+        then
+            LAST_POSTED_RELOGIN_STATE="TRIPPED"
+            LAST_POSTED_RELOGIN_TRIPPED_AT="$relogin_tripped_at"
+        fi
+    fi
+elif [ "$relogin_state" = "TRIPPED" ]; then
+    log "auto-relogin still TRIPPED; already posted, nothing to say."
+elif [ "$relogin_state" = "ARMED" ] && [ "$LAST_POSTED_RELOGIN_STATE" = "TRIPPED" ]; then
+    # A human cleared it. Quiet lane — safe ONLY because it replies into the thread
+    # the alert was posted in, which is why that key is persisted.
+    if post_notify "info" \
+        "[${SOURCE_NAME}] GV auto-relogin — re-armed" \
+        "$(now_utc) · RESOLVED
+The auto-relogin breaker has been re-armed by a human. Automatic re-login is available again.
+Action: none." \
+        "" \
+        "${SOURCE_NAME}-gv-relogin-rearmed-${RELOGIN_THREAD_KEY}" \
+        "$RELOGIN_THREAD_KEY"
+    then
+        LAST_POSTED_RELOGIN_STATE="ARMED"
+        LAST_POSTED_RELOGIN_TRIPPED_AT=""
+        RELOGIN_THREAD_KEY=""
+        RELOGIN_ROOT_DELIVERED=0
+    fi
+else
+    log "auto-relogin state=${relogin_state}; nothing to post."
 fi
 
 # --- Dead-man -----------------------------------------------------------------
