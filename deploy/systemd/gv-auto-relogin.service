@@ -1,0 +1,22 @@
+[Unit]
+Description=GV auto-relogin — one breaker-bounded attempt to restore a signed-out bridge session
+Documentation=file:///opt/rotary-phone/docs/plans/gv-auto-relogin.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/gv-auto-relogin.sh
+
+# ⚠ LONGER THAN ONE FULL CYCLE, so systemd does not kill a run that is inside its own
+# limits: up to 60 s waiting for the lock, 40 s per CDP call, the driver's 120 s, and the
+# verification's navigation and two status reads. A run that IS killed leaves its
+# in_flight marker, and the next run trips on it rather than guessing — so this bound is
+# a backstop, not a correctness mechanism.
+TimeoutStartSec=8min
+
+# ⛔ DELIBERATELY NO EnvironmentFile= and no Environment= carrying anything from
+# gv-account.conf. The actuator reads that file itself, as data, and the password never
+# enters any process's environment. A unit that exported it would put it in
+# /proc/<pid>/environ of every process this service starts.
+
+# A failed run must be VISIBLE in `systemctl --user status`, so no Restart=. Retrying is
+# exactly what the breaker exists to bound; the timer is the only cadence.

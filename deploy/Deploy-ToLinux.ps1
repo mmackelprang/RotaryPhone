@@ -979,6 +979,18 @@ $bridgeDriftExit = $LASTEXITCODE
 # block every deploy on that decision. It must be LOUD and it must not be fatal.
 if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal; blocked on the gv-bridge-ensure.sh exit-code decision, spec §11 decision 4.)" -ForegroundColor Yellow }
 
+# --- GV auto-relogin: install (timer DISABLED, breaker never armed) and report ---
+# docs/plans/gv-auto-relogin.md Task 15. Safe on every deploy: the installer never enables
+# the timer and never arms the breaker, and without the owner's sign-in driver the actuator
+# does nothing at all. ⚠ NON-FATAL, like the bridge group: auto-relogin is an optional
+# layer, and a problem in it must be LOUD without aborting a deploy that is otherwise fine.
+ssh $SshTarget "bash ${TargetPath}/deploy/install-gv-auto-relogin.sh"
+$reloginInstallExit = $LASTEXITCODE
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group relogin --ship-dir '${TargetPath}/deploy'"
+$reloginDriftExit = $LASTEXITCODE
+if ($reloginInstallExit -ne 0) { Write-Host "  the GV auto-relogin installer FAILED (exit $reloginInstallExit) -- the drift report above states what is installed. Not fatal." -ForegroundColor Red }
+if ($reloginDriftExit -ne 0) { Write-Host "  (auto-relogin is not in sync -- see above. Not fatal.)" -ForegroundColor Yellow }
+
 Write-Host ""
 Write-Host "=== Deploy Complete ===" -ForegroundColor Green
 Write-Host "  API: http://${TargetHost}:5004"
