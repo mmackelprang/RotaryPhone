@@ -109,6 +109,11 @@ check "signed out -> browser_stale" "browser_stale" \
 # reports as healthy, and the whole reason browserRefreshOutcome was added.
 check "CHROME GONE -> browser_unreachable (boolean reads false)" "browser_unreachable" \
       "$(classify '{"browserRefreshOutcome":"Unreachable","browserSessionStale":false}')"
+# ⛔ MEASURED 2026-09-25: a Chrome parked on the Google sign-in page was reported as
+# Unreachable and the alarm said "Chrome is gone". The service now says SignedOut, and
+# it must not fall through to unknown_outcome or read as the Chrome-is-gone alert.
+check "SIGNED OUT (Chrome up, no Google session) -> browser_signed_out" "browser_signed_out" \
+      "$(classify '{"browserRefreshOutcome":"SignedOut","browserSessionStale":false}')"
 check "not wired -> not_attempted" "not_attempted" \
       "$(classify '{"browserRefreshOutcome":"NotAttempted","browserSessionStale":false}')"
 check "teardown -> ignore" "ignore" \
@@ -332,6 +337,170 @@ check "state lost mid-incident -> NO resolved message at all (nothing to close)"
 check "…and the alert's thread is therefore left open" "yes" \
       "$([ -n "$lost_from" ] && echo yes || echo no)"
 
+echo "=== 2026-09-25 — an incident that recovers UNDELIVERED retires its thread key ==="
+# ⛔ MEASURED ON THE BOX. 2026-09-20 03:04–08:10 EDT every gateway POST timed out; an
+# incident opened as rotaryphone-gv-session-20260920T071522Z with its root undelivered.
+# At 08:14 the condition returned to ok — but LAST_POSTED_CONDITION was still `ok`,
+# because nothing had ever been delivered, so the "unchanged since the last post" branch
+# swallowed the recovery and the key was never cleared. FIVE DAYS LATER, 2026-09-25
+# 15:08:02Z, an unrelated browser_unreachable "re-attempted the incident thread root"
+# for the 09-20 key and delivered a new alert under a five-day-old thread identity.
+#
+# The rule: an incident whose condition returns to ok with NOTHING delivered is retired
+# silently — no alert was ever seen, so there is nothing to close, and a RESOLVED would
+# be an all-clear for an alarm nobody raised. The next incident opens its own thread.
+# ⚠ The stub truncates its log on restart, so the refused key is read BEFORE restarting.
+start_gateway
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null      # LAST_POSTED_CONDITION=ok, as on the box
+start_gateway --fail-notify 500
+serve '{"browserRefreshOutcome":"Unreachable"}'
+rc="$(run)"
+check "gateway down at incident open -> exit 1" "1" "$rc"
+retired_key="$(jq -r 'select(.kind=="notify" and .status==500) | .body.thread_key' "$GW_LOG" | head -1)"
+check "…and a thread key WAS minted for the refused incident" "yes" \
+      "$([ -n "$retired_key" ] && echo yes || echo no)"
+start_gateway                                                     # the gateway comes back
+serve '{"browserRefreshOutcome":"Succeeded"}'
+rc="$(run)"
+check "undelivered incident recovers -> exit 0" "0" "$rc"
+check "…and posts NOTHING (no alert was ever seen, so there is nothing to close)" "0" \
+      "$(delivered | wc -l)"
+check "…and the journal says the key was retired" "yes" \
+      "$(grep -qF "retired ${retired_key}" "$WORK/err.txt" && echo yes || echo no)"
+sleep 1                  # keys are second-resolution; do not let a fast run mint the same one
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+new_root="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "the NEXT incident delivers its own thread root" "yes" \
+      "$([ -n "$new_root" ] && echo yes || echo no)"
+check "…under a NEW key, not the retired one" "different" \
+      "$([ -n "$new_root" ] && [ "$new_root" != "$retired_key" ] && echo different || echo same)"
+check "…its alert threads under that new root" "$new_root" \
+      "$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "…and nothing is re-attempted under the retired key" "0" \
+      "$(delivered | jq -c --arg k "$retired_key" 'select(.thread_key==$k)' | wc -l)"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…and its RESOLVED closes the NEW thread" "$new_root" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# ⚠ PARTIAL DELIVERY, root refused but the ALERT accepted. The owner SAW an alert, under
+# a thread_key whose root never arrived — so the alert itself is that thread's first
+# message. It must be closed, and in that same thread. Retiring it silently would leave
+# a notified alert open forever.
+start_gateway --fail-notify 500 --fail-notify-matching=-thread-
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+seen_alert="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "root refused, alert accepted -> the alert WAS delivered" "yes" \
+      "$([ -n "$seen_alert" ] && echo yes || echo no)"
+start_gateway                             # the gateway accepts roots again by recovery time
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery posts a RESOLVED, threaded under the alert the owner saw" "$seen_alert" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+check "…with the missing root placed in that thread FIRST" "$seen_alert" \
+      "$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+
+# ⚠ PARTIAL DELIVERY, root accepted but the alert refused. A thread root exists and says
+# what closes it; the thread must be closable, so it gets its RESOLVED — and the key must
+# still be cleared, or the next incident threads under this one.
+start_gateway --fail-notify 500 --fail-notify-matching=browser_unreachable
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+root_only="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "root accepted, alert refused -> the root WAS delivered" "yes" \
+      "$([ -n "$root_only" ] && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery closes that thread with a RESOLVED" "$root_only" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+sleep 1
+serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null
+next_root="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "…and the next incident opens a NEW thread" "different" \
+      "$([ -n "$next_root" ] && [ "$next_root" != "$root_only" ] && echo different || echo same)"
+
+# ⛔ A TIMEOUT IS NOT PROOF OF NON-DELIVERY (pre-merge review 2026-09-25). The 2026-09-20
+# failure was curl 28. If the gateway accepted and delivered while our curl gave up, the
+# owner SAW the alert — and retiring it silently would leave it open forever. So a timed-out
+# incident is closed with a RESOLVED under its key, not retired.
+start_gateway --delay-notify 3
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'
+GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>"$WORK/err.txt"
+rc=$?
+check "gateway slower than our timeout -> exit 1" "1" "$rc"
+check "…and the journal says it MAY have been delivered, not that nothing was" "yes" \
+      "$(grep -q 'MAY have delivered' "$WORK/err.txt" && echo yes || echo no)"
+# Let the stub finish delivering what we gave up on. POLL with a deadline, never a fixed
+# sleep: the stub is single-threaded, so root and alert land ~3s apart after the alarm exits.
+timed_out_key=""
+for _ in $(seq 150); do
+    timed_out_key="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+    [ -n "$timed_out_key" ] && break
+    sleep 0.1
+done
+check "…while the gateway DID deliver the alert" "yes" \
+      "$([ -n "$timed_out_key" ] && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery closes it with a RESOLVED under that key, not a silent retirement" "$timed_out_key" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# ⛔ A TIMEOUT THAT DELIVERED NOTHING (pre-merge re-review 2026-09-25). curl 28 also covers a
+# connect-phase timeout, where no byte was sent — the most likely shape of 2026-09-20. The
+# incident is "maybe delivered", so it is not retired silently; but a RESOLVED posted straight
+# away would be the FIRST message in its thread — a RESOLVED rooting a thread, which the policy
+# forbids. The root must be re-posted first. Produced here with a stub that sleeps past our
+# timeout and then REFUSES, so curl sees 28 and the gateway kept nothing.
+start_gateway --delay-notify 2 --fail-notify 500
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'
+GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>"$WORK/err.txt"
+check "timed out AND refused -> journal says MAY have delivered (curl cannot tell)" "yes" \
+      "$(grep -q 'MAY have delivered' "$WORK/err.txt" && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+first_title="$(delivered | jq -r '.title' | head -1)"
+check "recovery re-posts the ROOT first — a RESOLVED never starts a thread" "yes" \
+      "$(case "$first_title" in *🧵*) echo yes ;; *) echo no ;; esac)"
+root_k="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "…and the RESOLVED follows under that root" "$root_k" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# …and if the root is STILL refused at recovery, the RESOLVED is withheld, not orphaned.
+start_gateway --delay-notify 2 --fail-notify 500
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+start_gateway --fail-notify 500 --fail-notify-matching=-thread-
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "root still refused at recovery -> NO RESOLVED is delivered" "0" \
+      "$(delivered | jq -c 'select(.title|test("recovered"))' | wc -l)"
+check "…and the journal says it was withheld" "yes" \
+      "$(grep -q 'RESOLVED WITHHELD' "$WORK/err.txt" && echo yes || echo no)"
+start_gateway
+
+# A state file written by the PRE-2026-09-25 script has no INCIDENT_MAY_HAVE_DELIVERED. It
+# must load under `set -u` and still close a delivered incident normally.
+reset
+cat > "$GV_ALARM_STATE_FILE" <<'EOF'
+LAST_POSTED_CONDITION=browser_stale
+INCIDENT_THREAD_KEY=rotaryphone-gv-session-20260901T000000Z
+INCIDENT_OPENED_AT=2026-09-01T00:00:00Z
+PENDING_CONDITION=browser_stale
+PENDING_POLLS=4
+THREAD_ROOT_DELIVERED=1
+EOF
+serve '{"browserRefreshOutcome":"Succeeded"}'
+rc="$(run)"
+check "old-format state file -> exit 0" "0" "$rc"
+check "…and the delivered incident is closed under its own key" "rotaryphone-gv-session-20260901T000000Z" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
 echo "=== Task 10 — flapping threads under ONE incident ==="
 reset
 serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null
@@ -382,6 +551,21 @@ check "browser_unreachable body says the login was never tested" "yes" \
 check "browser_unreachable body warns the boolean reads false here" "yes" \
       "$(body_has browser_unreachable 'reads **false** in this state')"
 
+serve '{"browserRefreshOutcome":"SignedOut","browserSessionStale":false}'; run >/dev/null
+check "browser_signed_out severity" "alert" "$(sev_of browser_signed_out)"
+check "browser_signed_out body quotes the service verbatim" "yes" \
+      "$(body_has browser_signed_out "the box's Chrome is SIGNED OUT")"
+check "browser_signed_out body carries the service's own REMEDY — a human sign-in" "yes" \
+      "$(body_has browser_signed_out "ACTION: a human must sign in at voice.google.com in the box's Chrome.")"
+check "browser_signed_out body says Chrome is fine, so nobody restarts it" "yes" \
+      "$(body_has browser_signed_out 'Chrome itself is fine; restarting it will not help.')"
+signed_out_action="$(delivered | jq -r 'select(.dedupe_key=="rotaryphone-gv-session-browser_signed_out") | .action' | head -1)"
+check "browser_signed_out ACTION sends a human to sign in" "yes" \
+      "$(case "$signed_out_action" in *"a human must sign in at voice.google.com"*) echo yes ;; *) echo no ;; esac)"
+# ⛔ The 2026-09-25 regression, asserted on the wire: the wrong fix, stated with confidence.
+check "browser_signed_out ACTION does NOT send the owner after Chrome" "no" \
+      "$(case "$signed_out_action" in *pgrep*|*gv-bridge-ensure*) echo yes ;; *) echo no ;; esac)"
+
 reset
 serve '{"browserRefreshOutcome":"NotAttempted"}'
 run >/dev/null; run >/dev/null; run >/dev/null      # MIN_POLLS_TO_POST=3
@@ -431,13 +615,14 @@ echo "=== Task 10 — no severity in any title, across EVERY condition ==="
 reset
 serve '{"browserRefreshOutcome":"Stale"}';        run >/dev/null
 serve '{"browserRefreshOutcome":"Unreachable"}';  run >/dev/null
+serve '{"browserRefreshOutcome":"SignedOut"}';    run >/dev/null
 serve '{"browserRefreshOutcome":"Hibernating"}';  run >/dev/null
 serve '{"available":true}';                       run >/dev/null
 GV_ALARM_STATUS_URL="$DEAD_URL" bash "$ALARM" >/dev/null 2>&1
 serve '{"browserRefreshOutcome":"Succeeded"}';    run >/dev/null
 titles="$(delivered | jq -r '.title')"
 check "every condition contributed a title" "yes" \
-      "$([ "$(printf '%s\n' "$titles" | wc -l)" -ge 6 ] && echo yes || echo no)"
+      "$([ "$(printf '%s\n' "$titles" | wc -l)" -ge 7 ] && echo yes || echo no)"
 check "no title carries a severity word or marker" "0" \
       "$(printf '%s\n' "$titles" | grep -ciE '\[?(alert|warn|warning|info|critical|resolved)\]?[[:space:]]*[:·|-]|^(alert|warn|info)\b|ACTION:')"
 check "every title starts with the [rotaryphone] source tag" "0" \

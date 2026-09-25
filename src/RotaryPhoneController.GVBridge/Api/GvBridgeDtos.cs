@@ -73,7 +73,8 @@ public record GvBridgeStatusDto(
   // Added by the 2026-09-09 GV session alarm work. browserSessionStale is a derived read of ONE value
   // of this enum: when Chrome is DEAD the outcome is Unreachable, so the BOOLEAN READS FALSE on the
   // worst state. The boolean stays — Radio Console consumes it — and this reports the whole enum
-  // beside it. One of: NotAttempted, Unreachable, Stale, Succeeded, TornDown.
+  // beside it. One of: NotAttempted, Unreachable, Stale, Succeeded, TornDown, SignedOut (added
+  // 2026-09-25 — Chrome answered but holds no Google session; browserSessionStale reads FALSE for it).
   //
   // ⚠ APPENDED LAST, deliberately. GVBridgeControllerTests pins this payload's field names AND their
   // order as a cross-repo contract; appending is what keeps every existing name in its existing
