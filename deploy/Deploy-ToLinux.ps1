@@ -480,6 +480,20 @@ if ($rsyncAvailable) {
   # ⚠ The comment has to live up HERE: a comment line between backtick-continued
   # arguments ENDS the command in PowerShell, so every exclusion after it would be
   # silently dropped. (The plan's draft put it inline.)
+  #
+  # ⚠ EVERY FILE IN ${TargetPath} THAT THE PUBLISH OUTPUT DOES NOT CONTAIN IS DELETED
+  # BY --delete, and the exclusions below are the entire defence. Known unprotected,
+  # found 2026-09-09, re-listed against the box and the local publish tree 2026-09-25,
+  # and NOT fixed here because it is out of the auto-relogin arc's scope
+  # (docs/plans/gv-auto-relogin.md §0.2, Q7):
+  #   /opt/rotary-phone/refresh-gv-cookies.sh   <- the load-bearing */20 cookie cron
+  #   /opt/rotary-phone/mute-gv-browser.py
+  #   /opt/rotary-phone/scripts/
+  #   /opt/rotary-phone/ChromeExtension/
+  #   /opt/rotary-phone/*.bak*                  <- every hand-made config backup
+  # (/opt/rotary-phone/deploy/ is deleted too, then re-created by the scp step below.)
+  # The tar branch does not delete, which is why this has never been seen: rsync has
+  # never been on the deploying workstation's PATH. It is on the box.
   rsync -az --delete `
     --exclude 'appsettings.Production.json' `
     --exclude 'gv-account.conf' `
