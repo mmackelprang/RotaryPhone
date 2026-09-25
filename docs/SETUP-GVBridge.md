@@ -198,6 +198,38 @@ The GVBridge section (update IPs for your network):
 | `~/.local/state/gv-bridge-restart.log` | Launch / restart log |
 | `/opt/rotary-phone/refresh-gv-cookies.sh` | Cron `*/20` — refreshes cookies, mutes the tab |
 | `/opt/rotary-phone/ChromeExtension/` | Extension source. Passed to Chrome but **not loaded** |
+| `/opt/rotary-phone/gv-account.conf` | Auto-relogin credential, **mode 600**, owner-populated. Not yet in use — see below |
+
+### gv-account.conf (auto-relogin credential — not yet in use)
+
+> ⚠ **Auto-relogin has not shipped.** This section documents the file's shape and protection so they are
+> fixed before any code reads it. Nothing on the box reads this file today, and there is no reason to create
+> it until the actuator is installed. Design: `docs/superpowers/specs/2026-09-09-gv-auto-relogin-design.md`;
+> plan: `docs/plans/gv-auto-relogin.md`.
+
+```
+# /opt/rotary-phone/gv-account.conf — mode 600, owner mmack.
+#
+# ⛔ POPULATED BY THE OWNER, ON THE BOX, BY HAND. No part of the RotaryPhone repo,
+# no deploy, no agent and no script ever writes, reads back, echoes or transports
+# these values. They exist in exactly one place.
+#
+# This file is sourced into the actuator's environment and the password is handed
+# to the sign-in driver ON STDIN. It is never an argv parameter: /proc/<pid>/cmdline
+# is mode 0444 on this box (measured 2026-09-09) and `radio` is shared — beszel,
+# avahi, colord and polkitd all run here, plus Radio Console under the same uid.
+#
+GV_ACCOUNT_EMAIL=
+GV_ACCOUNT_PASSWORD=
+```
+
+- **Mode 600, owner `mmack`.** Never group- or world-readable.
+- **Protected from the deploy in both branches** of `deploy/Deploy-ToLinux.ps1`: the tar branch excludes it from
+  the archive (so it is never *overwritten*), and the rsync branch excludes it from `--delete` (so it is never
+  *deleted*). `deploy/tests/repro-tar-clobber.sh` proves both, including a negative control that shows rsync
+  deleting the file when the exclusion is absent.
+- ⛔ **No template is committed and nothing in the repo creates this file.** A template in the publish tree would
+  be a file the deploy could ship — the failure the exclusions exist to prevent.
 
 **.desktop files must be mode 755, never 775.** GNOME silently refuses to launch a
 group-writable `.desktop` file, which is exactly why the previously shipped

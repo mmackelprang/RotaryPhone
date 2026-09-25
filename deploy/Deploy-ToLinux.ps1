@@ -464,8 +464,25 @@ if ($rsyncAvailable) {
   # for the tar fallback below: a `throw` here would delete the fallback outright.
   # Its status is read by the `if ($LASTEXITCODE -eq 0)` just below -- that IS the
   # check, and it is deliberate rather than missing.
+  #
+  # ⛔ --exclude 'gv-account.conf' IS NOT THE SAME KIND OF EXCLUSION AS THE TAR ONE in
+  # the fallback below, and the difference is the point. The tar exclusion keeps a
+  # member OUT OF THE STREAM, so the box's file is never OVERWRITTEN. This one defends
+  # against --delete, which removes every destination file the source does not have --
+  # and the source is the publish output, which will never contain the box's Google
+  # account file. Without this line the first rsync deploy DELETES it, silently, and
+  # auto-relogin then trips its breaker with "credential file missing" on a box that is
+  # otherwise healthy. The file is populated by the owner, on the box, by hand
+  # (docs/SETUP-GVBridge.md); nothing in this repo creates it.
+  # See docs/plans/gv-auto-relogin.md §0.2, and deploy/tests/repro-tar-clobber.sh for
+  # the test that proves both exclusions, including the negative control.
+  #
+  # ⚠ The comment has to live up HERE: a comment line between backtick-continued
+  # arguments ENDS the command in PowerShell, so every exclusion after it would be
+  # silently dropped. (The plan's draft put it inline.)
   rsync -az --delete `
     --exclude 'appsettings.Production.json' `
+    --exclude 'gv-account.conf' `
     --exclude 'data/' `
     --exclude 'logs/' `
     -e ssh `
@@ -584,8 +601,13 @@ if (-not $synced) {
     #     tighten every FILE mode the extract writes, which is a permissions change on
     #     a production box and belongs to the owner, not to this PR. Tracked in the
     #     plan's follow-ups.
+    # --exclude=./gv-account.conf defends the box's Google account file against an
+    # OVERWRITE (the rsync branch's --exclude defends it against a DELETION; see the
+    # comment there). The publish output never contains it, so today this is belt and
+    # braces -- it exists so that a stray copy in the publish tree can never be shipped
+    # over the owner's file, or off the workstation. docs/plans/gv-auto-relogin.md §0.2.
     "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
-      " tar --null --exclude=./appsettings.Production.json -czf - -T - |" +
+      " tar --null --exclude=./appsettings.Production.json --exclude=./gv-account.conf -czf - -T - |" +
       # `set -e` in the REMOTE shell. Without it the compound's status is the LAST
       # command's -- chmod's -- so a failed tar reported 0. The remote shell does not
       # inherit the local `set -e -o pipefail` above: that one governs this script,
