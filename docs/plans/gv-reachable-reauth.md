@@ -1,431 +1,382 @@
-# Plan — GV reachable re-auth: make the human's sign-in fast to reach and certain to have worked
+# Plan — GV reachable re-auth: the human fallback when auto-relogin cannot recover
 
 **Spec:** [`../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md`](../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md).
-Read it first. §1 (no password, ever), §5 (the helper) and §6 (reachability options) are what this plan builds.
-**Supersedes:** [`gv-auto-relogin.md`](gv-auto-relogin.md) (abandoned by owner decision 2026-09-25) and draft PR #88.
-**Date:** 2026-09-25. **Status:** planned, not started. Awaiting owner review of the spec's §10 decisions.
+Read it first. §5.1 (precedence: who acts when) is the heart of this plan.
+**Works beside:** [`gv-auto-relogin.md`](gv-auto-relogin.md) / PR #88, the primary path, resumed 2026-09-25 under an
+owner-written sign-in driver. **Builds on:** PR #90 (merged, `54d77ca`): `SignedOut` / `browser_signed_out`.
+**Date:** 2026-09-25 (revised the same day after owner decisions O1, O2 and O6). **Status:** planned, not started.
 
-> There is no work queue in this repo. This plan file is the handoff artefact. Whoever builds this executes the
-> tasks below in order.
+> There is no work queue in this repo. This plan file is the handoff artefact.
 
 ---
 
 ## 1. How anything gets verified
 
-**The rule, inherited from `gv-session-alarm.md` §1 and the boundary doc:** every acceptance check reads the
-**installed** artefact or an **outcome**, never a repo file and never "the component ran". Unit tests and local
-harnesses are the exception, because their subject really is the repo source, and they are marked that way.
-
-**And every check must be able to fail.** Each one below either has a negative control, or is written so that the
-**unsafe** behaviour is what the assertion catches. A check that has only ever seen the passing case is not
-evidence.
+Every acceptance check reads the **installed** artefact or an **outcome**, never a repo file and never "the
+component ran". Unit tests and local harnesses are the exception, marked as such. **Every check must be able to
+fail:** it either has a negative control, or its assertion is written so that the unsafe behaviour is what it
+catches.
 
 ### 1.1 Lanes
 
 | Lane | Where | Proves | Box? | Owner? |
 |---|---|---|---|---|
 | **O** owner | a decision, written in the PR body | — | no | yes |
-| **L** local | WSL/Linux, `deploy/tests/`, a throwaway headless Chrome plus stub HTTP servers | the helper's state machine, `gv-cdp.py`'s surface, the alarm's new track and copy | no | no |
-| **U** unit | `dotnet test` (**Windows SDK**; WSL carries no net10.0 SDK, per `gv-session-alarm.md` §7.7) | the helper↔alarm contract drift guard | no | no |
-| **D** deploy | `Deploy-ToLinux.ps1` to `radio` | installed = shipped = repo | yes | runs or approves it |
-| **B** box read-only | `ssh radio`, bounded, non-streaming (`--since` **and** `-n`; never `-f`) | installed state, the helper doing nothing on a healthy session | yes | no |
-| **A** box attended | `radio`, **owner present at the box or on the remote path being measured** | reachability, the real sign-in, the Chat thread | yes | **yes** |
+| **C** coordination | a request to the #88 builder, via the coordinator | an agreed contract | no | no |
+| **L** local | WSL/Linux, `deploy/tests/`, a throwaway headless Chrome plus stubs | the assist's state machine and precedence, the alarm's new track and copy | no | no |
+| **U** unit | `dotnet test` on the **Windows SDK** | contract drift guards | no | no |
+| **D** deploy | `Deploy-ToLinux.ps1` to `radio` | installed = shipped = repo | yes | runs or approves |
+| **B** box read-only | `ssh radio`, bounded (`--since` **and** `-n`, never `-f`) | installed state; the assist doing nothing when it should do nothing | yes | no |
+| **A** box attended | `radio`, owner present | reachability, a real sign-in, the Chat thread | yes | **yes** |
 
-### 1.2 Owner gates
+### 1.2 Decisions and gates
 
-| Gate | Blocks | Spec |
-|---|---|---|
-| **G1**: O1 (paths), O2 (auto-prepare), O6 (PR #88) decided | Task 3 onward | §10 |
-| **G2**: O4 (keyboard attached?) and O3 (RDP) answered | Task 14 (the final alarm copy) | §10 |
-| **G3**: O5 (deliberate or natural sign-out) decided, and the owner present | Task 13 | §10 |
-| **G4**: O7 (when to send the Radio Console request) | Task 15 | §10 |
+| | Decision | State | Blocks |
+|---|---|---|---|
+| O1 | reachability: **A (Exit to Desktop) + E (SSH tunnel) now, offer B to Radio Console later** | ✅ decided 2026-09-25 | — |
+| O2 | **automatic** prepare, within §5.1's precedence | ✅ decided 2026-09-25 | — |
+| O6 | PR #88 **kept**; it is the primary path | ✅ decided 2026-09-25 | — |
+| O3 | GNOME RDP in use? | open | nothing; D is not in scope unless O3 says so |
+| O4 | K400 always attached? | open | Task 13 (final copy) |
+| O5 | end-to-end on a deliberate or a natural sign-out | open | Task 12 |
+| O7 | when to send the Radio Console request | open | Task 14 |
+| O8 | handover window H while the actuator is armed | open; recommended **never** until #88's frequency is measured | Task 4's `actuator-declined` row (off by default) |
+| **G88** | #88's actuator honours the stand-down (spec §5.1) **and** triggers on `SignedOut` | requested in Task 2 | the `actuator-declined` row; Task 16 |
 
 ### 1.3 Branching
 
-The spec and this plan are preparatory, on `docs/gv-reachable-reauth`. Implementation goes on
-**`feat/gv-reachable-reauth`**, branched from `main` **after** Task 2's dependency has merged. Task 17 goes on its
-own branch, `fix/deploy-rsync-delete-exclusions`: it is independent of re-auth, and bundling it would put a deploy
-change inside a feature review.
+Preparatory docs: `docs/gv-reachable-reauth`. Implementation: **`feat/gv-reachable-reauth`** from `main`. It does
+**not** wait for #88 to merge: the assist is fully useful with the actuator absent, which is today's state. The
+contract pins (Task 8) and the race acceptance (Task 16) are placed so that whichever of the two PRs merges
+second completes them.
 
 ---
 
 ## 2. Task list
 
-### Phase 0: decisions and dependencies
+### Phase 0: record and coordinate
 
-#### Task 1: Record the owner's decisions · lane **O**
+#### Task 1: Record decisions; ask the open ones · lane **O**
 
-Present spec §10 O1–O7 to the owner in the shape the spec gives (options, recommendation, what each alternative
-gives up). Where the spec says **unknown** (O3, O4), ask an open question. Do not offer invented options.
+Write O1, O2 and O6 as decided in the implementation PR body. Ask O3, O4, O5, O7 and O8 as the spec §9 frames them.
+O3 and O4 are open questions, not option lists.
 
-**Acceptance:** each decision is written in the implementation PR's body, with the owner's words. ⛔ If O1 selects
-no path at all, stop. The helper still works, but the alarm would be telling the owner a page is ready in a window
-they cannot reach.
+**Acceptance:** each answer is recorded in the owner's words; unanswered items are listed as **open**, not
+defaulted, except O8, whose recommended default ("never") is the safe one and is recorded as the default.
 
-#### Task 2: Dependency gate: the parallel alarm fixes are on `main` · lane **B** (git) + **L**
+#### Task 2: The two asks to #88 · lane **C**
 
-`fix/alarm-thread-key-and-signedout-label` owns two fixes this work builds on (spec §8). This plan does **not**
-re-implement either.
+Through the coordinator, to the #88 builder. Neither is this work's to implement.
 
-```bash
-git fetch origin
-git merge-base --is-ancestor 4404fa1 origin/main && echo THREAD-KEY-FIX-MERGED || echo NOT-MERGED
-git log origin/main --oneline -- deploy/gv-session-alarm.sh | head -5
-```
+1. **Stand-down.** The actuator reads `~/.local/state/gv-reauth-assist.state` **as data** (whitelisted `STATE`
+   key, never sourced) and refuses an attempt while `STATE` is `PREPARED` or `SIGNED_IN_UNCONFIRMED`, journaling
+   *"a human sign-in is in progress"*. This is not a trip, and no budget is spent. It needs a harness case in #88.
+2. **Trigger.** The actuator acts on `SignedOut` (PR #90) as well as `Stale`.
+3. **FYI:** the assist takes `~/.local/state/gv-auto-relogin.lock` with `flock -n`, for seconds, on its own
+   descriptor. The assist reads (never writes) `gv-auto-relogin.state`. It relies on these names:
+   `BREAKER_STATE`, `BREAKER_REASON`, `BREAKER_REASON_TEXT`, `BREAKER_TRIPPED_AT`, `BREAKER_LAST_ATTEMPT_AT`, the
+   lock path, `~/bin/gv-auto-relogin.sh`, `gv-auto-relogin.timer`. Tell us before renaming any of them.
+4. **Open for #88:** whether `browser_signed_out` should be deferred or reworded while an armed actuator is about
+   to act (spec §5.6).
 
-**Acceptance:**
+**Acceptance:** the #88 builder's reply, naming what they checked, is linked in the PR body. **G88** is met only
+when items 1 and 2 are merged on `main` **and** a harness case in #88 exercises item 1. A reply saying "will do"
+is not G88.
 
-- `THREAD-KEY-FIX-MERGED` is printed. If the fix was squashed, the check is the presence of what it **adds**,
-  not a commit id: `grep -c` for its retirement logic in `deploy/gv-session-alarm.sh` on `origin/main` is
-  non-zero, and `repro-gv-session-alarm.sh` on `main` contains its new case.
-- The signed-out label: record, in the PR body, **what the service now reports** for a signed-out browser whose
-  only page is on `accounts.google.com`. Read it from the merged code or its tests, not from a branch name. If
-  that fix has not merged, record `Unreachable` (the spike's measurement), and Task 5's trigger table keeps its
-  `Unreachable + Chrome alive` row.
-- ⛔ If the thread-key fix has not merged, Tasks 8 and 14 do not start. They edit the same file and post into the
-  same threads.
+#### Task 3: One home for `gv-cdp.py` · lane **C** + **L**
 
----
+The tool lives on #88 at `deploy/tools/gv-cdp.py` and does not ship. The assist needs it shipped, with four more
+subcommands: `href` (the literal `window.location.href`), `new --url`, `activate --target`, `close --target`.
 
-### Phase 1: carry PR #88's survivors (spec §9)
+- If #88 has already moved it to `deploy/gv-cdp.py` and merged, add the subcommands there.
+- Otherwise, this branch carries it to `deploy/gv-cdp.py` with provenance in the commit message
+  (`carried from feat/gv-auto-relogin @ <sha>`), in an unchanged first commit, then adds the subcommands. #88
+  rebases onto that. **One file, one home**; agree which PR moves it in Task 2's thread.
+- The additions are **additive**: nothing removed that #88's driver may use.
 
-#### Task 3: `gv-cdp.py` ships, with a smaller surface · lane **L**
+**Acceptance (L), in `repro-gv-cdp.sh`:**
 
-**Depends on:** G1 (O6 = close + carry).
-
-1. Close PR #88 with a comment linking this spec's §9. **Do not delete the branch.**
-2. `git show origin/feat/gv-auto-relogin:deploy/tools/gv-cdp.py > deploy/gv-cdp.py`. Commit it unchanged first,
-   with `Carried from PR #88 (feat/gv-auto-relogin @ 0221b63)` in the message, so the diff that follows is
-   reviewable.
-3. Then change it:
-   - **remove** `eval`, `dump`, `shot`;
-   - **add** `href --target` (the literal `window.location.href`, the tool's only `Runtime.evaluate`),
-     `new --url` (`Target.createTarget`, prints the new target id), `activate --target`
-     (`Target.activateTarget`), `close --target` (`Target.closeTarget`);
-   - keep `targets`, `navigate`, the event buffer, and the `errorText` → exit 3 rule;
-   - rewrite the docstring: it now ships, it is installed to `~/bin`, and the "lives in deploy/tools on purpose"
-     paragraph is gone.
-4. Carry `deploy/tests/repro-gv-cdp.sh` the same way (unchanged commit first), then extend it.
-
-**Acceptance (L), each with a negative control:**
-
-| Check | Passes when | Negative control that must FAIL it |
-|---|---|---|
-| no secret vocabulary | `grep -ciE 'password\|passwd\|credential\|secret'` = 0 | a temp copy with `# password` appended |
-| no input | `grep -c "Input\."` = 0 | a temp copy with `Input.dispatchKeyEvent` appended |
-| one evaluate expression | every `Runtime.evaluate` in the file has `expression="window.location.href"` | a temp copy with `expression="document.cookie"` |
-| never launches a browser | `grep -cE 'Popen\|subprocess\|--user-data-dir\|launch'` = 0 | a temp copy importing `subprocess` |
-| `href` reads the target's own location, not `/json/list` | against the harness Chrome, a target navigated by an in-page `location.replace` reports the **new** URL while `/json/list` still shows the old one | — (this case is itself the control: it fails if `href` reads the cache) |
-| `new` / `activate` / `close` | the page-target count goes +1 then −1; after `activate`, the harness's **own** CDP call (not the tool's) reads `document.visibilityState` as `visible` on the activated target and `hidden` on the other | activating the *other* target flips both readings. If headless Chrome reports `visible` for both, the case is `SKIPPED-LOUDLY` and moves to Task 12 |
-
-⚠ The `/json/list`-lag case may not reproduce on a fast local Chrome. If it cannot be made to show a difference,
-the harness says `SKIPPED-LOUDLY` and exits non-zero. It does not pass silently (the repo's rule since
-2026-09-09).
-
-#### Task 4: Carry the spike record · lane **L**
-
-`git show origin/feat/gv-auto-relogin:docs/spikes/2026-09-09-gv-signin-cdp-recording.md` → same path, unchanged
-commit, then a follow-up commit adding a header: *the auto-relogin design this served was abandoned 2026-09-25;
-`2026-09-25-gv-reachable-reauth-design.md` uses rows 1, 3, 5, 8, 9 and the timings.*
-
-**Acceptance:** `git diff <carry-commit>^ <carry-commit> --stat` shows one file added and nothing else changed.
-The header commit touches only the head of the file.
+- `href` reports the target's **own** location, not `/json/list`'s cached URL. Case: an in-page
+  `location.replace`. If a fast local Chrome cannot show the lag, the case is `SKIPPED-LOUDLY` and the run is
+  non-zero.
+- `new`/`close` change the page-target count +1/−1.
+- `activate`: the harness's own CDP reading of `document.visibilityState` flips. If headless reports `visible`
+  for both, the case is `SKIPPED-LOUDLY` and moves to Task 11.
+- #88's existing static cases still pass.
 
 ---
 
-### Phase 2: the helper
+### Phase 1: the assist
 
-#### Task 5: `deploy/gv-reauth-assist.sh`, the state machine · lane **L**
+#### Task 4: `deploy/gv-reauth-assist.sh`, the state machine and the precedence · lane **L**
 
 **Depends on:** Task 3.
 
-Build the helper per spec §5.2–§5.4 and §5.7:
+Build per spec §5.1–§5.7.
 
-- `set -uo pipefail`, not `set -e`, and `LC_ALL=C.UTF-8`: the same reasons the alarm gives at `:24-39`.
-- `flock -n` on `~/.local/state/gv-reauth-assist.lock`. If the lock is held, log and exit 0: another tick is
-  mid-flight, which is the intended outcome.
-- Every URL and host is overridable by env (`GV_REAUTH_SIGNIN_URL`, `GV_REAUTH_VOICE_URL`,
-  `GV_REAUTH_VOICE_HOST`, `GV_REAUTH_SIGNIN_HOST`, `GV_REAUTH_STATUS_URL`, `GV_REAUTH_REFRESH_URL`,
-  `GV_REAUTH_CDP_PORT`), so the local harness can point it at stubs. The defaults are the real values.
-- States: `IDLE`, `PREPARED`, `SIGNED_IN_UNCONFIRMED`, `CONFIRMED`, `NOT_SIGNED_OUT`, `PREPARE_FAILED`,
-  `CONFIRM_REFUSED`, `CONFIRM_FAILED`.
-- State file `~/.local/state/gv-reauth-assist.state`: `KEY=value` lines, **no shell quoting**, one line per key,
-  values stripped of newlines and capped at 600 characters. Written atomically (`.new` + `mv`, as `write_state`
-  does in the alarm). Keys: `STATE`, `STATE_SINCE`, `PREPARED_TARGET`, `PREPARED_AT`, `LANDED_URL`,
-  `VALIDATED_BEFORE`, `VALIDATED_AFTER`, `REFRESH_HTTP`, `CONFIRM_TICKS`, `HUMAN_TEXT`, `HUMAN_ACTION`.
-- `HUMAN_TEXT` / `HUMAN_ACTION` are the only words the alarm will quote. `HUMAN_ACTION` is **≤200 characters by
-  construction**, checked in the script before writing (the gateway's 422-delivers-nothing trap, alarm spec §4.4).
-- On `CONFIRMED`: `systemctl --user start gv-session-alarm.service`, with its exit status logged. A failure to
-  start is logged loudly and does **not** undo `CONFIRMED`: the alarm's own timer still runs within 5 minutes.
-- `--status` prints the state file and what the next tick would do, **with no CDP call and no POST**. This is the
-  lane-B instrument.
-- `--print-config` has no side effects, like the alarm's.
+**Mechanics:**
+- `set -uo pipefail`; `LC_ALL=C.UTF-8`.
+- Its own `flock -n` on `~/.local/state/gv-reauth-assist.lock`, taken **first**.
+- Every URL, host, port, path and unit name is overridable by env, so the harness can point it at stubs.
 
-**Harness `deploy/tests/repro-gv-reauth-assist.sh` (L):** a headless throwaway Chrome (own temp profile, own
-port), plus a stub HTTP server with three hosts: *voice* serves an app page or 302s to *workspace*, depending on a
-flag; *signin* serves a chooser page or 302s to *voice*; and a status/refresh stub (extend
-`gv-alarm-status-stub.py`) with scriptable outcome, `validatedAt` and refresh HTTP code.
+**Precedence** (spec §5.1 table), as one function with one output line, `ACT <mode>` or `WAIT <why>`:
+- **Actuator presence:** `[ -x ~/bin/gv-auto-relogin.sh ]` and `systemctl --user is-enabled gv-auto-relogin.timer`.
+- **Breaker:** read line by line with a whitelist, decoding `printf %q` escapes **without** `eval`/`source`.
+  Missing or unreadable reads as TRIPPED, which is the breaker's own rule.
+- **`actuator-declined`:** gated on `GV_REAUTH_HANDOVER_MINUTES`, **unset by default**, so the row is off (O8), and
+  only honoured once G88 is met. That is a config flag the installer sets, not a runtime guess.
 
-**Acceptance (L). Every row is an outcome, several are negative controls:**
+**Actuator lock:** `flock -n` on `~/.local/state/gv-auto-relogin.lock` (a **different fd** from the assist's
+lock) around every CDP action and the refresh POST. If it is held, log and skip the tick.
+
+**States:** `IDLE`, `PREPARED`, `SIGNED_IN_UNCONFIRMED`, `CONFIRMED`, `NOT_SIGNED_OUT`, `PREPARE_FAILED`,
+`CONFIRM_REFUSED`, `CONFIRM_FAILED`.
+
+**State file:** `KEY=value`, no shell quoting, one key per line, values capped at 600 characters, written
+atomically. Keys: `STATE`, `STATE_SINCE`, `FALLBACK_MODE`, `PREPARED_TARGET`, `PREPARED_OPENED_BY_US`,
+`LANDED_URL`, `VALIDATED_BEFORE`, `VALIDATED_AFTER`, `REFRESH_HTTP`, `CONFIRM_TICKS`, `BREAKER_REASON_SEEN`,
+`HUMAN_TEXT`, `HUMAN_ACTION`.
+
+**Behaviour:**
+- `HUMAN_ACTION` is ≤200 characters, checked before writing.
+- On `CONFIRMED`, run `systemctl --user start gv-session-alarm.service`. A failure is logged loudly and does not
+  undo `CONFIRMED`.
+- `--status` (no CDP, no POST) and `--print-config` (no side effects).
+
+**Harness `deploy/tests/repro-gv-reauth-assist.sh` (L).**
+
+Fixtures:
+- A headless throwaway Chrome.
+- Stub hosts: *voice* (app, or a 302 to *workspace*), *signin* (chooser, or a 302 to *voice*), and status/refresh
+  (extend `gv-alarm-status-stub.py`).
+- A PATH shim for `systemctl` that records its argv and answers `is-enabled` per fixture.
+- A fixture `~/bin/gv-auto-relogin.sh`.
+- Fixture breaker state files.
+
+The cases:
 
 | Case | Setup | Must observe |
 |---|---|---|
-| R1 prepare | status `Stale`, signin → chooser | `STATE=PREPARED`; one new page target; its `href` is on the *signin* host; it is the active target |
-| R2 adopt | as R1, but a target is already on the *signin* host | no new target (count unchanged); `PREPARED_TARGET` is the existing id |
-| R3 not signed out | status `Stale`, signin → 302 → *voice* | `STATE=NOT_SIGNED_OUT`; the opened tab **closed** (count back to baseline); `HUMAN_TEXT` contains "do not re-login" and the landed URL |
-| R4 healthy | status `Succeeded`, and `GV_REAUTH_CDP_PORT` pointed at a stub listener that records every connection | **zero** connections recorded over 3 ticks: the helper must not touch a healthy browser. Negative control: the same stub with status `Stale` records ≥1, which shows the listener can see the helper |
-| R5 Chrome dead | status `Unreachable`, no process with the profile marker | `STATE=IDLE`, no CDP attempt |
-| R6 confirm | from R1, flip *signin* to 302 → *voice*; refresh 200; `validatedAt` advances | `CONFIRMED`; `VALIDATED_AFTER` > `VALIDATED_BEFORE`; `systemctl` invoked (stubbed by a PATH shim that records its argv) |
-| R7 ⛔ gate negative | as R6, but the forced navigation to *voice* 302s to *workspace* | **not** `CONFIRMED`; back to `PREPARED` next tick |
-| R8 ⛔ Google refuses | as R6, refresh 502 | `CONFIRM_REFUSED`; the 502 body quoted in `HUMAN_TEXT`; no `systemctl` call |
-| R9 ⛔ timestamp does not move | as R6, refresh 200 but `validatedAt` unchanged | **not** `CONFIRMED` |
-| R10 transient | as R6, refresh 503 ×5 | `SIGNED_IN_UNCONFIRMED` ×4 then `CONFIRM_FAILED` |
-| R11 cleared by someone else | from `PREPARED`, status flips to `Succeeded` with no sign-in by the helper | `IDLE`; the helper's tab closed; **no** `CONFIRMED_TEXT` |
-| R12 lock | two concurrent runs | exactly one does work; the other logs lock-held and exits 0 |
-| R13 action length | a planted 250-char instruction | the script refuses to write it, and logs so; the state keeps its previous `HUMAN_ACTION` |
-| R14 static | the Task 3 static checks, run over this script as well | all pass; each negative control fails them |
+| P1 absent | `SignedOut`; no actuator | `PREPARED`, `FALLBACK_MODE=actuator-absent`; one new tab on *signin*, active |
+| P2 disabled | `SignedOut`; actuator present, timer disabled | `PREPARED` (`actuator-absent`) |
+| P3 tripped | `SignedOut`; enabled; breaker `TRIPPED credential_rejected` | `PREPARED` (`breaker-tripped`); `BREAKER_REASON_SEEN=credential_rejected` |
+| P4 unreadable | `SignedOut`; enabled; breaker file garbage or missing | `PREPARED` (`breaker-tripped`) |
+| P5 ⛔ **no race** | `SignedOut`; enabled; breaker `ARMED`; no handover set | **zero** connections recorded by a stub CDP listener over 3 ticks. Negative control: P1 on the same listener records ≥1 |
+| P6 ⛔ **lock** | P1, but another process holds `gv-auto-relogin.lock` | zero CDP connections that tick; `PREPARED` on the tick after release |
+| P7 declined | `ARMED`, `GV_REAUTH_HANDOVER_MINUTES=1`, `SignedOut` for 2 minutes | `PREPARED` (`actuator-declined`). The same without the variable: P5's result |
+| P8 adopt | a target already on *signin* (the driver's leftovers) | no new tab; `PREPARED_OPENED_BY_US=0` |
+| P9 ⛔ breaker injection | breaker file with `BREAKER_REASON_TEXT=$(touch $WORK/pwned)` and `printf() { :; }` | `$WORK/pwned` absent; the text surfaces literally |
+| R1 not signed out | *signin* 302s to *voice* | `NOT_SIGNED_OUT`; tab closed; `HUMAN_TEXT` says do not re-login |
+| R2 healthy | `Succeeded` | zero CDP connections (as P5) |
+| R3 confirm | from P1, flip *signin* to *voice*; refresh 200; `validatedAt` advances | `CONFIRMED`; `systemctl start gv-session-alarm.service` recorded |
+| R4 ⛔ gate | as R3, but the forced navigation lands on *workspace* | not `CONFIRMED` |
+| R5 ⛔ refused | as R3, refresh 502 | `CONFIRM_REFUSED`; no `systemctl` |
+| R6 ⛔ timestamp | as R3, `validatedAt` unchanged | not `CONFIRMED` |
+| R7 transient | refresh 503 ×5 | `CONFIRM_FAILED` after 5 |
+| R8 recovered elsewhere | `PREPARED`, then `Succeeded` with no sign-in by the assist | `IDLE`; our tab closed; an adopted tab **not** closed |
+| R9 tripped note | R3 with the breaker `TRIPPED` | `HUMAN_TEXT` in `CONFIRMED` says auto-relogin is still stopped and quotes the reason |
+| R10 action length | a planted 250-character action | refused and logged; previous value kept |
+| R11 static | assist script: no `Input.`, no `eval`/`dump`/`shot` invocation, no `gv-account.conf`, no driver name, no password vocabulary; **no write** to the breaker file path | all pass; each negative control (the token planted in a temp copy) fails |
 
-#### Task 6: `deploy/gv-reauth-show.sh` · lane **L**
+#### Task 5: `deploy/gv-reauth-show.sh` · lane **L**
 
-The one-shot a human, or Radio Console's button (spec §6.2), runs to put the prepared tab in front. It activates
-`PREPARED_TARGET` via `gv-cdp.py activate`. It does **not** attempt a compositor-level raise; whether activation
-raises the window is exactly what Task 12 measures.
+Activates `PREPARED_TARGET`. Exit codes: 0 activated, 3 nothing prepared, 4 target gone, 5 CDP unreachable, 2
+usage. It takes the actuator lock like the assist does.
 
-Exit codes are defined **before** anyone consumes them, the lesson of `gv-bridge-ensure.sh`:
+**Acceptance (L):** one case per code, each asserting the code **and** its effect. With the assist's state file
+absent it must return 3, not 0.
 
-| Code | Meaning |
-|---|---|
-| 0 | the prepared tab exists and was activated |
-| 3 | nothing is prepared (the session is healthy, or the helper has not run) |
-| 4 | the prepared target no longer exists |
-| 5 | CDP unreachable |
-| 2 | usage error |
+#### Task 6: Units, installer, deploy wiring, drift group · lane **L**
 
-**Acceptance (L):** one harness case per code, each asserting the code **and** the observable effect (the target
-is active, or unchanged). A case that expects 0 with the helper's state file absent must get 3, not 0.
-
-#### Task 7: Units, installer, deploy wiring, drift group · lane **L**
-
-- `deploy/systemd/gv-reauth-assist.service` (`Type=oneshot`, no `Restart=`, no `EnvironmentFile=`) and
-  `.timer` (`OnUnitActiveSec=60s`, `OnBootSec=2min`).
-- `deploy/install-gv-reauth-assist.sh`, modelled on `install-gv-session-alarm.sh`: atomic install of
-  `gv-reauth-assist.sh`, `gv-reauth-show.sh` and `gv-cdp.py` into `~/bin`, units into `~/.config/systemd/user`,
-  **timer installed but not enabled unless `--enable`** (enabled in Task 13). Self-report via `--print-config`
-  at the end.
-- `Deploy-ToLinux.ps1`: ship `deploy/gv-cdp.py`. Today only `deploy/*.sh` ships (`:770`, no `-Recurse`, `.sh`
-  filter). Add a `*.py` collection with the same exit-checked `scp` and a `chmod 755`, run the new installer after
-  the alarm's (`:901`), and add `check-installed-drift.sh --group reauth` beside `:923`/`:928`.
-- `check-installed-drift.sh`: add `reauth` to the group `case` (`:64-76`).
-- ⛔ Do **not** add anything to `setup-gvbridge.sh`. It installs `gv-bridge-ensure.sh`, whose exit-code contract is
-  frozen pending Radio Console (alarm spec §8). The same reasoning as the alarm's own installer header.
+- `gv-reauth-assist.service` (`Type=oneshot`, no `Restart=`, no `EnvironmentFile=`) and `.timer` (60 s).
+- `install-gv-reauth-assist.sh` on the pattern of `install-gv-session-alarm.sh`:
+  - atomic installs into `~/bin` of the assist, the show script and `gv-cdp.py` (unless #88's installer already
+    owns `gv-cdp.py`; agree in Task 3);
+  - timer installed but **not enabled** without `--enable`;
+  - `--handover-minutes N` writes the O8 setting into the unit's drop-in, only if given.
+- `Deploy-ToLinux.ps1`: ship `deploy/*.py` (today only `*.sh` ships, `:770`); run the installer; add
+  `check-installed-drift.sh --group reauth`.
+- ⛔ Nothing is added to `setup-gvbridge.sh` (alarm spec §8).
 
 **Acceptance (L):**
-
-- `repro-installed-drift.sh` gains a `reauth` case, plus a negative control: flip one byte of the installed copy,
-  and the check reports `DIFFERS`.
-- `repro-install-atomicity.sh` pattern applied to the new installer: no window in which `~/bin/gv-reauth-assist.sh`
-  is absent or partial.
-- A dry parse of `Deploy-ToLinux.ps1` shows `gv-cdp.py` in the shipped set. The check reads the list the script
-  **builds**, not a restated copy, the same method as the carried tar-clobber cases.
+- `repro-installed-drift.sh` gains a `reauth` case; its negative control (a flipped byte) reports `DIFFERS`.
+- The atomic-install pattern holds for the new installer.
+- The script's built ship list contains `gv-cdp.py`, read from the list the script builds.
 
 ---
 
-### Phase 3: the alarm
+### Phase 2: the alarm
 
-#### Task 8: The alarm's second track and copy · lane **L**
+#### Task 7: The alarm's assist track and copy · lane **L**
 
-**Depends on:** Task 2 (thread-key fix merged), Task 5.
+**Depends on:** Task 4. PR #90 is merged, so `browser_signed_out` and the thread-key retirement are present on
+`main`.
 
 In `deploy/gv-session-alarm.sh`:
 
-1. **Read the helper's state as data.** `while IFS='=' read -r k v` over the file, whitelist of keys, first
-   occurrence wins, unknown keys ignored, values capped. **No `source`, no `eval`, no subshell `.`.** The file
-   missing means `absent`, which means the session track behaves byte-for-byte as today (spec criterion 10).
-2. **Stale alert carries the helper's words** when `STATE=PREPARED` at post time: the body gains a quoted
-   `HUMAN_TEXT` paragraph; `action` becomes `HUMAN_ACTION`. Otherwise today's action stands.
-3. **Second track**, `LAST_POSTED_ASSIST_STATE` plus the assist's `STATE_SINCE`, persisted in the alarm state
-   file. It posts on a transition into `PREPARED` (only if the alert did not already carry it), `NOT_SIGNED_OUT`,
-   `PREPARE_FAILED`, `CONFIRM_REFUSED` or `CONFIRM_FAILED`. Severity `warning`; title
-   `[rotaryphone] GV session — <what changed>`; reply into `INCIDENT_THREAD_KEY`, opening the thread root first if
-   it was not delivered (the existing `open_incident_thread` retry rule). Dedupe key
-   `rotaryphone-gv-assist-<STATE>-<INCIDENT_THREAD_KEY>`: per event, **not** per condition (spec §5.6).
-4. **RESOLVED carries `CONFIRMED_TEXT`** when the assist state is `CONFIRMED` and its `STATE_SINCE` falls within
-   the open incident. Otherwise RESOLVED is unchanged.
-5. `THIS SCRIPT DETECTS NOTHING` stays true, and the header gains one line saying the assist track quotes the
-   helper exactly as the session track quotes the service.
+1. Read the assist state **as data** (whitelist, no source/eval). If the file is absent, the session track is
+   byte-identical to today.
+2. The `browser_signed_out` and `browser_stale` alerts gain the assist's `HUMAN_TEXT`, and `action` becomes
+   `HUMAN_ACTION`, when the assist is `PREPARED` at post time.
+3. The assist track, persisted as `LAST_POSTED_ASSIST_STATE` plus `STATE_SINCE`, posts `warning` replies on a
+   transition into `PREPARED` (unless the alert already carried it), `NOT_SIGNED_OUT`, `PREPARE_FAILED`,
+   `CONFIRM_REFUSED` and `CONFIRM_FAILED`.
+   - Title: `[rotaryphone] GV session — <what changed>`.
+   - Replies go under `INCIDENT_THREAD_KEY`, with the root re-attempted first if needed.
+   - Dedupe key: `rotaryphone-gv-assist-<STATE>-<INCIDENT_THREAD_KEY>`.
+4. RESOLVED gains `CONFIRMED_TEXT` when the assist was `CONFIRMED` within the open incident.
+5. Independent of #88's `relogin_unavailable` track if that has merged. Neither track reads the other's variables.
 
-**Acceptance (L), in `repro-gv-session-alarm.sh`:**
+**Acceptance (L), in `repro-gv-session-alarm.sh`:** each case reads the gateway stub's received payloads.
 
-| Case | Must observe (read from the gateway stub's received payloads, not the alarm's log) |
+| Case | Must observe |
 |---|---|
-| A1 absent | every pre-existing case passes **unchanged**. Run the old file against the new script; zero diffs in received payloads |
-| A2 prepared-before-alert | one alert; `action` == the planted `HUMAN_ACTION`; body contains `HUMAN_TEXT` |
-| A3 prepared-after-alert | alert (old action), then **one** `warning` reply with the new action, same `thread_key` |
-| A4 no repeat | A3 then two more polls: no further posts |
-| A5 ⛔ injection | a state file with `HUMAN_TEXT=$(touch /tmp/pwned)` and a line `printf() { :; }`: the file `/tmp/pwned` is **not** created, and the text is delivered **literally** |
-| A6 not-signed-out | `warning` reply whose action says not to re-login |
-| A7 resolved with proof | `CONFIRMED` then status `Succeeded`: RESOLVED in the incident thread, body contains `CONFIRMED_TEXT` |
-| A8 ⛔ resolved without proof | status `Succeeded`, assist `IDLE`: RESOLVED has **no** `CONFIRMED_TEXT` |
-| A9 ⛔ track independence | assist stuck in `PREPARE_FAILED`, then the session goes `Stale` → `Unreachable`: **each** session transition still posts (relogin plan §0.9's failure, reproduced as a negative) |
-| A10 422 | gateway stub answers 422 on the assist reply: heartbeat **not** refreshed, exit 1 |
+| A1 absent | every existing case (including PR #90's) passes unchanged |
+| A2 prepared-before-alert | one `browser_signed_out` alert, `action` == the planted `HUMAN_ACTION` |
+| A3 prepared-after-alert | alert, then one `warning` reply, same `thread_key` |
+| A4 no repeat | no further posts over two more polls |
+| A5 ⛔ injection | the `$(…)`/`printf()` state file creates nothing and is delivered literally |
+| A6 resolved with proof | RESOLVED contains `CONFIRMED_TEXT`, in the incident thread |
+| A7 ⛔ resolved without proof | assist `IDLE`, status `Succeeded`: RESOLVED has no `CONFIRMED_TEXT` |
+| A8 ⛔ independence | assist stuck in `PREPARE_FAILED`; session transitions still post. If #88's track is present, a breaker trip still posts too |
+| A9 422 | a refused assist reply means no heartbeat and exit 1 |
 
-#### Task 9: The helper↔alarm contract drift guard · lane **U**
 
-In `src/RotaryPhoneController.GVBridge.Tests/Alarm/`, beside `AlarmCopyDriftTests.cs`: read both scripts from the
-repo (as that test does) and assert that the state-file default path literal and every whitelisted key name
-appear in both. Plus the mirror `deploy/tests/check-alarm-copy-drift.sh` case, so it also runs in lane L.
+#### Task 8: Contract drift guards · lane **U** + **L**
 
-**Acceptance (U):** passes on the Windows SDK. Negative control: renaming one key in a temp copy of the helper
-makes the test fail, which shows the test reads the helper rather than a restated list.
+Beside `AlarmCopyDriftTests.cs`:
+
+- **assist ↔ alarm:** the state-file path and every whitelisted key appear in both scripts.
+- **assist ↔ #88:** `BREAKER_*` field names, the breaker state path, the lock path, `gv-auto-relogin.sh` and
+  `gv-auto-relogin.timer` appear in both the assist and #88's breaker/actuator.
+  - ⛔ **This half is added by whichever PR merges second.** If this work merges first, the Task 2 request asks
+    #88 to add it. If #88 merges first, it is added here. It must not be written against a file that is not on
+    `main`: a test that passes because its subject is absent cannot fail.
+- **#88 → assist:** #88's stand-down reads the assist state path and `STATE` values; pinned the same way.
+
+**Acceptance (U):** passes on the Windows SDK. Negative control: renaming one field in a temp copy fails the test.
 
 ---
 
-### Phase 4: on the box
+### Phase 3: on the box
 
-#### Task 10: Deploy; installed, not enabled · lane **D** then **B**
-
-**Depends on:** Tasks 3–9 merged to `main` (via the PR), and a normal deploy.
-
-**Acceptance (B), each reading the installed state:**
+#### Task 9: Deploy; installed, not enabled · lane **D** then **B**
 
 ```bash
 bash /opt/rotary-phone/deploy/check-installed-drift.sh --group reauth --ship-dir /opt/rotary-phone/deploy
 bash /opt/rotary-phone/deploy/check-installed-drift.sh --group alarm  --ship-dir /opt/rotary-phone/deploy
-systemctl --user list-unit-files 'gv-reauth-assist.*'      # installed
-systemctl --user list-timers 'gv-reauth-assist.*'          # EMPTY: not enabled yet, by design
-~/bin/gv-reauth-assist.sh --print-config
-~/bin/gv-reauth-assist.sh --status                          # IDLE on a healthy session
-grep -c 'assist' ~/bin/gv-session-alarm.sh                  # non-zero: the NEW alarm is installed (presence of what the fix ADDS)
+systemctl --user list-unit-files 'gv-reauth-assist.*'
+systemctl --user list-timers 'gv-reauth-assist.*'     # empty: not enabled yet
+~/bin/gv-reauth-assist.sh --status
 ```
 
-- Both drift groups report `N/N installed files match`.
-- `--status` prints `STATE=IDLE` (or "no state file") and "next tick: nothing" while `browserRefreshOutcome` is
-  `Succeeded`.
-- ⛔ The alarm is still delivering: its next timer run journals `heartbeat refreshed`
-  (`journalctl --user -u gv-session-alarm --since -10min -n 20`). A deploy that silences the alarm fails this task.
+**Acceptance (B):**
+- Both drift groups match.
+- `--status` reports its precedence verdict. Today the actuator is not installed, so expect `ACT actuator-absent`
+  if signed out and `nothing` if healthy; the verdict must match the live `browserRefreshOutcome`.
+- The alarm journals `heartbeat refreshed` within 10 minutes (`--since -10min -n 20`).
 
-#### Task 11: Enable, and prove it leaves a healthy browser alone · lane **B**
+#### Task 10: Enable; prove it leaves a healthy browser alone · lane **B**
 
-`bash /opt/rotary-phone/deploy/install-gv-reauth-assist.sh --enable`, then observe for **30 minutes**:
+`install-gv-reauth-assist.sh --enable`, then 30 minutes of observation.
 
 **Acceptance (B):**
+- The page-target count, sampled every 5 minutes, **never changes**.
+- Every tick journals "nothing to do".
+- Any tab opened on a healthy session is a failure.
 
-- `list-timers` shows NEXT within 60 s.
-- The page-target count from `curl -s 127.0.0.1:9224/json/list | jq '[.[]|select(.type=="page")]|length'`,
-  sampled every 5 minutes, **never changes**.
-- The helper's journal (`--since -30min -n 60`) shows ticks, and every one ends in "nothing to do".
-- ⛔ This is the outcome that matters most on a box shared with a guest-facing kiosk: **a healthy session produces
-  zero browser actions.** Any tab opened in this window is a failure, not a curiosity.
+#### Task 11: Attended measurements · lane **A** · owner present · no sign-out needed
 
-#### Task 12: Attended measurements · lane **A** · owner present
+Record the page-target baseline first; it must be the same at the end.
 
-**Depends on:** Task 11, G1. Everything here is reversible and needs **no sign-out**. Every page opened is closed
-before the task ends, and the page-target count returns to its baseline (recorded first).
+| # | Measure | Records |
+|---|---|---|
+| M1 | `ServiceLogin` while **signed in**: `new`, `href`, `close` | the landing URL. If it is not `voice.google.com/…`, spec §5.3's `NOT_SIGNED_OUT` row changes before Task 12 |
+| M2 | with M1's tab open, POST `refresh-from-browser` | 200 and `validatedAt` moved. Otherwise the new-tab rule is unsafe: stop |
+| M3 | **path A**: a neutral tab `data:text/html,<input autofocus>`, activated; the owner taps Exit to Desktop | window visible without further action? The owner types on the K400? Seconds for `Radio Console` to return? Did music continue? |
+| M4 | **path E**: from a laptop, `ssh -L 9224:…`, `chrome://inspect`, type into the neutral tab | the text read back via a one-off CDP HTTP call, not via the shipped tool |
+| M5 | `gv-reauth-show.sh` over the running kiosk (C, and B's mechanism) | ⛔ only if the owner OKs covering the kiosk for seconds and Radio Console has not objected. Result photographed by the owner |
+| M6 | D (RDP), only if O3 says it is used | yes/no |
 
-| # | Measure | How | Records |
-|---|---|---|---|
-| M1 | `ServiceLogin` landing while **signed in** (spec §5.3's inferred row) | `gv-cdp.py new --url <ServiceLogin…>`, then `href` after load, then `close` | the landed URL. If it is **not** `voice.google.com/…`, the helper's `NOT_SIGNED_OUT` row is wrong and Task 5 changes before Task 13 |
-| M2 | an extra tab does not disturb the service | with M1's tab open, `POST refresh-from-browser` | HTTP code, and `validatedAt` moved. A non-200 here means the new-tab rule (spec §5.2) is unsafe; stop |
-| M3 | **path A**: Exit to Desktop reveals the bridge window | open a neutral tab `data:text/html,<input autofocus placeholder=type-here>`, `activate` it; owner taps Exit to Desktop | is the bridge window visible without further action (yes / needs the overview / not found)? Can the owner type into the field on the K400? Seconds for `Radio Console` to bring the kiosk back |
-| M4 | **path E**: DevTools over SSH | owner's laptop: `ssh -L 9224:127.0.0.1:9224 radio`, `chrome://inspect`, inspect the neutral tab, type into the field through the screencast | typed text readable back from the tab (the **one** permitted exception to "never read a field": the neutral page is ours and holds no secret. Read it with a one-off `curl` to the CDP HTTP endpoint, not by adding `eval` back to the shipped tool) |
-| M5 | `gv-reauth-show.sh` over the running kiosk (**path C**, and the mechanism behind **B**) | ⛔ **only if the owner OKs covering the kiosk for a few seconds, and Radio Console has not objected** (see the handoff). Run it with the neutral tab prepared | does the bridge window come to the front (yes / a "ready" notification / nothing)? Screenshot the display with the owner's phone, not with a tool on the box |
-| M6 | **path D**, only if O3 says RDP is in use | owner connects, reaches the neutral tab | yes/no; steps needed |
+**Acceptance (A):** results in §4, each **observed by the owner**. A path marked "no" or "not measured" is not
+named in the copy.
 
-**Acceptance (A):** a results table appended to this plan (§4 below), one row per measurement, **each row
-recorded by the owner's observation**, and the page-target count back at baseline afterwards. A path with "no" or
-"not measured" is not named in the alarm copy (spec criterion 8).
+#### Task 12: End to end, fallback mode · lane **A** · O5
 
-#### Task 13: End to end on a real sign-out · lane **A** · G3
+Run with the actuator **absent or its timer disabled** (O5), so the run tests the fallback and not #88.
+Deliberate sign-out or a natural one, per O5.
 
-Per O5: either the owner signs out deliberately (relogin plan §0.4's blast radius, stated to the owner before
-starting: the phone keeps working, and the re-derivation floor is lost until the sign-in), or this task waits for a
-natural one.
+**Acceptance (A), each observed by the owner:**
 
-**Acceptance (A), each observed by the owner or read from the service:**
+1. The assist is `PREPARED` within 2 minutes of `SignedOut`, and the tab's own `href` is on the sign-in host.
+2. The thread shows the `browser_signed_out` alert (plus a `warning` if needed) whose action names only the
+   measured paths.
+3. The owner signs in; nothing of ours sees the password.
+4. RESOLVED with `CONFIRMED_TEXT` appears **within 3 minutes**, and `validatedAt` is after the sign-in.
+   ⛔ A later cron-driven `Succeeded` is not a pass.
 
-1. Within 2 minutes of the service reporting the failure, `gv-cdp.py href --target <PREPARED_TARGET>` is on an
-   `accounts.google.com` sign-in path (spec criterion 1).
-2. The incident thread shows the alert, or alert plus `warning`, with the action text naming only the measured
-   path(s) (criterion 6). **The owner reads it in Chat.**
-3. The owner signs in using the named path, typing the password into Google's page. Nothing of ours sees it.
-4. **Within 3 minutes of the sign-in settling**, the thread shows RESOLVED with `CONFIRMED_TEXT`. `GET /status`
-   shows `Succeeded` with `browserSessionValidatedAt` after the sign-in time the owner noted (criterion 5).
-5. Also record what the service reported **between** sign-out and sign-in, with the timestamps. This measures the
-   label question spec §5.2/§8 left open, now with the new-tab rule in place.
+#### Task 13: Final copy from the measurements · lane **L** · O4
 
-⛔ If step 4 fails, **do not** treat a later cron-driven `Succeeded` as a pass. That is spec §6 of the alarm arc
-(verifying that something ran and inferring that it worked), and it is the failure this whole design exists to
-remove.
+`HUMAN_ACTION`/`HUMAN_TEXT` name exactly the paths with a Task 11 "yes". If O4 says the keyboard is not always
+attached, add "you will need a keyboard".
 
-#### Task 14: Final alarm copy from the measurements · lane **L** · G2
-
-**Depends on:** Task 12, O3, O4. Set the helper's `HUMAN_ACTION` / `HUMAN_TEXT` for `PREPARED` to name exactly the
-paths Task 12 recorded as working, in the order the owner prefers. If O4 says the keyboard is not always present,
-add Radio Console's truthful line: you will need a keyboard. Re-run R13 and A2.
-
-**Acceptance (L):** the harness asserts the shipped `HUMAN_ACTION` string is ≤200 characters and contains no path
-whose Task 12 row is not "yes". Implement this as a small table in the harness the owner can read, not as a
-regex.
+**Acceptance (L):** a readable table in the harness maps each path to its Task 11 result. The shipped action is
+≤200 characters and names no path whose result is not "yes".
 
 ---
 
-### Phase 5: across the boundary, and the docs
+### Phase 4: the boundary, the docs, and the race on the box
 
-#### Task 15: Deliver the Radio Console request · lane **O** · G4
+#### Task 14: Deliver the Radio Console request · lane **O** · O7
 
-**Depends on:** Task 12 (so item 2 carries data). Finalise `docs/prompts/2026-09-25-rotaryphone-reauth-window-request.md`
-with the M3/M5 results. Commit and push, then write it into `D:\prj\RTest\RTest\docs\queue\inbound\` (boundary
-doc, "Cross-repo traffic": deliver into the recipient's lane from committed, pushed state, and name the files in
-the message). Add the Change Log row to `RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md` **before** Task 14's copy naming
-`Exit to Desktop` ships.
+After Task 11. Finalise the draft with M3/M5 data, commit, push, and write it into
+`D:\prj\RTest\RTest\docs\queue\inbound\`. Add the boundary-doc Change Log row **before** Task 13's copy naming
+their buttons ships.
 
-**Acceptance:** the file in their lane is byte-identical to the pushed commit (`sha256sum` both). Their
-acknowledgement, naming what they checked, is recorded in the Change Log row. An unacknowledged request is
-recorded as **unacknowledged**, not as agreed.
+**Acceptance:** the lane copy's `sha256sum` matches the pushed file. Their acknowledgement, naming what they
+checked, is recorded. An unacknowledged request is recorded as such.
 
-#### Task 16: Runbook and doc corrections · lane **L**
+#### Task 15: Runbook and doc corrections · lane **L**
 
-- `docs/SETUP-GVBridge.md`: a "When the GV session signs out" section describing what the owner will see in Chat,
-  the measured paths, and `gv-reauth-show.sh`; plus a note that `gv-account.conf` does **not** exist and must not
-  be created.
-- `docs/SETUP-AND-TESTING.md:145`: `ssh radio "wmctrl -a Chrome"` is wrong twice over: `wmctrl` is not installed,
-  and both Chromes are native Wayland, which X11 tools cannot see (spec §3). Replace it with the measured path.
-- `docs/KNOWN-ISSUES.md`: an entry recording the new flow and its known limits.
+- `SETUP-GVBridge.md`: "When the GV session signs out". Auto-relogin is tried first when it is installed. What
+  the Chat thread says when a human is needed and why (`FALLBACK_MODE`). The measured paths.
+  `gv-reauth-show.sh`. That a human sign-in does **not** re-arm the breaker.
+- `SETUP-AND-TESTING.md:145`: replace `wmctrl -a Chrome`, which is absent and blind to Wayland windows.
+- `KNOWN-ISSUES.md`: an entry for the flow and its limits.
 
-**Acceptance:** `grep -n "wmctrl" docs/` returns only lines that explain why it does not work. Each runbook step
-names a path with a Task 12 "yes".
+**Acceptance:** `grep -n wmctrl docs/` returns only explanatory lines. Every runbook path has a Task 11 "yes".
 
-#### Task 17: Carried from PR #88: the rsync `--delete` hazard · lane **L** · separate branch, separate PR
+#### Task 16: Race acceptance with the actuator installed · lane **B** + **A** · after G88 and #88's install
 
-Not a dependency of re-auth. Carried so PR #88's finding is not lost when it closes (spec §9).
+**Depends on:** G88; #88 deployed and enabled (#88 plan Task 16/17).
 
-1. **Re-derive the list; do not copy it.** On the box (lane B), list `/opt/rotary-phone` top level. Locally, list
-   the publish output. Every box entry absent from the publish output is a deletion target under
-   `rsync --delete`. PR #88 listed `refresh-gv-cookies.sh`, `mute-gv-browser.py`, `scripts/`,
-   `ChromeExtension/` and `*.bak*`. Confirm each; in particular, check how `ChromeExtension/` gets there
-   (`Deploy-ToLinux.ps1:757` reads from it).
-2. Add rsync exclusions for the confirmed entries.
-3. Carry PR #88's `repro-tar-clobber.sh` E/F **method** (exclusions read from the shipped `.ps1`, contents asserted
-   after transfer, negative control with the exclusion removed), retargeted at `refresh-gv-cookies.sh`.
-
-**Acceptance (L):** `F` passes (the cron script survives `rsync --delete` with the shipped exclusions), **and**
-`F-neg` shows it deleted without them. Without `rsync` installed the harness says `SKIPPED-LOUDLY` and fails.
+**Acceptance:**
+1. **(B) Armed and healthy:** over 30 minutes, the page-target count is unchanged and the assist's `--status` says
+   `WAIT` or nothing.
+2. **(A) #88's forced-failure run** (#88 plan Task 17, wrong-credential or challenge case) leaves the breaker
+   `TRIPPED`. Within 2 minutes the assist is `PREPARED` in `breaker-tripped` mode, having **adopted** the driver's
+   sign-in tab if one was left up. The thread shows #88's `relogin_unavailable` alert **and** the assist's
+   "sign-in page ready", in the same incident thread.
+3. **(A) Stand-down:** with the assist `PREPARED`, the owner runs `gv-auto-relogin.sh --reset`. On the actuator's
+   next tick its journal shows *"a human sign-in is in progress"*, and its budget counters are unchanged
+   (`--status` before and after).
+4. **(A)** The owner signs in. RESOLVED carries `CONFIRMED_TEXT` and states the breaker's current state.
 
 ---
 
-## 3. What is deliberately not in this plan
+## 3. Deliberately not in this plan
 
-| Not here | Where it lives |
+| Not here | Where |
 |---|---|
-| The thread-key fix and the signed-out label | `fix/alarm-thread-key-and-signedout-label` (Task 2 waits for it) |
-| `gv-bridge-ensure.sh` exit codes, and installing its newer copy | alarm spec §8, §11 decision 4; open with Radio Console |
-| Any change on Radio Console's side | their decision, after Task 15 |
-| Closing leftover signed-out tabs the helper did not open | deferred (spec §5.7) |
-| A `WARN` threshold on `browserSessionAgeSeconds` | alarm spec §11 decision 3; still needs a measured baseline |
+| The sign-in driver, breaker, actuator, credential file, `relogin_unavailable` track | PR #88 |
+| The rsync `--delete` hazard to `/opt/rotary-phone` files | recorded on #88 at the edit site (`c1749f5`) |
+| `browser_signed_out` timing and wording while an armed actuator is about to act | open for #88 (Task 2, item 4) |
+| `gv-bridge-ensure.sh` exit codes | alarm spec §8; open with Radio Console |
+| Closing leftover tabs the assist did not open | deferred (spec §5.7) |
 
 ---
 
-## 4. Measurement results (filled in by Task 12)
+## 4. Measurement results (filled in by Task 11)
 
 | # | Result | Observed by | Date |
 |---|---|---|---|

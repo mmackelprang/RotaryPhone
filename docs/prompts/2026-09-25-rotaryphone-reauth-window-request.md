@@ -4,7 +4,7 @@
 - **From:** RotaryPhone session (`D:\prj\RotaryPhone`), Planner
 - **Status: ⛔ DRAFT. NOT DELIVERED.** This file is not in Radio Console's `docs/queue/inbound/` and must not be
   copied there until the RotaryPhone owner approves it. Per the plan, that is after the attended measurement
-  (`docs/plans/gv-reachable-reauth.md` Task 12), so item 2 carries data rather than a guess. Delivery follows the
+  (`docs/plans/gv-reachable-reauth.md` Task 11), so item 2 carries data rather than a guess. Delivery follows the
   boundary doc's "Cross-repo traffic" rule: committed, pushed state, written into your lane, with the file named
   in the message.
 - **Design:** `docs/superpowers/specs/2026-09-25-gv-reachable-reauth-design.md` (§6 options, §7 this request).
@@ -16,11 +16,12 @@
 
 ## 0. What changed on our side, in one paragraph
 
-Our owner has **abandoned automated Google sign-in** (the auto-relogin work, our draft PR #88). Nothing on the box
-will store, read, type or submit a Google password. Instead, when the GV bridge's Google session signs out, a small
-RotaryPhone helper opens the Google **account chooser in a new tab of the bridge Chrome** (our profile, our CDP
-port 9224, nothing of yours), watches for the human to finish, verifies the new session against Google, and
-closes the incident in our Chat thread. The remaining problem is the one you designed around in
+When the GV bridge's Google session signs out, RotaryPhone first tries **auto-relogin** (our PR #88, an
+owner-written sign-in driver under a circuit breaker; bridge profile and CDP port 9224 only, nothing of yours).
+When that cannot recover (the breaker has stopped it, or it is not installed), a small **human-fallback** helper
+opens the Google **account chooser in a new tab of the bridge Chrome**, waits for a human to sign in, verifies the
+new session against Google, and closes the incident in our Chat thread. The helper never types or handles a
+password. The remaining problem is the one you designed around in
 `HANDOFF-kiosk-desktop-launcher.md` §6.5: **the bridge window is behind your fullscreen kiosk.** That is the
 subject of this request.
 
@@ -49,7 +50,7 @@ affordance used exactly as designed; we change none of your code.
 **Ask:** tell us before renaming or removing either desktop entry, so our copy does not point at a button that is
 gone. We will add a boundary-doc Change Log row before the copy ships.
 
-### Item 2 (request, your decision): enable `Show the sign-in`, pointed at our script
+### Item 2 (request, your decision, for later): enable `Show the sign-in`, pointed at our script
 
 Your dialog is the best at-the-box experience available: it already has the right copy (including the honest
 "you'll need a keyboard" line), and it runs from `radio-console-open`, which is **before** the kiosk is in front.
@@ -75,13 +76,13 @@ Two things change once our helper exists:
 `GV_RAISE_SUPPORTED` based on our measurement below. It is your code, your dialog and your call. Nothing on our
 side depends on it; our owner has an at-the-box path (item 1) and a remote path without it.
 
-**The measurement we will supply** (our plan, Task 12 M5, owner present): whether activating the prepared tab
+**The measurement we will supply** (our plan, Task 11 M5, owner present): whether activating the prepared tab
 brings the bridge window to the front on this box, and whether it does so when the kiosk is (a) not running, as in
 your dialog's case, and (b) running fullscreen. ⚠ Case (b) briefly covers your kiosk with our window, with our
 owner watching. **If you object to us running case (b) at all, say so and we will skip it.** Case (a) needs your
 kiosk closed, which our owner does with your Exit to Desktop.
 
-_Result: to be filled in from Task 12 before delivery._
+_Result: to be filled in from Task 11 before delivery._
 
 ### Item 3 (FYI, conditional): GNOME Remote Desktop
 
