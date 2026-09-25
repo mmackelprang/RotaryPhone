@@ -164,6 +164,26 @@ public class GVApiAdapterSignedOutTests
     }
 
     [Fact]
+    public async Task ARung3Extraction_BreaksTheCronsHalfCountedUnreachableStreak()
+    {
+        // Pre-merge re-review LOW-1 (2026-09-25): cron fault (streak 1, not recorded) -> rung 3 reaches
+        // Chrome and records Stale -> cron fault again. Two faults, but not CONSECUTIVE observations, so the
+        // second must not pair with the first and overwrite rung 3's Stale with Unreachable.
+        var gone = CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "refused");
+        var adapter = AdapterWith(new FakeCdpExtractor(new CdpExtractionResult(
+            CdpExtractionStatus.Success, GVApiAdapterRecoveryTests.NewCookies("SAPISID-CHROME"), 20, null)));
+        adapter.HealthProbeOverride = _ => Task.FromResult(false);   // Google refuses -> rung 3 records Stale
+
+        adapter.RecordFailedBrowserExtraction(gone, "cron", debounceUnreachable: true);
+        await (Task<bool>)GVApiAdapterRecoveryTests.Invoke(adapter, "TryCdpRefreshAsync")!;
+        Assert.Equal("Stale", adapter.BrowserRefreshOutcomeName);
+
+        adapter.RecordFailedBrowserExtraction(gone, "cron", debounceUnreachable: true);
+
+        Assert.Equal("Stale", adapter.BrowserRefreshOutcomeName);
+    }
+
+    [Fact]
     public async Task ChromeTrulyUnreachable_IsStillUnreachable()
     {
         var adapter = await RefreshWith(new FakeCdpExtractor(

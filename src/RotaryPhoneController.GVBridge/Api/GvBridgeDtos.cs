@@ -101,7 +101,10 @@ public record SetCookiesRequest(
 /// All parameters are optional with sensible defaults.
 /// </summary>
 public record RefreshFromBrowserRequest(
-  int CdpPort = 9224,
+  // Nullable so an omitted port (the cron posts "{}") falls back to GVBridgeConfig.ChromeCdpPort. A
+  // hard-coded 9224 here silently ignored the config, and would make the endpoint stop recording
+  // browserRefreshOutcome (it records only for the configured bridge Chrome) the day the config moved.
+  int? CdpPort = null,
   string? TargetUrl = null);
 
 /// <summary>
