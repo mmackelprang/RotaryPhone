@@ -119,6 +119,7 @@ the 20-minute cron or the recovery ladder attempts a refresh. We are not catchin
 | `Succeeded` after an open alert | `RESOLVED` | `info` | closes the incident thread |
 | `Stale` | `ACTION` | `alert` | signed out — re-login needed |
 | `Unreachable` | `ACTION` | `alert` | **Chrome is gone — the case the boolean reports as `false`** |
+| `SignedOut` (added 2026-09-25) | `ACTION` | `alert` | Chrome is up but signed out of Google — **a human must sign in**; do not restart Chrome. Reported as `Unreachable` before 2026-09-25, which sent the owner to the wrong fix |
 | `NotAttempted`, persistent | `WARN` | `warning` | no extractor/store wired |
 | `Succeeded` but age > threshold | `WARN` | `warning` | aging — act before it dies |
 | service not answering at all | `ACTION` | `alert` | the case in-process detection structurally cannot report |
@@ -163,6 +164,21 @@ move past.
 - Every update is a reply opening with its own UTC timestamp.
 - The `RESOLVED` replies **into that thread**.
 - The thread key is persisted in the state file so it survives reboots and service restarts.
+- **An incident that recovers with nothing delivered is retired silently** (added 2026-09-25).
+  If neither the thread root nor any alert reached the gateway, the owner saw nothing, so there
+  is nothing to close: no `RESOLVED` is posted (it would root a new thread with an all-clear for
+  an alarm nobody raised), the retirement is journaled, and the key is cleared so the next
+  incident opens its own thread. If *anything* was delivered — the root, or an alert whose root
+  was refused — the `RESOLVED` is posted under that key as usual. **"Nothing delivered" must be
+  proven:** only a refused connection or a non-2xx reply counts. A timeout (curl 28) or a dropped
+  reply may have delivered, so it is treated as delivered — the worst case is one quiet
+  `RESOLVED`, versus an alert the owner saw that is never closed.
+- **A `RESOLVED` is never the first message in its thread.** If the thread's root was never
+  confirmed delivered, the root is re-posted before the `RESOLVED` (its dedupe key embeds the
+  incident key, so a root that did land collapses). If the root is still refused, the `RESOLVED`
+  is withheld and retried next cycle. Measured cause: a key minted
+  during a 2026-09-20 gateway outage survived its recovery and was reused by an unrelated
+  incident five days later.
 
 ### 4.6 Title
 
