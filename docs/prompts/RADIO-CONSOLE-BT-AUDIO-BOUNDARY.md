@@ -205,6 +205,14 @@ its name, position, type and meaning. Bind a *stale-login* indicator to the bool
 but bind anything that means *"the browser session is not usable"* to `browserRefreshOutcome`, and treat an
 **unrecognised** string as a fault rather than as healthy: a future enum member must not read as green.
 
+⚠️ **Update cadence (changed 2026-09-25, no shape change).** `browserRefreshOutcome` used to move only when the
+phone's own auth failed (recovery rung 3) or when cookies were extracted. It now also moves when the
+20-minute `POST cookies/refresh-from-browser` cron **fails to extract**: `SignedOut` is recorded on the first
+such observation, `Unreachable` only on the **second consecutive** one (so a single transient CDP fault does
+not flip it). A browser-only sign-out therefore surfaces within ≤20 minutes, even while the phone's own
+credentials still work. Consumers should read `SignedOut`/`Unreachable` as *"the box's Chrome is not
+usable"*, not as *"calls are down"* — `cookiesValid`, `authBlackout` and `sipRegistered` say the latter.
+
 ⚠️ **`psidtsMintedAtUtc` can be `null`, and `null` is NOT healthy.** It means the mint time is genuinely
 unknown — a cookie file written before the field existed, a hand-pasted set, or one extracted from Chrome
 (whose jar carries no readable issue time). **Never render it as "fresh" and never coerce it to `0`.**
