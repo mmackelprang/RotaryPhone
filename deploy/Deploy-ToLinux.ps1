@@ -615,13 +615,15 @@ if (-not $synced) {
     #     tighten every FILE mode the extract writes, which is a permissions change on
     #     a production box and belongs to the owner, not to this PR. Tracked in the
     #     plan's follow-ups.
-    # --exclude=./gv-account.conf defends the box's Google account file against an
+    # --exclude=gv-account.conf defends the box's Google account file against an
     # OVERWRITE (the rsync branch's --exclude defends it against a DELETION; see the
     # comment there). The publish output never contains it, so today this is belt and
     # braces -- it exists so that a stray copy in the publish tree can never be shipped
     # over the owner's file, or off the workstation. docs/plans/gv-auto-relogin.md §0.2.
+    # UNANCHORED on purpose (no ./), matching the rsync exclusion, which also covers a
+    # copy at any depth; an anchored one would still ship a nested stray copy.
     "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
-      " tar --null --exclude=./appsettings.Production.json --exclude=./gv-account.conf -czf - -T - |" +
+      " tar --null --exclude=./appsettings.Production.json --exclude=gv-account.conf -czf - -T - |" +
       # `set -e` in the REMOTE shell. Without it the compound's status is the LAST
       # command's -- chmod's -- so a failed tar reported 0. The remote shell does not
       # inherit the local `set -e -o pipefail` above: that one governs this script,

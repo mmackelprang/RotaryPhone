@@ -75,7 +75,7 @@ build_fixture() {
 # extraction prints "tar: .: Cannot unlink: Invalid argument" and exits 2.
 build_fixed_archive() {
     ( cd "$WORK/src" && find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 \
-        | tar --null --exclude=./appsettings.Production.json --exclude=./gv-account.conf -czf "$WORK/fixed.tgz" -T - )
+        | tar --null --exclude=./appsettings.Production.json --exclude=gv-account.conf -czf "$WORK/fixed.tgz" -T - )
 }
 
 echo "=== Case A: the chain exactly as the PRE-FIX code built it ==="
@@ -286,8 +286,8 @@ rsync_flags() { # rsync_flags [VALUE-TO-OMIT] -> prints one argv element per lin
 }
 echo "E/F: shipped tar excludes:   ${TAR_EXCLUDES[*]:-NONE FOUND}"
 echo "E/F: shipped rsync excludes: ${RSYNC_VALUES[*]:-NONE FOUND}"
-printf '%s\n' "${TAR_EXCLUDES[@]}" | grep -qx -- '--exclude=./gv-account.conf'
-check "E0-tar" $? "(the shipped tar line excludes ./gv-account.conf)"
+printf '%s\n' "${TAR_EXCLUDES[@]}" | grep -qx -- '--exclude=gv-account.conf'
+check "E0-tar" $? "(the shipped tar line excludes gv-account.conf at any depth)"
 printf '%s\n' "${RSYNC_VALUES[@]}" | grep -qx 'gv-account.conf'
 check "E0-rsync" $? "(the shipped rsync command excludes gv-account.conf)"
 
@@ -298,6 +298,8 @@ echo "$SECRET" > "$WORK/dst/gv-account.conf"; chmod 600 "$WORK/dst/gv-account.co
 # A stray copy IN THE PUBLISH TREE -- the thing the tar exclusion exists for. Without
 # it the case could not tell an exclusion from an absence.
 echo 'STRAY-TEMPLATE' > "$WORK/src/gv-account.conf"
+# ...and one nested, which an anchored ./gv-account.conf would still have shipped.
+echo 'STRAY-NESTED' > "$WORK/src/wwwroot/gv-account.conf"
 ( cd "$WORK/src" && find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 \
     | tar --null "${TAR_EXCLUDES[@]}" -czf "$WORK/e.tgz" -T - )
 e_member="$(tar -tzf "$WORK/e.tgz" | grep -c 'gv-account.conf')"

@@ -2490,3 +2490,42 @@ $ journalctl --user -u gv-session-alarm --since -30min | grep -E 'heartbeat refr
 
 ⛔ So Task 2 is recorded as **passing on the owner's confirmation**, with the owner aware that the one proven
 delivery path to date is the dead-man, not the alarm's own notify.
+
+### 7.3 What this branch built (2026-09-25), and what it did not
+
+| Task | State | Evidence |
+|---|---|---|
+| 3 | built | `deploy/tests/repro-gv-cdp.sh` 14/14 against a throwaway headless Chrome; two mutants run (one caught live, one only by a source assertion — see the harness) |
+| 4 | ⛔ **not started** — attended, destructive, owner at the box | — |
+| 5, 6 | built | `repro-gv-relogin-breaker.sh` 71/71, including 12 breaker mutants each caught by its named case |
+| 7, 8 | built | both exclusions; `repro-tar-clobber.sh` E/F/F-neg read the exclusions from the shipped `.ps1` |
+| 9–12 | ⛔ blocked on Task 4 | every selector, URL and timeout comes from the spike |
+| 13 | built | `repro-gv-session-alarm.sh` 121/121 (87 pre-existing unchanged); diff to the alarm is additions only |
+| 14 | built, **reshaped** | guards field names, state words, reset command and default path — not the four actuator sentences (see the test's remarks) |
+| 15–17 | ⛔ blocked on 9–11 | — |
+| 18c | built (comment-only) | the other parts of 18 wait for 4 and 17 |
+
+**Corrections to this plan's drafts, each backed by a failing check:** the 7c inline comment would have ended the
+PowerShell rsync command after its first exclusion (so `--delete` would have removed `data/` and `logs/`);
+Task 13's `grep|cut|sed` parse delivered `printf %q` backslashes, and its re-armed RESOLVED fell back to a thread
+nothing was posted under; Task 6's harness had three defects (shared state, budget overshoot, a refusal masked by
+the hourly spacing); Tasks 3 and 5's own code failed their vocabulary greps.
+
+**Pre-merge review (2026-09-25) found, and this branch fixed:** the breaker could AUTHORISE after a crashed
+decision (octal `09`, 20-digit overflow — an arithmetic error abandons the command and bash carries on), so the
+actuator must ask through `breaker_verdict` (a token; nothing is not `AUTHORISED`); a partial state file read as
+zeros; two writers could undo a trip (`breaker_lock`, taken by `--reset` and to be taken by the actuator on the
+same file); a clock stepping back across midnight reset the day's budget; the state file was sourced into the
+breaker's own shell; the alarm and breaker found the state file through different variables. Each has a harness
+case and, where it is a rule, a mutant.
+
+**Deferred, LOW, recorded:** (a) when the relogin alert joins an open session thread, that thread's session
+RESOLVED can read as closed while the relogin stop is still open; (b) a delivered relogin root whose alert is
+refused and then reset before the next poll leaves a root with no alert; (c) the `.new` file's mode-600-from-birth
+is not asserted separately from the post-`mv` chmod.
+
+**For Task 9, from this build:** ask the breaker through `breaker_verdict`, never through
+`breaker_may_attempt`'s exit code; take `breaker_lock` (it uses the same lock file the plan's actuator names)
+around the whole load → write; pass `--status` / `--reset` through to the breaker, because every reason text and
+the alarm's ACTION name `gv-auto-relogin.sh --reset` — until the actuator exists the working command is
+`gv-auto-relogin-breaker.sh --reset`; read `gv-account.conf` without exporting it.

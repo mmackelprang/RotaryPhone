@@ -39,6 +39,7 @@ fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 export GV_RELOGIN_STATE_FILE="$WORK/breaker.state"
+export GV_RELOGIN_LOCK_FILE="$WORK/breaker.lock"
 # The harness sets no limit of its own. These are the breaker's defaults, stated
 # here only so the "N/3" strings below are not coincidences with the environment.
 unset GV_RELOGIN_MAX_PER_HOUR GV_RELOGIN_MAX_PER_DAY GV_RELOGIN_MAX_TRANSPORT_PER_DAY
@@ -63,7 +64,12 @@ drive() { bash -c '
 act() { bash -c '. "$1"; breaker_load; eval "$2"; breaker_write' _ "$BREAKER" "$1"; }
 status_field() { bash "$BREAKER" --status | awk -v k="$1" '$1==k{print $NF; exit}'; }
 state()   { status_field state; }
-may()     { drive breaker_may_attempt >/dev/null 2>&1; echo $?; }
+# ⛔ The decision is read as a TOKEN, never as an exit code. Pre-merge review
+# 2026-09-25: with `echo $?` a CRASHED decision (division by zero, an octal
+# overflow) read as "1", i.e. refused, so mutants that crashed passed every refusal
+# case — while the same crash in a real caller fell through to the login. Now a crash
+# prints nothing, and nothing is neither AUTHORISED nor REFUSED.
+may()     { drive breaker_verdict 2>/dev/null | head -1 | cut -d' ' -f1; }
 set_field() { sed -i "s/^$1=.*/$1=$2/" "$GV_RELOGIN_STATE_FILE"; }
 fresh()   { rm -f "$GV_RELOGIN_STATE_FILE"; bash "$BREAKER" --reset >/dev/null; }
 
@@ -72,6 +78,11 @@ check "no sleep/retry/backoff/attempt_again/re_arm/rearm" "0" \
       "$(grep -Ec 'sleep|retry|backoff|attempt_again|re_arm|rearm' "$BREAKER")"
 check "exactly ONE assignment of ARMED" "1" \
       "$(grep -c 'BREAKER_STATE="ARMED"' "$BREAKER")"
+# ⚠ The count above only sees one spelling. Any OTHER way of writing ARMED into the
+# state is a second door and must not exist at all. (Review 2026-09-25: the harness's
+# own mutants used the unquoted form, which the count above cannot see.)
+check "no other spelling assigns ARMED (unquoted, single-quoted, printf -v, declare)" "0" \
+      "$(grep -cE "BREAKER_STATE=('ARMED'|ARMED)|printf -v +\"?BREAKER_STATE|declare[^#]*BREAKER_STATE=" "$BREAKER")"
 # ⚠ The count AND where it is: a second assignment elsewhere, with this one deleted,
 # would keep the count at 1.
 check "...and it is inside breaker_reset" "breaker_reset" \
@@ -80,22 +91,80 @@ check "...and it is inside breaker_reset" "breaker_reset" \
 echo "=== FAIL CLOSED: absence and corruption are TRIPPED, never ARMED ==="
 rm -f "$GV_RELOGIN_STATE_FILE"
 check "no state file -> TRIPPED" "TRIPPED" "$(state)"
-check "no state file -> refuses an attempt" "1" "$(may)"
+check "no state file -> refuses an attempt" "REFUSED" "$(may)"
 printf 'BREAKER_STATE=BANANA\n' > "$GV_RELOGIN_STATE_FILE"
 check "corrupt state -> TRIPPED" "TRIPPED" "$(state)"
-check "corrupt state -> refuses" "1" "$(may)"
+check "corrupt state -> refuses" "REFUSED" "$(may)"
 printf 'this is not shell (\n' > "$GV_RELOGIN_STATE_FILE"
 check "unparseable state -> TRIPPED" "TRIPPED" "$(state)"
-check "unparseable state -> refuses" "1" "$(may)"
+check "unparseable state -> refuses" "REFUSED" "$(may)"
 # ⛔ The fail-OPEN trap the plan's draft had: `[ abc -ge 3 ]` is an error, an error is
 # false, and a false "budget used?" test would AUTHORISE.
 fresh
 set_field BREAKER_DAY_CREDENTIAL_ATTEMPTS abc
 check "non-numeric counter -> TRIPPED" "TRIPPED" "$(state)"
-check "non-numeric counter -> refuses" "1" "$(may)"
+check "non-numeric counter -> refuses" "REFUSED" "$(may)"
 fresh
-check "a zero hourly limit in the environment refuses (no division by zero)" "1" \
-      "$(GV_RELOGIN_MAX_PER_HOUR=0 drive breaker_may_attempt >/dev/null 2>&1; echo $?)"
+check "a zero hourly limit in the environment refuses (no division by zero)" "REFUSED" \
+      "$(GV_RELOGIN_MAX_PER_HOUR=0 may)"
+check "a leading-zero limit (octal 09) refuses rather than crashing" "REFUSED" \
+      "$(GV_RELOGIN_MAX_PER_HOUR=09 may)"
+check "an hourly limit above 3600 (spacing would round to 0s) refuses" "REFUSED" \
+      "$(GV_RELOGIN_MAX_PER_HOUR=7200 may)"
+
+echo "=== ⛔ MALFORMED NUMBERS, PARTIAL FILES, A BACKWARDS CLOCK: all refuse, none crash ==="
+# Each of these AUTHORISED a login in review (2026-09-25) through an actuator shaped
+# `breaker_may_attempt || exit`, with the daily budget already spent.
+fresh
+act 'breaker_record_credential_attempt; breaker_record_credential_attempt; breaker_record_credential_attempt'
+set_field BREAKER_LAST_ATTEMPT_AT 099
+check "leading-zero LAST_ATTEMPT_AT (octal error) -> REFUSED, not crashed" "REFUSED" "$(may)"
+check "...and the breaker reads it as TRIPPED" "TRIPPED" "$(state)"
+fresh
+set_field BREAKER_DAY_CREDENTIAL_ATTEMPTS 99999999999999999999
+check "a 20-digit counter (overflow) -> REFUSED" "REFUSED" "$(may)"
+fresh
+printf 'BREAKER_STATE=ARMED\n' > "$GV_RELOGIN_STATE_FILE"
+check "a PARTIAL file (state only, no counters) -> TRIPPED" "TRIPPED" "$(state)"
+check "...and refuses" "REFUSED" "$(may)"
+check "...naming what is missing" "yes" \
+      "$(bash "$BREAKER" --status | grep -q 'missing fields' && echo yes || echo no)"
+fresh
+printf 'BREAKER_MAX_PER_DAY=99\n' >> "$GV_RELOGIN_STATE_FILE"
+check "a state file cannot raise its own budget" "3" \
+      "$(bash -c '. "$1"; breaker_load; echo "$BREAKER_MAX_PER_DAY"' _ "$BREAKER")"
+fresh
+act 'breaker_record_credential_attempt; breaker_record_credential_attempt; breaker_record_credential_attempt'
+set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 90000 ))"
+set_field BREAKER_DAY_BUCKET 2999-01-01
+check "⛔ a day bucket AFTER today (clock went back) -> REFUSED, budget not reset" "REFUSED" "$(may)"
+check "...and the spent count is still on file" "3" \
+      "$(sed -n 's/^BREAKER_DAY_CREDENTIAL_ATTEMPTS=//p' "$GV_RELOGIN_STATE_FILE")"
+fresh
+check "an unknown state set AFTER load is refused where the decision is made" "REFUSED" \
+      "$(bash -c '. "$1"; breaker_load; BREAKER_STATE=WEIRD; breaker_verdict' _ "$BREAKER" 2>/dev/null | cut -d' ' -f1)"
+rm -f "$GV_RELOGIN_STATE_FILE"
+check "a fail-closed trip carries a timestamp" "yes" \
+      "$(bash "$BREAKER" --status | awk '$1=="tripped_at"{print $2}' | grep -qE '^[0-9]{4}-' && echo yes || echo no)"
+
+echo "=== ⛔ ONE WRITER AT A TIME: --reset does not touch the file while a run holds the lock ==="
+# The lost update the lock prevents (review 2026-09-25): a writer that loaded before
+# a trip writes its stale ARMED over it. Its interleaving is too narrow to hit by
+# timing in a harness, so the property is tested directly: while the lock is held —
+# as an in-flight actuator holds it — a --reset must refuse and change nothing.
+fresh
+act 'breaker_record_credential_attempt; breaker_trip credential_rejected "tripped by the in-flight run"'
+( exec 9>"$GV_RELOGIN_LOCK_FILE"; flock 9; sleep 3 ) &
+holder=$!
+sleep 0.5
+GV_RELOGIN_LOCK_WAIT=1 bash "$BREAKER" --reset >/dev/null 2>"$WORK/reset.err"
+reset_rc=$?
+wait "$holder"
+check "--reset while a run holds the lock is refused (non-zero)" "1" "$reset_rc"
+check "...and says why" "yes" "$(grep -q 'in progress' "$WORK/reset.err" && echo yes || echo no)"
+check "⛔ ...and the trip SURVIVES untouched" "TRIPPED" "$(state)"
+bash "$BREAKER" --reset >/dev/null
+check "once the lock is free, --reset works" "ARMED" "$(state)"
 
 echo "=== the first write is already private ==="
 rm -f "$GV_RELOGIN_STATE_FILE"
@@ -112,23 +181,23 @@ check "after ONE rejection -> TRIPPED" "TRIPPED" "$(state)"
 # breaker ARMED passed it (measured 2026-09-25). With the spacing satisfied, the trip
 # is the only thing left that can refuse.
 set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 3700 ))"
-check "⛔ a SECOND attempt is REFUSED" "1" "$(may)"
+check "⛔ a SECOND attempt is REFUSED" "REFUSED" "$(may)"
 # ...and it stays refused across time, a new day, and a reboot (a fresh shell).
 day_ago=$(( $(date -u +%s) - 86400 - 60 ))
 set_field BREAKER_LAST_ATTEMPT_AT "$day_ago"
-check "⛔ still refused after 24h of simulated time" "1" "$(may)"
+check "⛔ still refused after 24h of simulated time" "REFUSED" "$(may)"
 set_field BREAKER_DAY_BUCKET 1970-01-01
 check "⛔ a NEW DAY does NOT re-arm a tripped breaker" "TRIPPED" "$(state)"
-check "⛔ ...and still refuses" "1" "$(may)"
-check "⛔ ...from a clean environment too (the reboot case)" "1" \
+check "⛔ ...and still refuses" "REFUSED" "$(may)"
+check "⛔ ...from a clean environment too (the reboot case)" "REFUSED" \
       "$(env -i PATH="$PATH" HOME="$WORK" GV_RELOGIN_STATE_FILE="$GV_RELOGIN_STATE_FILE" \
-             bash -c '. "$1"; breaker_load; breaker_may_attempt' _ "$BREAKER" >/dev/null 2>&1; echo $?)"
+             bash -c '. "$1"; breaker_load; breaker_verdict' _ "$BREAKER" 2>/dev/null | cut -d' ' -f1)"
 
 echo "=== ⛔ A CHALLENGE STOPS EVERYTHING, and is distinguishable from a rejection ==="
 fresh
 act 'breaker_record_credential_attempt; breaker_trip challenged "Google presented a verification challenge."'
 check "challenge -> TRIPPED" "TRIPPED" "$(state)"
-check "challenge -> refuses" "1" "$(may)"
+check "challenge -> refuses" "REFUSED" "$(may)"
 check "challenge reason is NOT credential_rejected" "challenged" "$(status_field reason)"
 
 echo "=== TRANSPORT is the ONLY non-terminal class, and it spends no credential budget ==="
@@ -142,21 +211,21 @@ check "...and the credential counter is genuinely zero" "0/3" \
       "$(bash "$BREAKER" --status | awk '$1=="credential"{print $3}')"
 check "transport spends its own budget" "1/3" \
       "$(bash "$BREAKER" --status | awk '$1=="transport"{print $3}')"
-check "...but is still rate-limited this hour" "1" "$(may)"
+check "...but is still rate-limited this hour" "REFUSED" "$(may)"
 # The transport ceiling is real: three transport failures in a day stop attempts
 # until the day rolls, even with the hour spacing satisfied.
 act 'breaker_record_transport_failure; breaker_record_transport_failure'
 set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 3700 ))"
-check "3 transport failures today -> refused despite the hour having passed" "1" "$(may)"
+check "3 transport failures today -> refused despite the hour having passed" "REFUSED" "$(may)"
 check "...and the breaker is still ARMED (a ceiling, not a trip)" "ARMED" "$(state)"
 
 echo "=== RATE LIMITS bound the Google-facing traffic ==="
 fresh
-check "a fresh armed breaker authorises" "0" "$(may)"
+check "a fresh armed breaker authorises" "AUTHORISED" "$(may)"
 act 'breaker_record_credential_attempt'
-check "⛔ a second attempt within the hour is REFUSED" "1" "$(may)"
+check "⛔ a second attempt within the hour is REFUSED" "REFUSED" "$(may)"
 set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 3700 ))"
-check "an attempt an hour later is authorised" "0" "$(may)"
+check "an attempt an hour later is authorised" "AUTHORISED" "$(may)"
 # Bring the day's count to EXACTLY the limit (1 recorded above, 2 more), each spaced
 # an hour apart, so the only thing left to refuse the next one is the daily budget.
 for _ in 1 2; do
@@ -165,7 +234,7 @@ for _ in 1 2; do
 done
 check "PRECONDITION: exactly 3/3 used" "3/3" \
       "$(bash "$BREAKER" --status | awk '$1=="credential"{print $3}')"
-check "⛔ the 4th credential attempt today is REFUSED even with time available" "1" "$(may)"
+check "⛔ the 4th credential attempt today is REFUSED even with time available" "REFUSED" "$(may)"
 
 echo "=== --reset is a HUMAN action and does not hand back a budget ==="
 before="$(bash "$BREAKER" --status | awk '$1=="credential"{print $3}')"
@@ -175,7 +244,7 @@ check "⛔ --reset preserves the daily counter" "$before" "$after"
 check "--reset says so" "yes" \
       "$(printf '%s' "$reset_out" | grep -q 'Counters preserved: 3/3' && echo yes || echo no)"
 check "--reset arms" "ARMED" "$(state)"
-check "⛔ ...and an armed breaker with a spent budget still refuses" "1" "$(may)"
+check "⛔ ...and an armed breaker with a spent budget still refuses" "REFUSED" "$(may)"
 
 echo "=== the state file is INSPECTABLE and PRIVATE ==="
 fresh
@@ -210,7 +279,7 @@ mutant() { # mutant NAME EXPECTED-FAILING-CASE SED-SCRIPT
           "$(printf '%s\n' "$out" | grep -qF "FAIL $2" && echo caught || echo MISSED)"
 }
 mutant missing-is-armed "no state file -> TRIPPED" \
-    's/^\( *BREAKER_REASON="state_missing"\)$/\1; BREAKER_STATE=ARMED/'
+    's/^\( *\)breaker_fail_closed state_missing \\$/\1BREAKER_STATE=ARMED; : \\/'
 mutant rejection-arms "⛔ a SECOND attempt is REFUSED" \
     '/^breaker_trip() {/,/^}/ s/^    BREAKER_STATE="TRIPPED"$/    [ "$1" = credential_rejected ] \&\& BREAKER_STATE=ARMED || BREAKER_STATE=TRIPPED/'
 mutant new-day-arms "⛔ a NEW DAY does NOT re-arm a tripped breaker" \
@@ -219,8 +288,22 @@ mutant transport-spends-credential "⛔ transport spends NO credential budget" \
     '/^breaker_record_transport_failure() {/a\    breaker_record_credential_attempt'
 mutant daily-off-by-one "⛔ the 4th credential attempt today is REFUSED even with time available" \
     's/"\$BREAKER_DAY_CREDENTIAL_ATTEMPTS" -ge "\$BREAKER_MAX_PER_DAY"/"$BREAKER_DAY_CREDENTIAL_ATTEMPTS" -gt "$BREAKER_MAX_PER_DAY"/'
+mutant zero-limit-guard-removed "a zero hourly limit in the environment refuses (no division by zero)" \
+    's/|| \[ "\${!v}" -lt 1 \]//'
+mutant loose-count "leading-zero LAST_ATTEMPT_AT (octal error) -> REFUSED, not crashed" \
+    's/\^(0|\[1-9\]\[0-9\]{0,11})\$/^[0-9]+$/'
+# The pre-review behaviour: a field the file omits keeps its zero default, so a file
+# holding only BREAKER_STATE=ARMED reads as "never attempted, nothing used today".
+mutant partial-file-accepted "a PARTIAL file (state only, no counters) -> TRIPPED" \
+    "/for f in \$BREAKER_ALL_FIELDS; do printf -v \"\$f\" '%s' __UNSET__; done/d"
+mutant day-rolls-backwards "⛔ a day bucket AFTER today (clock went back) -> REFUSED, budget not reset" \
+    's/\[\[ "\$BREAKER_DAY_BUCKET" < "\$today" \]\]/[[ "$BREAKER_DAY_BUCKET" != "$today" ]]/'
+mutant decision-only-trips-on-TRIPPED "an unknown state set AFTER load is refused where the decision is made" \
+    's/if \[ "\$BREAKER_STATE" != "ARMED" \]; then/if [ "$BREAKER_STATE" = "TRIPPED" ]; then/'
+mutant reset-without-lock "⛔ ...and the trip SURVIVES untouched" \
+    's/^    breaker_lock || { echo "Breaker NOT changed.*$/    :/'
 mutant numeric-guard-removed "non-numeric counter -> refuses" \
-    's/if ! breaker_is_count "\${!f}"; then/if false; then/'
+    's/if ! breaker_is_count "\${!g}"; then/if false; then/'
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL ${cases} CASES PASSED"; else echo "FAILURES PRESENT (${cases} cases run)"; fi

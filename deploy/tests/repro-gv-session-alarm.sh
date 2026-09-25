@@ -654,6 +654,35 @@ check "relogin: ...under a different dedupe_key (a gateway must not swallow it)"
 check "relogin: ...quoting the SECOND reason" "yes" \
       "$(relogin_alerts | jq -r .body | grep -qF '> Second trip.' && echo yes || echo no)"
 
+# 10. a REFUSED relogin post is loud and is re-attempted under the SAME thread.
+start_gateway --fail-notify 500
+reset; trip
+serve '{"browserRefreshOutcome":"Succeeded"}'
+rc="$(run)"
+check "relogin: a refused relogin post -> the cycle exits 1" "1" "$rc"
+check "relogin: ...and the heartbeat was NOT refreshed (the dead-man speaks instead)" "404" \
+      "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099/v1/heartbeat/rotaryphone")"
+# Read BEFORE restarting the stub: a restart truncates its log.
+refused_thread="$(jq -r 'select(.kind=="notify") | .body.thread_key' "$GW_LOG" | head -1)"
+check "relogin: PRECONDITION the refused attempt named a thread" "yes" \
+      "$([ -n "$refused_thread" ] && echo yes || echo no)"
+start_gateway
+run >/dev/null
+check "relogin: the next cycle delivers the alert" "1" "$(relogin_alerts | count)"
+check "relogin: ...under the SAME thread key it first tried" "$refused_thread" \
+      "$(relogin_alerts | jq -r .thread_key | head -1)"
+check "relogin: ...with its 🧵 root delivered first" "1" \
+      "$(relogin_msgs | jq -c 'select(.title|test("🧵"))' | count)"
+
+# 11. the alarm finds the breaker file through the BREAKER's own override too.
+reset; rm -f "$GV_RELOGIN_STATE_FILE"
+ALT="$WORK/elsewhere/breaker.state"
+GV_RELOGIN_STATE_FILE="$ALT" trip
+serve '{"browserRefreshOutcome":"Succeeded"}'
+GV_RELOGIN_STATE_FILE="$ALT" bash "$ALARM" >/dev/null 2>"$WORK/err.txt"
+check "relogin: a breaker moved with GV_RELOGIN_STATE_FILE is still reported" "1" "$(relogin_alerts | count)"
+rm -rf "$WORK/elsewhere"
+
 # 9. an unreadable breaker file is logged, not posted.
 reset
 printf 'this is not shell (\n' > "$GV_RELOGIN_STATE_FILE"

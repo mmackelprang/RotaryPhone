@@ -567,7 +567,12 @@ fi
 # shell can turn that back into the words. The plan's grep|cut|sed parse would have
 # delivered the backslashes to a human (measured 2026-09-25). The subshell keeps the
 # file's assignments out of this script's own variables.
-RELOGIN_STATE_FILE="${GV_ALARM_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}"
+# ⛔ Falls back through the BREAKER's own override before the shared default. If the
+# actuator is ever pointed elsewhere with GV_RELOGIN_STATE_FILE and this read only its
+# own variable, it would find nothing, call that "not installed", and every trip would
+# be silent. The default path literal is pinned against the breaker's by
+# AlarmCopyDriftTests.
+RELOGIN_STATE_FILE="${GV_ALARM_RELOGIN_STATE_FILE:-${GV_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}}"
 
 relogin_state="not_installed"
 relogin_tripped_at=""

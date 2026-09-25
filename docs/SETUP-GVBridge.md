@@ -214,8 +214,8 @@ The GVBridge section (update IPs for your network):
 # no deploy, no agent and no script ever writes, reads back, echoes or transports
 # these values. They exist in exactly one place.
 #
-# This file is sourced into the actuator's environment and the password is handed
-# to the sign-in driver ON STDIN. It is never an argv parameter: /proc/<pid>/cmdline
+# This file is read by the actuator (never exported, so the password does not reach
+# /proc/<pid>/environ) and the password is handed to the sign-in driver ON STDIN. It is never an argv parameter: /proc/<pid>/cmdline
 # is mode 0444 on this box (measured 2026-09-09) and `radio` is shared — beszel,
 # avahi, colord and polkitd all run here, plus Radio Console under the same uid.
 #
