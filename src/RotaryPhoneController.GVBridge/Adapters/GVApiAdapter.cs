@@ -256,7 +256,8 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
 
     /// <summary>
     /// Why the last attempt to pull cookies from the box's Chrome ended the way it did, as a string:
-    /// one of <c>NotAttempted</c>, <c>Unreachable</c>, <c>Stale</c>, <c>Succeeded</c>, <c>TornDown</c>.
+    /// one of <c>NotAttempted</c>, <c>Unreachable</c>, <c>Stale</c>, <c>Succeeded</c>, <c>TornDown</c>,
+    /// <c>SignedOut</c> (added 2026-09-25: Chrome answered but holds no Google session).
     /// </summary>
     /// <remarks>
     /// ⛔ ADDITIVE. <see cref="BrowserSessionStale"/> is unchanged and stays — Radio Console consumes the
@@ -1269,6 +1270,19 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                         _config.ChromeCdpPort);
                     break;
 
+                case BrowserRefreshOutcome.SignedOut:
+                    // ⚠ The alarm QUOTES this sentence (copy-drift guard). Owner's decision 2026-09-25:
+                    // recovery from a signed-out browser is human-driven — no stored credentials — so the
+                    // action names a human, and says Chrome is fine so nobody restarts it instead.
+                    _logger.LogError(
+                        "GVApi: all cookie-recovery rungs failed and the box's Chrome is SIGNED OUT — Chrome "
+                        + "answered on CDP port {Port} but holds no Google session (it is on the Google "
+                        + "sign-in page or the Voice landing page). Chrome itself is fine; restarting it "
+                        + "will not help. ACTION: a human must sign in at voice.google.com in the box's "
+                        + "Chrome.",
+                        _config.ChromeCdpPort);
+                    break;
+
                 case BrowserRefreshOutcome.TornDown:
                     // Logged at WARNING, deliberately breaking this switch's Error convention: an
                     // exhausted ladder normally means the phone is about to be down, but a ladder
@@ -1339,10 +1353,56 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// operator action differs. <c>NotAttempted</c> sends them to check the CDP wiring, and
     /// <c>Unreachable</c> sends them to check whether Chrome is running — both are wrong, and one of
     /// them alarming, when the real answer is that the service was shutting down.
+    /// <para>
+    /// <c>SignedOut</c> (added 2026-09-25) is NOT <c>Stale</c> and NOT <c>Unreachable</c>: Chrome answered,
+    /// but holds no Google session, so there was nothing to hand Google. <c>Stale</c> would claim Google
+    /// refused cookies it never saw; <c>Unreachable</c> sends the operator to restart a Chrome that is fine.
+    /// Appended LAST so no existing member moves.
+    /// </para>
     /// </remarks>
-    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded, TornDown }
+    internal enum BrowserRefreshOutcome { NotAttempted, Unreachable, Stale, Succeeded, TornDown, SignedOut }
 
     private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
+
+    /// <summary>
+    /// What a FAILED extraction says about the browser. Only a failure to talk to Chrome at all is
+    /// <c>Unreachable</c>; a Chrome that answered without a Google session is <c>SignedOut</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⛔ MEASURED 2026-09-25: this used to be a flat "every failure is Unreachable". The box's Chrome sat
+    /// on <c>accounts.google.com/v3/signin/challenge/pwd?…continue=https%3A%2F%2Fvoice.google.com…</c> —
+    /// a URL that CONTAINS "voice.google.com", so it matched as the Voice tab and extraction returned
+    /// <c>MissingRequiredCookies</c>. Recorded as Unreachable, the ladder logged "CHROME WAS UNREACHABLE …
+    /// confirm Chrome is running" and the alarm told the owner to restart a healthy Chrome.
+    /// <para>
+    /// The cookie statuses are decided by the cookie jar, which is authoritative whatever the page URL
+    /// says. <c>NoMatchingTab</c> is decided by the tab URLs, so it earns <c>SignedOut</c> only when a tab
+    /// is on one of the two known signed-out pages; any other page tells us nothing about the login and
+    /// keeps the historical classification rather than gaining an unearned new claim.
+    /// </para>
+    /// </remarks>
+    internal static BrowserRefreshOutcome ClassifyFailedExtraction(CdpExtractionResult result) => result.Status switch
+    {
+        CdpExtractionStatus.MissingRequiredCookies or CdpExtractionStatus.NoCookies
+            => BrowserRefreshOutcome.SignedOut,
+        CdpExtractionStatus.NoMatchingTab when result.TabUrls.Any(IsSignedOutPage)
+            => BrowserRefreshOutcome.SignedOut,
+        _ => BrowserRefreshOutcome.Unreachable,
+    };
+
+    /// <summary>
+    /// The Google sign-in pages, or the Workspace Voice landing page a signed-out Chrome is sent to.
+    /// Matched on the PARSED host, never a substring — <c>accounts.google.com.evil.example</c> and a
+    /// query string that merely mentions a landing URL must not count.
+    /// </summary>
+    internal static bool IsSignedOutPage(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        var host = uri.Host;
+        if (host.Equals("accounts.google.com", StringComparison.OrdinalIgnoreCase)) return true;
+        return host.Equals("workspace.google.com", StringComparison.OrdinalIgnoreCase)
+            && uri.AbsolutePath.StartsWith("/products/voice", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Acquire <see cref="_cookieMutationGate"/>; dispose the returned handle to release it.
@@ -1470,9 +1530,9 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
             var result = await _cdpExtractor.ExtractAsync(_config.ChromeCdpPort, "voice.google.com");
             if (!result.Success || result.Cookies == null)
             {
-                _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Unreachable;
-                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error}",
-                    result.Status, result.Error);
+                _lastBrowserRefreshOutcome = ClassifyFailedExtraction(result);
+                _logger.LogWarning("GVApi: CDP cookie refresh failed: {Status} {Error} — recorded as {Outcome}",
+                    result.Status, result.Error, _lastBrowserRefreshOutcome);
                 return false;
             }
 

@@ -109,6 +109,11 @@ check "signed out -> browser_stale" "browser_stale" \
 # reports as healthy, and the whole reason browserRefreshOutcome was added.
 check "CHROME GONE -> browser_unreachable (boolean reads false)" "browser_unreachable" \
       "$(classify '{"browserRefreshOutcome":"Unreachable","browserSessionStale":false}')"
+# ⛔ MEASURED 2026-09-25: a Chrome parked on the Google sign-in page was reported as
+# Unreachable and the alarm said "Chrome is gone". The service now says SignedOut, and
+# it must not fall through to unknown_outcome or read as the Chrome-is-gone alert.
+check "SIGNED OUT (Chrome up, no Google session) -> browser_signed_out" "browser_signed_out" \
+      "$(classify '{"browserRefreshOutcome":"SignedOut","browserSessionStale":false}')"
 check "not wired -> not_attempted" "not_attempted" \
       "$(classify '{"browserRefreshOutcome":"NotAttempted","browserSessionStale":false}')"
 check "teardown -> ignore" "ignore" \
@@ -463,6 +468,21 @@ check "browser_unreachable body says the login was never tested" "yes" \
 check "browser_unreachable body warns the boolean reads false here" "yes" \
       "$(body_has browser_unreachable 'reads **false** in this state')"
 
+serve '{"browserRefreshOutcome":"SignedOut","browserSessionStale":false}'; run >/dev/null
+check "browser_signed_out severity" "alert" "$(sev_of browser_signed_out)"
+check "browser_signed_out body quotes the service verbatim" "yes" \
+      "$(body_has browser_signed_out "the box's Chrome is SIGNED OUT")"
+check "browser_signed_out body carries the service's own REMEDY — a human sign-in" "yes" \
+      "$(body_has browser_signed_out "ACTION: a human must sign in at voice.google.com in the box's Chrome.")"
+check "browser_signed_out body says Chrome is fine, so nobody restarts it" "yes" \
+      "$(body_has browser_signed_out 'Chrome itself is fine; restarting it will not help.')"
+signed_out_action="$(delivered | jq -r 'select(.dedupe_key=="rotaryphone-gv-session-browser_signed_out") | .action' | head -1)"
+check "browser_signed_out ACTION sends a human to sign in" "yes" \
+      "$(case "$signed_out_action" in *"a human must sign in at voice.google.com"*) echo yes ;; *) echo no ;; esac)"
+# ⛔ The 2026-09-25 regression, asserted on the wire: the wrong fix, stated with confidence.
+check "browser_signed_out ACTION does NOT send the owner after Chrome" "no" \
+      "$(case "$signed_out_action" in *pgrep*|*gv-bridge-ensure*) echo yes ;; *) echo no ;; esac)"
+
 reset
 serve '{"browserRefreshOutcome":"NotAttempted"}'
 run >/dev/null; run >/dev/null; run >/dev/null      # MIN_POLLS_TO_POST=3
@@ -512,13 +532,14 @@ echo "=== Task 10 — no severity in any title, across EVERY condition ==="
 reset
 serve '{"browserRefreshOutcome":"Stale"}';        run >/dev/null
 serve '{"browserRefreshOutcome":"Unreachable"}';  run >/dev/null
+serve '{"browserRefreshOutcome":"SignedOut"}';    run >/dev/null
 serve '{"browserRefreshOutcome":"Hibernating"}';  run >/dev/null
 serve '{"available":true}';                       run >/dev/null
 GV_ALARM_STATUS_URL="$DEAD_URL" bash "$ALARM" >/dev/null 2>&1
 serve '{"browserRefreshOutcome":"Succeeded"}';    run >/dev/null
 titles="$(delivered | jq -r '.title')"
 check "every condition contributed a title" "yes" \
-      "$([ "$(printf '%s\n' "$titles" | wc -l)" -ge 6 ] && echo yes || echo no)"
+      "$([ "$(printf '%s\n' "$titles" | wc -l)" -ge 7 ] && echo yes || echo no)"
 check "no title carries a severity word or marker" "0" \
       "$(printf '%s\n' "$titles" | grep -ciE '\[?(alert|warn|warning|info|critical|resolved)\]?[[:space:]]*[:·|-]|^(alert|warn|info)\b|ACTION:')"
 check "every title starts with the [rotaryphone] source tag" "0" \

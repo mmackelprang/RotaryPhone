@@ -96,7 +96,7 @@ STATUS_URL="${GV_ALARM_STATUS_URL:-http://127.0.0.1:5004/api/gvbridge/status}"
 # ⛔ These are the alarm's BEST KNOWN VALUES, not authority. The service's config is
 # authoritative; if they ever disagree, the service wins and this is the bug.
 GV_CDP_PORT="${GV_ALARM_CDP_PORT:-9224}"
-# ⛔ THE THREE VERBATIM HEREDOCS BELOW KEEP THEIR LITERAL 9224, and that is correct:
+# ⛔ THE VERBATIM HEREDOCS BELOW KEEP THEIR LITERAL 9224, and that is correct:
 # the number is inside a QUOTATION of the service, and editing text inside a quotation
 # to make it agree with local config is how a quotation stops being one. Instead, a
 # disagreement is made LOUD here — the operator is told the advice they are about to
@@ -192,6 +192,7 @@ case "$outcome" in
     UNPOLLED)      condition="service_unreachable" ;;
     Stale)         condition="browser_stale" ;;
     Unreachable)   condition="browser_unreachable" ;;
+    SignedOut)     condition="browser_signed_out" ;;
     NotAttempted)  condition="not_attempted" ;;
     Succeeded)     condition="ok" ;;
     TornDown)      condition="ignore" ;;
@@ -329,6 +330,7 @@ post_notify() {
 # platform. If you edit one, edit both.
 #   browser_stale       <- GVApiAdapter.cs REJECTED-a-cookie-set line
 #   browser_unreachable <- GVApiAdapter.cs CHROME WAS UNREACHABLE case
+#   browser_signed_out  <- GVApiAdapter.cs SIGNED OUT case
 #   not_attempted       <- GVApiAdapter.cs NEVER CONSULTED default case
 
 body_for() {
@@ -351,6 +353,17 @@ Chrome could not be reached at all, so the Google login was **never tested**. Th
 
 ⚠ `browserSessionStale` reads **false** in this state, identically to a healthy one. That is why this
 alarm reads `browserRefreshOutcome` instead.
+QUOTE
+        ;;
+      browser_signed_out)
+        cat <<'QUOTE'
+Chrome is running and answered, but it is **signed out of Google** — a human has to sign in. The
+service's own words:
+
+> GVApi: all cookie-recovery rungs failed and the box's Chrome is SIGNED OUT — Chrome answered on CDP port 9224 but holds no Google session (it is on the Google sign-in page or the Voice landing page). Chrome itself is fine; restarting it will not help. ACTION: a human must sign in at voice.google.com in the box's Chrome.
+
+⚠ `browserSessionStale` reads **false** in this state too: Google never saw a cookie, so nothing was
+rejected. That is why this alarm reads `browserRefreshOutcome` instead.
 QUOTE
         ;;
       not_attempted)
@@ -396,6 +409,7 @@ title_for() {
     case "$1" in
       browser_stale)       echo "[${SOURCE_NAME}] GV session — signed out, re-login needed" ;;
       browser_unreachable) echo "[${SOURCE_NAME}] GV session — Chrome is gone, login untested" ;;
+      browser_signed_out)  echo "[${SOURCE_NAME}] GV session — signed out, needs a human sign-in" ;;
       not_attempted)       echo "[${SOURCE_NAME}] GV session — browser never consulted" ;;
       service_unreachable) echo "[${SOURCE_NAME}] GV session — the service is not answering" ;;
       field_missing)       echo "[${SOURCE_NAME}] GV session — the box is running an older build" ;;
@@ -410,6 +424,7 @@ action_for() {
     case "$1" in
       browser_stale)       echo "re-login at voice.google.com in the box's Chrome (CDP 9224)" ;;
       browser_unreachable) echo 'pgrep -f "user-data-dir=$HOME/.config/gv-bridge-chrome"; if absent: ~/bin/gv-bridge-ensure.sh' ;;
+      browser_signed_out)  echo "a human must sign in at voice.google.com in the box's Chrome (CDP 9224). Chrome is up; do not restart it." ;;
       not_attempted)       echo "check the CDP wiring and that Chrome answers on port 9224" ;;
       service_unreachable) echo "systemctl status rotary-phone on radio" ;;
       # ⛔ NOT `sha256sum …/RotaryPhoneController.Server`, which is what this line
@@ -432,7 +447,7 @@ action_for() {
 
 severity_for() {
     case "$1" in
-      browser_stale|browser_unreachable|service_unreachable) echo "alert" ;;
+      browser_stale|browser_unreachable|browser_signed_out|service_unreachable) echo "alert" ;;
       not_attempted|field_missing|unknown_outcome)           echo "warning" ;;
       ok)                                                    echo "info" ;;
     esac

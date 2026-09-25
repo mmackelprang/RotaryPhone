@@ -24,6 +24,18 @@ public record CdpExtractionResult(CdpExtractionStatus Status, GvCookieSet? Cooki
 {
     public bool Success => Status == CdpExtractionStatus.Success;
 
+    /// <summary>
+    /// The page URLs Chrome reported, set only on <see cref="CdpExtractionStatus.NoMatchingTab"/>. Lets a
+    /// caller tell "Chrome is parked on a signed-out page" from "Chrome is on something unrelated"
+    /// without a second CDP round trip.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ These are the CACHED <c>/json</c> URLs, which can lag the live page. That is the same source the
+    /// extractor used to decide there was no matching tab, so a classification made from them is at
+    /// least consistent with the failure it explains.
+    /// </remarks>
+    public IReadOnlyList<string> TabUrls { get; init; } = [];
+
     public static CdpExtractionResult Fail(CdpExtractionStatus status, string error) =>
         new(status, null, 0, error);
 }
@@ -90,7 +102,8 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
 
         if (tab is null)
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoMatchingTab,
-                $"No tab found with URL containing \"{targetUrl}\". Open voice.google.com in Chrome first.");
+                $"No tab found with URL containing \"{targetUrl}\". Open voice.google.com in Chrome first.")
+                with { TabUrls = tabs.Select(t => t.Url ?? "").ToList() };
 
         if (string.IsNullOrEmpty(tab.WebSocketDebuggerUrl))
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoDebuggerUrl,
