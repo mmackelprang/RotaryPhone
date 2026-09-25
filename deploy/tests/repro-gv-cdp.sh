@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lane L harness for deploy/tools/gv-cdp.py (docs/plans/gv-auto-relogin.md Task 3).
+# Lane L harness for deploy/gv-cdp.py (docs/plans/gv-auto-relogin.md Tasks 3 and 11).
 #
 # Drives a THROWAWAY local Chrome — its own temp profile, its own port, headless —
 # never the box's bridge browser and never Google. The tool under test is a
@@ -13,7 +13,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TOOL="${GV_CDP_TOOL:-${HERE}/../tools/gv-cdp.py}"
+TOOL="${GV_CDP_TOOL:-${HERE}/../gv-cdp.py}"
 PY="${PYTHON:-python3}"
 CHROME="${CHROME:-$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)}"
 
@@ -30,6 +30,15 @@ check "no password/credential/secret vocabulary" "0" \
       "$(grep -ciE 'password|passwd|credential|secret' "$TOOL")"
 check "no launch / --user-data-dir / Popen / subprocess" "0" \
       "$(grep -cE 'launch|--user-data-dir|Popen|subprocess' "$TOOL")"
+# ⛔ SHIPPED NOW (Task 11), so its surface is pinned: the spike-only eval/shot/dump are
+# gone, and the only script it evaluates in a page is window.location.href.
+check "the shipped tool offers exactly targets/url/navigate" \
+      'ap.add_argument("cmd", choices=["targets", "url", "navigate"])' \
+      "$(grep -F 'ap.add_argument("cmd"' "$TOOL" | sed 's/^ *//')"
+check "Runtime.evaluate is only ever window.location.href" "0" \
+      "$(grep -F 'Runtime.evaluate' "$TOOL" | grep -vcF 'expression="window.location.href"')"
+check "no screenshot / DOM dump / Input.* method" "0" \
+      "$(grep -cE 'captureScreenshot|outerHTML|"Input\.' "$TOOL")"
 
 if [ -z "$CHROME" ] || ! "$PY" -c 'import websocket' 2>/dev/null; then
     # ⛔ LOUD, never a silent pass: a protection test that goes quiet when its subject
@@ -63,6 +72,7 @@ trap cleanup EXIT
 # be running the bridge can never touch it.
 CDP=9331
 WEB=8331
+HANG=8332
 
 # A parent page on 127.0.0.1 embedding a child on localhost: two different SITES, so
 # with --site-per-process the child is an out-of-process iframe and appears in
@@ -112,9 +122,19 @@ check "url reads the page's own location" "http://127.0.0.1:${WEB}/parent.html" 
       "$("$PY" "$TOOL" url --port "$CDP" --target "$TID" | tr -d '\r')"
 landed="$("$PY" "$TOOL" navigate --port "$CDP" --target "$TID" --url "http://127.0.0.1:${WEB}/second.html" | tr -d '\r')"
 check "navigate prints where the page LANDED" "http://127.0.0.1:${WEB}/second.html" "$landed"
-# The page's own location is changed by an in-page script WITHOUT a navigation.
-"$PY" "$TOOL" eval --port "$CDP" --target "$TID" \
-      --expr "history.replaceState(null,'','/moved-in-page.html'); 1" >/dev/null
+# The page's own location is changed by an in-page script WITHOUT a navigation. The
+# HARNESS does that itself over CDP — the shipped tool has no eval, by design.
+"$PY" - "$CDP" "$TID" <<'PY' >/dev/null
+import json, sys, urllib.request, websocket
+port, tid = sys.argv[1], sys.argv[2]
+t = [x for x in json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list")) if x["id"] == tid][0]
+ws = websocket.create_connection(t["webSocketDebuggerUrl"], timeout=10)
+ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                    "params": {"expression": "history.replaceState(null,'','/moved-in-page.html'); 1"}}))
+while json.loads(ws.recv()).get("id") != 1:
+    pass
+ws.close()
+PY
 check "url reports an in-page location change" \
       "http://127.0.0.1:${WEB}/moved-in-page.html" \
       "$("$PY" "$TOOL" url --port "$CDP" --target "$TID" | tr -d '\r')"
@@ -141,11 +161,33 @@ echo "=== a navigation Chrome reports as failed is NOT printed as a landing ==="
 check "failed navigation exits 3" "3" "$?"
 check "…and prints no URL on stdout" "0" "$(wc -c < "$WORK/nav.out" | tr -d ' ')"
 
-echo "=== shot and dump write files ==="
-"$PY" "$TOOL" shot --port "$CDP" --target "$TID" --out "$(winpath "$WORK/x.png")" >/dev/null
-check "shot wrote a PNG" "PNG" "$(head -c 4 "$WORK/x.png" | tail -c 3)"
-"$PY" "$TOOL" dump --port "$CDP" --target "$TID" --out "$(winpath "$WORK/x.html")" >/dev/null
-check "dump wrote the DOM" "1" "$(grep -c '<html' "$WORK/x.html")"
+echo "=== transport faults are exit 4, never a printed landing ==="
+# A page whose load event never fires inside --timeout: the server sends headers and a
+# first chunk, then never finishes the response. The tool must give up at --timeout,
+# exit 4, and print nothing on stdout.
+"$PY" - "$HANG" <<'PY' >/dev/null 2>&1 &
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5)
+held = []
+while True:
+    c, _ = s.accept(); held.append(c)
+    c.recv(4096)
+    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<!doctype html><title>slow</title>")
+PY
+HANG_PID=$!
+sleep 1
+t0=$(date +%s)
+"$PY" "$TOOL" navigate --port "$CDP" --target "$TID" --url "http://127.0.0.1:${HANG}/" --timeout 3 \
+      >"$WORK/hang.out" 2>"$WORK/hang.err"
+rc=$?; t1=$(date +%s)
+killtree "$HANG_PID"
+check "no load event within --timeout -> exit 4" "4" "$rc"
+check "…and prints no URL on stdout" "0" "$(wc -c < "$WORK/hang.out" | tr -d ' ')"
+check "…and gave up near --timeout, not the default" "yes" \
+      "$([ $((t1 - t0)) -le 10 ] && echo yes || echo "no ($((t1 - t0))s)")"
+"$PY" "$TOOL" targets --port 9 >"$WORK/dead.out" 2>&1
+check "a CDP port nothing listens on -> exit 4" "4" "$?"
 
 echo "=== no websocket is left open ==="
 sleep 1

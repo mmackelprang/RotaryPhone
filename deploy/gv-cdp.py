@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """A minimal Chrome DevTools Protocol driver for the GV bridge's existing browser.
 
-⛔ THIS FILE HANDLES NOTHING SENSITIVE. It navigates, evaluates, screenshots and
-dumps. Anything sensitive is the CALLER's business, travels on the caller's stdin,
-and never appears here as a default, a constant, or an argv parameter.
+⛔ THIS FILE HANDLES NOTHING SENSITIVE. It lists pages, reads a page's own location,
+and navigates. Anything sensitive is the CALLER's business, travels on the caller's
+stdin, and never appears here as a default, a constant, or an argv parameter.
 
 ⚠ This file deliberately has no VOCABULARY for the sensitive thing either: the plan's
 Task 3 acceptance greps it for the usual words and requires zero hits, so the words
-are absent even from this comment. (The plan's own draft of this docstring failed
-that grep — it said what the file does not handle, by name.)
+are absent even from this comment.
 
 ⛔ IT NEVER STARTS A BROWSER AND NEVER CLEARS A PROFILE. Spec §5: same-profile
 re-login is materially safer than a fresh-device sign-in, because Google already
@@ -16,23 +15,26 @@ knows this device, profile and IP. Starting a clean browser converts routine
 re-auth into an unrecognised-device sign-in, which is far more likely to be
 challenged. There is deliberately no code path here that could do it.
 
-⚠ It lives in deploy/tools/ ON PURPOSE and is carried to the box by hand (scp) for
-the attended spike (docs/plans/gv-auto-relogin.md Task 4). Deploy-ToLinux.ps1
-collects deploy/*.sh with no -Recurse, so nothing under deploy/tools/ ever ships.
-Do not "fix" that by moving this file up a directory.
+⭐ SHIPPED, AND THE ONE HOME FOR THIS HELPER. It lived in deploy/tools/ for the
+attended spike (Task 4), where nothing ships. gv-auto-relogin.sh (plan Task 11) needs
+it on the box, and the reachable-reauth assist (PR #89) extends it with subcommands of
+its own, so it now lives at deploy/gv-cdp.py and Deploy-ToLinux.ps1 ships deploy/*.py
+beside deploy/*.sh. The spike-only `eval`, `shot` and `dump` subcommands were dropped
+in the move: nothing shipped may evaluate arbitrary script in the bridge's pages or
+write their DOM to disk.
 
 Requires only python3 + websocket-client, both already on the box (measured
 2026-09-09: websocket-client 1.9.0). No node, no Playwright, nothing installed.
 
-  gv-cdp.py targets
-  gv-cdp.py url      --target <id>
+  gv-cdp.py targets                              -> "<id>\\t<listed url>" per page
+  gv-cdp.py url      --target <id>               -> the page's OWN window.location.href
   gv-cdp.py navigate --target <id> --url https://...
-  gv-cdp.py eval     --target <id> --expr 'document.title'
-  gv-cdp.py shot     --target <id> --out /tmp/x.png
-  gv-cdp.py dump     --target <id> --out /tmp/x.html
+                                                 -> window.location.href after the load event
+
+Exit codes: 0 ok · 1 usage / no such target · 3 Chrome reported the navigation failed
+· 4 transport (CDP unreachable, websocket closed, or no load event within --timeout).
 """
 import argparse
-import base64
 import json
 import sys
 import urllib.request
@@ -41,11 +43,21 @@ import websocket  # websocket-client
 
 
 DEFAULT_PORT = 9224
+# 15 s per navigation: the spike's budget (docs/spikes/2026-09-09-gv-signin-cdp-recording.md,
+# "Timings" — 3-5x the worst observed navigation of ~3-5 s). Measured, not chosen here.
+DEFAULT_TIMEOUT_S = 15.0
+
+
+class Transport(Exception):
+    """A positively identified transport fault: exit 4."""
 
 
 def http_json(port, path):
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+            return json.loads(r.read())
+    except OSError as e:  # URLError, refused, timeout
+        raise Transport(f"CDP port {port} did not answer {path}: {e}") from e
 
 
 def targets(port):
@@ -110,20 +122,17 @@ def open_target(port, target_id, timeout):
     raise SystemExit(f"no page target with id {target_id}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["targets", "url", "navigate", "eval", "shot", "dump"])
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--target")
-    ap.add_argument("--url")
-    ap.add_argument("--expr")
-    ap.add_argument("--out")
-    # ⚠ MARKED FOR THE OWNER: 30s is a placeholder, not a measurement. Task 4 records
-    # how long the real sign-in flow actually takes and this default is set from that
-    # recording. Until then it is a guess wearing a number's clothes.
-    ap.add_argument("--timeout", type=float, default=30.0)
-    a = ap.parse_args()
+def live_href(s):
+    # ⛔ NOT /json/list's cached .url. Measured 2026-09-09: a parked
+    # workspace.google.com page sits in the target list while the session is
+    # perfectly healthy, and KNOWN-ISSUES.md:16-22 records both the title and
+    # the URL as stale cached renders. window.location.href read INSIDE the
+    # target is the only reading that means anything.
+    r = s.send("Runtime.evaluate", expression="window.location.href", returnByValue=True)
+    return r["result"]["value"]
 
+
+def run(a):
     if a.cmd == "targets":
         for t in targets(a.port):
             print(f"{t['id']}\t{t['url']}")
@@ -135,49 +144,41 @@ def main():
     s = open_target(a.port, a.target, a.timeout)
     try:
         if a.cmd == "url":
-            # ⛔ NOT /json/list's cached .url. Measured 2026-09-09: a parked
-            # workspace.google.com page sits in the target list while the session is
-            # perfectly healthy, and KNOWN-ISSUES.md:16-22 records both the title and
-            # the URL as stale cached renders. window.location.href read INSIDE the
-            # target is the only reading that means anything.
-            r = s.send("Runtime.evaluate", expression="window.location.href",
-                       returnByValue=True)
-            print(r["result"]["value"])
+            print(live_href(s))
         elif a.cmd == "navigate":
+            if not a.url:
+                raise SystemExit("navigate needs --url")
             s.send("Page.enable")
             nav = s.send("Page.navigate", url=a.url)
             # A navigation Chrome itself reports as failed (DNS, refused, aborted) is a
-            # POSITIVELY IDENTIFIED transport fault. Say so and exit non-zero rather
-            # than waiting for a load event on Chrome's own error page and printing
-            # its URL as if the navigation had worked.
+            # POSITIVELY IDENTIFIED fault. Say so and exit non-zero rather than waiting
+            # for a load event on Chrome's own error page and printing its URL as if the
+            # navigation had worked.
             if nav.get("errorText"):
                 print(f"navigation failed: {nav['errorText']}", file=sys.stderr)
                 return 3
             s.wait_for("Page.loadEventFired", a.timeout)
-            r = s.send("Runtime.evaluate", expression="window.location.href",
-                       returnByValue=True)
-            print(r["result"]["value"])
-        elif a.cmd == "eval":
-            r = s.send("Runtime.evaluate", expression=a.expr, returnByValue=True)
-            print(json.dumps(r.get("result", {}).get("value")))
-        elif a.cmd == "shot":
-            r = s.send("Page.captureScreenshot")
-            with open(a.out, "wb") as fh:
-                fh.write(base64.b64decode(r["data"]))
-            print(a.out)
-        elif a.cmd == "dump":
-            # ⚠ FOR THE SPIKE: a dump of a page with a filled-in field can carry what
-            # was typed into it. Task 4 requires the dumps to be grepped before they are
-            # committed; this tool does not scrub them and does not pretend to.
-            r = s.send("Runtime.evaluate",
-                       expression="document.documentElement.outerHTML",
-                       returnByValue=True)
-            with open(a.out, "w", encoding="utf-8") as fh:
-                fh.write(r["result"]["value"])
-            print(a.out)
+            print(live_href(s))
     finally:
         s.close()
     return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", choices=["targets", "url", "navigate"])
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--target")
+    ap.add_argument("--url")
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
+    a = ap.parse_args()
+    try:
+        return run(a)
+    except (Transport, OSError, websocket.WebSocketException) as e:
+        # OSError covers a refused/reset socket; WebSocketException covers a closed
+        # socket and WebSocketTimeoutException (no load event within --timeout).
+        print(f"transport: {type(e).__name__}: {e}", file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":

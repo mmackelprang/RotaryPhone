@@ -805,7 +805,14 @@ if (Test-Path $extensionDir) {
 # and it would land here as a stale or missing gv-bridge-ensure.sh on the box.
 $deployScripts = Join-Path $RepoRoot "deploy"
 $systemdDir = Join-Path $deployScripts "systemd"
-$shellScripts = @(Get-ChildItem -Path $deployScripts -Filter "*.sh" -File -ErrorAction SilentlyContinue)
+# ⚠ *.sh AND *.py, still with no -Recurse (deploy/tools/ and deploy/tests/ never ship).
+# The .py half exists for auto-relogin (docs/plans/gv-auto-relogin.md §7.4): the actuator
+# needs deploy/gv-cdp.py on the box, and the owner-written sign-in driver
+# deploy/gv-relogin-signin.py ships the same way once it exists. Before this, a .py
+# placed in deploy/ was silently NOT shipped -- the exact trap Task 11's draft fell into
+# by calling ${HERE}/../tools/gv-cdp.py, a file that never reaches the box.
+$shellScripts = @(Get-ChildItem -Path $deployScripts -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Extension -eq ".sh" -or $_.Extension -eq ".py" } | Sort-Object Name)
 $unitFiles = @(if (Test-Path $systemdDir) { Get-ChildItem -Path $systemdDir -File })
 
 if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
@@ -838,7 +845,8 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   # runs under `set -e`. It matters because setup-gvbridge.sh has to be executable for
   # the deploy to be able to run it.
   $chmodCmds = @()
-  if ($shellScripts.Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if (@($shellScripts | Where-Object { $_.Extension -eq ".sh" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if (@($shellScripts | Where-Object { $_.Extension -eq ".py" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.py" }
   if ($unitFiles.Count -gt 0)    { $chmodCmds += "chmod 644 ${TargetPath}/deploy/systemd/*" }
   if ($chmodCmds.Count -gt 0) {
     ssh $SshTarget ("set -e; " + ($chmodCmds -join "; "))
