@@ -1620,6 +1620,11 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
                 return false;
             }
 
+            // Chrome answered with cookies, so a half-counted periodic Unreachable streak is broken: the
+            // next cron fault must not pair with one from before this observation and overwrite whatever
+            // this rung is about to record.
+            NoteBrowserExtractionSucceeded();
+
             // Taken only now, not around the CDP extraction: talking to Chrome swaps nothing, and
             // holding the gate across it would block rotations for the extraction's duration too.
             using var gate = await LockCookieMutationsAsync();

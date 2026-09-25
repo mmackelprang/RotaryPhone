@@ -132,7 +132,9 @@ public class RefreshFromBrowserOutcomeTests
       m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()), Times.Never);
     rig.Registry.Verify(
       r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()), Times.Never);
-    Assert.True(rig.Adapter.IsAvailable);   // a status write, not an availability change
+    // Regression guard only (availability was forced true on an unactivated adapter): it catches the
+    // record path ever growing a SetAvailable(false)/MarkUnavailable.
+    Assert.True(rig.Adapter.IsAvailable);
   }
 
   [Fact]
@@ -248,6 +250,17 @@ public class RefreshFromBrowserOutcomeTests
 
     Assert.Equal(9555, extractor.LastPort);
     Assert.Equal("SignedOut", rig.Adapter.BrowserRefreshOutcomeName);
+  }
+
+  [Fact]
+  public void TheCronsLiteralBody_DeserializesToNoPort_SoConfigWins()
+  {
+    // What the box actually sends: `-d "{}"` (/opt/rotary-phone/refresh-gv-cookies.sh). The previous
+    // test builds the record in C#; this proves the JSON binding agrees.
+    var web = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+    Assert.Null(JsonSerializer.Deserialize<RefreshFromBrowserRequest>("{}", web)!.CdpPort);
+    Assert.Equal(9224, JsonSerializer.Deserialize<RefreshFromBrowserRequest>("""{"cdpPort":9224}""", web)!.CdpPort);
   }
 
   [Theory]
