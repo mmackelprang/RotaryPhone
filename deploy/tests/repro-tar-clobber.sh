@@ -75,7 +75,7 @@ build_fixture() {
 # extraction prints "tar: .: Cannot unlink: Invalid argument" and exits 2.
 build_fixed_archive() {
     ( cd "$WORK/src" && find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 \
-        | tar --null --exclude=./appsettings.Production.json -czf "$WORK/fixed.tgz" -T - )
+        | tar --null --exclude=./appsettings.Production.json --exclude=./gv-account.conf -czf "$WORK/fixed.tgz" -T - )
 }
 
 echo "=== Case A: the chain exactly as the PRE-FIX code built it ==="
@@ -257,6 +257,88 @@ d_empty=$(tar -tzf "$WORK/fixed.tgz" | grep -c 'emptydir')
 echo "D4: empty_dir_members=$d_empty  (expected 0 -- documented limitation, not a bug)"
 [ "$d_empty" -eq 0 ]
 check "D4" $? "(empty directories are dropped; see the comment in Deploy-ToLinux.ps1)"
+echo ""
+
+echo "=== Case E/F: gv-account.conf survives BOTH deploy branches (docs/plans/gv-auto-relogin.md Task 8) ==="
+# ⛔ Two branches, two different verbs, two different exclusions:
+#   tar   -> the exclusion prevents an OVERWRITE (the member is never in the stream)
+#   rsync -> the exclusion prevents a DELETION  (--delete removes what the source lacks)
+# A test that only inspected the tar member list would pass while the rsync branch ate
+# the file. So each branch gets its own case, and each asserts the file's CONTENTS
+# after the transfer -- the outcome, not the mechanism.
+#
+# ⭐ THE EXCLUSIONS ARE READ FROM THE SHIPPED Deploy-ToLinux.ps1, not restated here. A
+# copy in this file would keep passing the day someone drops the line from the real
+# script. If the extraction below finds nothing, that is a FAILURE, not a pass.
+PS1="$(cd "$(dirname "$0")" && pwd)/../Deploy-ToLinux.ps1"
+# tr -d '\r': the .ps1 is not pinned to LF by .gitattributes, so a Windows checkout
+# read through WSL carries CRLF and every end-anchored match below would miss.
+tar_line="$(tr -d '\r' < "$PS1" | grep -F '" tar --null' | head -1)"
+TAR_EXCLUDES=()
+while IFS= read -r x; do [ -n "$x" ] && TAR_EXCLUDES+=("$x"); done \
+    < <(printf '%s\n' "$tar_line" | grep -oE -- '--exclude=[^ ]+')
+RSYNC_VALUES=()
+while IFS= read -r x; do [ -n "$x" ] && RSYNC_VALUES+=("$x"); done \
+    < <(tr -d '\r' < "$PS1" | awk '/rsync -az --delete/{f=1; next} f && /-e ssh/{f=0} f' \
+        | sed -n "s/^ *--exclude '\([^']*\)' *\`\$/\1/p")
+rsync_flags() { # rsync_flags [VALUE-TO-OMIT] -> prints one argv element per line
+    local v; for v in "${RSYNC_VALUES[@]}"; do [ "$v" = "${1:-}" ] || printf -- '--exclude\n%s\n' "$v"; done
+}
+echo "E/F: shipped tar excludes:   ${TAR_EXCLUDES[*]:-NONE FOUND}"
+echo "E/F: shipped rsync excludes: ${RSYNC_VALUES[*]:-NONE FOUND}"
+printf '%s\n' "${TAR_EXCLUDES[@]}" | grep -qx -- '--exclude=./gv-account.conf'
+check "E0-tar" $? "(the shipped tar line excludes ./gv-account.conf)"
+printf '%s\n' "${RSYNC_VALUES[@]}" | grep -qx 'gv-account.conf'
+check "E0-rsync" $? "(the shipped rsync command excludes gv-account.conf)"
+
+SECRET='GV_ACCOUNT_PASSWORD=THE-OWNERS-SECRET'
+# E: the TAR branch.
+build_fixture
+echo "$SECRET" > "$WORK/dst/gv-account.conf"; chmod 600 "$WORK/dst/gv-account.conf"
+# A stray copy IN THE PUBLISH TREE -- the thing the tar exclusion exists for. Without
+# it the case could not tell an exclusion from an absence.
+echo 'STRAY-TEMPLATE' > "$WORK/src/gv-account.conf"
+( cd "$WORK/src" && find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 \
+    | tar --null "${TAR_EXCLUDES[@]}" -czf "$WORK/e.tgz" -T - )
+e_member="$(tar -tzf "$WORK/e.tgz" | grep -c 'gv-account.conf')"
+tar -xzf "$WORK/e.tgz" --unlink-first -C "$WORK/dst" 2>/dev/null
+e_cfg="$(cat "$WORK/dst/gv-account.conf")"
+e_mode="$(stat -c %a "$WORK/dst/gv-account.conf")"
+e_bin="$(cat "$WORK/dst/RotaryPhoneController.Server")"
+echo "E: member_count=$e_member  contents=$e_cfg  mode=$e_mode  binary=$e_bin"
+[ "$e_member" -eq 0 ] && [ "$e_cfg" = "$SECRET" ] && [ "$e_mode" = "600" ] && [ "$e_bin" = "NEW-BINARY" ]
+check "E" $? "(not a member; the box's file SURVIVED the extract, contents and mode 600 intact)"
+
+# F: the RSYNC branch.
+if ! command -v rsync >/dev/null 2>&1; then
+    # ⛔ LOUD, and it FAILS the run. A protection test that goes quiet when its
+    # subject is missing is the defect this repo corrected in its deploy gate on
+    # 2026-09-09. Install rsync to run this file.
+    echo "F: SKIPPED-LOUDLY -- rsync is not installed; the DELETING branch is untested"
+    FAILED=1
+else
+    build_fixture
+    mkdir -p "$WORK/dst/data" "$WORK/dst/logs"
+    echo 'COOKIES' > "$WORK/dst/data/cookies.json"
+    echo "$SECRET" > "$WORK/dst/gv-account.conf"; chmod 600 "$WORK/dst/gv-account.conf"
+    mapfile -t FLAGS < <(rsync_flags)
+    rsync -a --delete "${FLAGS[@]}" "$WORK/src/" "$WORK/dst/"
+    f_cfg="$(cat "$WORK/dst/gv-account.conf" 2>/dev/null || echo DELETED)"
+    f_data="$(cat "$WORK/dst/data/cookies.json" 2>/dev/null || echo DELETED)"
+    echo "F: contents=$f_cfg  data=$f_data"
+    [ "$f_cfg" = "$SECRET" ] && [ "$f_data" = "COOKIES" ]
+    check "F" $? "(the box's file SURVIVED rsync --delete with the shipped exclusions; data/ too)"
+
+    # F-neg: ⭐ THE NEGATIVE CONTROL. The same rsync with gv-account.conf removed from
+    # the exclusions must DESTROY the file. A protection test that has never seen the
+    # unprotected case is a check that cannot fail.
+    mapfile -t NEG < <(rsync_flags gv-account.conf)
+    rsync -a --delete "${NEG[@]}" "$WORK/src/" "$WORK/dst/"
+    fneg="$([ -f "$WORK/dst/gv-account.conf" ] && echo present || echo missing)"
+    echo "F-neg: excludes=${NEG[*]}  gv-account.conf=$fneg"
+    [ "$fneg" = "missing" ]
+    check "F-neg" $? "(WITHOUT the exclusion rsync --delete DELETES the credential -- the case is real)"
+fi
 echo ""
 
 if [ "$FAILED" -eq 0 ]; then
