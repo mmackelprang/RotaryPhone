@@ -103,7 +103,12 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
         if (tab is null)
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoMatchingTab,
                 $"No tab found with URL containing \"{targetUrl}\". Open voice.google.com in Chrome first.")
-                with { TabUrls = tabs.Select(t => t.Url ?? "").ToList() };
+                // PAGE targets only: /json also lists iframes, service workers and background pages,
+                // whose URLs say nothing about what the user-visible page is showing. A target with no
+                // type is kept (older Chrome, and fixtures), since it cannot be ruled out.
+                with { TabUrls = tabs
+                    .Where(t => t.Type is null || t.Type.Equals("page", StringComparison.OrdinalIgnoreCase))
+                    .Select(t => t.Url ?? "").ToList() };
 
         if (string.IsNullOrEmpty(tab.WebSocketDebuggerUrl))
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoDebuggerUrl,
@@ -190,6 +195,12 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
         using var doc = JsonDocument.Parse(responseJson);
         var root = doc.RootElement;
 
+        // ⚠ A CDP ERROR REPLY IS NOT "NO COOKIES". Returning ("", 0) here would surface as NoCookies,
+        // which the adapter now reads as SignedOut — a protocol fault reported as a sign-out. Throwing
+        // lands in ExtractAsync's catch as ExtractionFailed instead.
+        if (root.TryGetProperty("error", out var cdpError))
+            throw new InvalidOperationException($"CDP Network.getCookies returned an error: {cdpError}");
+
         if (!root.TryGetProperty("result", out var resultProp) ||
             !resultProp.TryGetProperty("cookies", out var cookiesArray))
         {
@@ -233,6 +244,7 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
     internal record CdpTab
     {
         public string? Url { get; init; }
+        public string? Type { get; init; }
         public string? WebSocketDebuggerUrl { get; init; }
     }
 }

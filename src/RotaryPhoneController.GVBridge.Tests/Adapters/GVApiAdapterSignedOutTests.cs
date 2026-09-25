@@ -61,12 +61,14 @@ public class GVApiAdapterSignedOutTests
 
     /// <summary>The real extractor, fed a CDP <c>/json</c> tab list and nothing else.</summary>
     private static CdpCookieExtractor ExtractorSeeingTabs(params string[] urls)
-    {
-        var tabsJson = JsonSerializer.Serialize(urls.Select(u => new
+        => ExtractorSeeingJson(JsonSerializer.Serialize(urls.Select(u => new
         {
             url = u,
             webSocketDebuggerUrl = "ws://localhost:9224/devtools/page/abc",
-        }));
+        })));
+
+    private static CdpCookieExtractor ExtractorSeeingJson(string tabsJson)
+    {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
             .Setup<Task<HttpResponseMessage>>("SendAsync",
@@ -116,7 +118,7 @@ public class GVApiAdapterSignedOutTests
         // nothing about the Google login, and "signed out" would be an unearned claim.
         var adapter = await RefreshWith(ExtractorSeeingTabs("https://www.google.com/search?q=hello"));
 
-        Assert.NotEqual("SignedOut", adapter.BrowserRefreshOutcomeName);
+        Assert.Equal("Unreachable", adapter.BrowserRefreshOutcomeName);   // exact: NotEqual would also pass if rung 3 never ran
     }
 
     [Theory]
@@ -128,7 +130,20 @@ public class GVApiAdapterSignedOutTests
     {
         var adapter = await RefreshWith(ExtractorSeeingTabs(url));
 
-        Assert.NotEqual("SignedOut", adapter.BrowserRefreshOutcomeName);
+        Assert.Equal("Unreachable", adapter.BrowserRefreshOutcomeName);   // exact: NotEqual would also pass if rung 3 never ran
+    }
+
+    [Fact]
+    public async Task NoVoiceTab_OnlyANonPageTargetOnTheSignInHost_IsNotClaimedSignedOut()
+    {
+        // /json lists iframes and service workers too. An accounts.google.com service worker says
+        // nothing about what the visible page shows, so only PAGE targets may earn the label.
+        var adapter = await RefreshWith(ExtractorSeeingJson("""
+            [{"type":"page","url":"https://www.google.com/search?q=hello","webSocketDebuggerUrl":"ws://x/1"},
+             {"type":"service_worker","url":"https://accounts.google.com/sw.js","webSocketDebuggerUrl":"ws://x/2"}]
+            """));
+
+        Assert.Equal("Unreachable", adapter.BrowserRefreshOutcomeName);
     }
 
     [Fact]

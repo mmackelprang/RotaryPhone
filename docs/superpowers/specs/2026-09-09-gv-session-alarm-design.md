@@ -169,7 +169,10 @@ move past.
   is nothing to close: no `RESOLVED` is posted (it would root a new thread with an all-clear for
   an alarm nobody raised), the retirement is journaled, and the key is cleared so the next
   incident opens its own thread. If *anything* was delivered — the root, or an alert whose root
-  was refused — the `RESOLVED` is posted under that key as usual. Measured cause: a key minted
+  was refused — the `RESOLVED` is posted under that key as usual. **"Nothing delivered" must be
+  proven:** only a refused connection or a non-2xx reply counts. A timeout (curl 28) or a dropped
+  reply may have delivered, so it is treated as delivered — the worst case is one quiet
+  `RESOLVED`, versus an alert the owner saw that is never closed. Measured cause: a key minted
   during a 2026-09-20 gateway outage survived its recovery and was reused by an unrelated
   incident five days later.
 

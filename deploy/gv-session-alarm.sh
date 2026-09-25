@@ -130,13 +130,20 @@ PENDING_POLLS=0
 # replying into nothing. A gateway that is down when an incident opens is a correlated
 # failure, not an exotic one. Found in pre-merge review 2026-09-09.
 THREAD_ROOT_DELIVERED=0
-# ⛔ "Did the owner see ANY message from this incident?" — root OR alert. Not derivable
-# from the other fields: a root refused while its alert is accepted leaves
-# THREAD_ROOT_DELIVERED=0 and LAST_POSTED_CONDITION unmoved, identical to an incident
-# where nothing arrived at all. The two must end differently on recovery (see the ok
-# branch), so the alert's delivery is recorded on its own. Absent from a pre-2026-09-25
-# state file, where it defaults to 0 — safe, because THREAD_ROOT_DELIVERED still counts.
-INCIDENT_ALERT_DELIVERED=0
+# ⛔ "MIGHT the owner have seen ANY message from this incident?" — root OR alert, delivered
+# OR possibly delivered. Not derivable from the other fields: a root refused while its alert
+# is accepted leaves THREAD_ROOT_DELIVERED=0 and LAST_POSTED_CONDITION unmoved, identical to
+# an incident where nothing arrived at all. The two must end differently on recovery (see
+# the ok branch).
+# ⚠ "POSSIBLY" is load-bearing. A curl TIMEOUT (exit 28) — the very failure of 2026-09-20 —
+# does not prove nothing arrived: the gateway may have accepted the message and been slow to
+# answer. Only a refused connection or a non-2xx reply proves non-delivery. Guessing "not
+# delivered" on a timeout would retire an alert the owner may have SEEN without ever closing
+# it; guessing "delivered" costs at most one quiet RESOLVED. Pre-merge review 2026-09-25.
+# ⚠ Absent from a pre-2026-09-25 state file, where it defaults to 0. THREAD_ROOT_DELIVERED
+# still counts, so the only state that loses is "root refused, alert accepted" written by
+# the OLD script — which that script would have stranded anyway.
+INCIDENT_MAY_HAVE_DELIVERED=0
 
 if [ -r "$STATE_FILE" ]; then
     # shellcheck disable=SC1090
@@ -157,7 +164,7 @@ write_state() {
         printf 'PENDING_CONDITION=%q\n'     "$PENDING_CONDITION"
         printf 'PENDING_POLLS=%q\n'         "$PENDING_POLLS"
         printf 'THREAD_ROOT_DELIVERED=%q\n' "$THREAD_ROOT_DELIVERED"
-        printf 'INCIDENT_ALERT_DELIVERED=%q\n' "$INCIDENT_ALERT_DELIVERED"
+        printf 'INCIDENT_MAY_HAVE_DELIVERED=%q\n' "$INCIDENT_MAY_HAVE_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
     return 0
@@ -237,6 +244,10 @@ ACTION_MAX="${GV_ALARM_ACTION_MAX:-200}"
 
 NOTIFY_ATTEMPTED=0
 NOTIFY_FAILED=0
+# Set by each post_notify: 1 when the call FAILED but the message may still have been
+# delivered (timeout / connection dropped after sending). See INCIDENT_MAY_HAVE_DELIVERED.
+LAST_NOTIFY_MAYBE_DELIVERED=0
+NOTIFY_MAX_TIME="${GV_ALARM_NOTIFY_MAX_TIME:-15}"
 
 # Truncate to (ACTION_MAX - 3) and append ASCII "...", NOT a one-character "…".
 # The measured cap is in characters, but we do not control what the gateway
@@ -279,9 +290,10 @@ post_notify() {
         || { log "NOTIFY FAILED: could not build the payload for ${dedupe}"; NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED+1)); NOTIFY_FAILED=$((NOTIFY_FAILED+1)); return 1; }
 
     NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED + 1))
+    LAST_NOTIFY_MAYBE_DELIVERED=0
 
     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$ROTARYPHONE_GATEWAY_TOKEN" \
-        | curl -sS --max-time 15 -X POST --config - \
+        | curl -sS --max-time "$NOTIFY_MAX_TIME" -X POST --config - \
         -H 'Content-Type: application/json' \
         -w $'\n%{http_code}' \
         --data-binary "$payload" \
@@ -292,7 +304,15 @@ post_notify() {
 
     if [ "$rc" -ne 0 ]; then
         NOTIFY_FAILED=$((NOTIFY_FAILED + 1))
-        log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. Transport error, nothing delivered. Detail: ${out}"
+        case "$rc" in
+            # 28 timeout, 52 empty reply, 55/56 send/receive failure: the request may have
+            # reached the gateway, and it may have delivered. Not proof of non-delivery.
+            28|52|55|56)
+                LAST_NOTIFY_MAYBE_DELIVERED=1
+                log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. No confirmation — the gateway MAY have delivered it. Detail: ${out}" ;;
+            *)
+                log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. Transport error, nothing delivered. Detail: ${out}" ;;
+        esac
         return 1
     fi
 
@@ -484,6 +504,10 @@ Identifiers: thread \`${INCIDENT_THREAD_KEY}\`, status \`${STATUS_URL}\`, opened
         "$INCIDENT_THREAD_KEY"
     then
         THREAD_ROOT_DELIVERED=1
+    elif [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ]; then
+        # Still re-attempted next cycle (its dedupe_key collapses a duplicate), but the
+        # incident can no longer be retired silently: the owner may have seen this root.
+        INCIDENT_MAY_HAVE_DELIVERED=1
     fi
 }
 
@@ -511,19 +535,20 @@ elif [ "$condition" = "$LAST_POSTED_CONDITION" ] && { [ "$condition" != "ok" ] |
 elif [ "$PENDING_POLLS" -lt "$MIN_POLLS_TO_POST" ]; then
     log "condition=${condition} seen ${PENDING_POLLS}/${MIN_POLLS_TO_POST} consecutive polls; not posting yet."
 elif [ "$condition" = "ok" ]; then
-    if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" != "1" ] && [ "$INCIDENT_ALERT_DELIVERED" != "1" ]; then
-        # RETIRED, SILENTLY. Nothing from this incident ever reached the owner — not the root,
-        # not the alert — so there is no alert for a RESOLVED to close, and a RESOLVED here
+    if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" != "1" ] && [ "$INCIDENT_MAY_HAVE_DELIVERED" != "1" ]; then
+        # RETIRED, SILENTLY. Nothing from this incident reached the owner — every attempt was
+        # PROVABLY refused (connection refused, or a non-2xx reply; a timeout does not count,
+        # see INCIDENT_MAY_HAVE_DELIVERED) — so there is no alert for a RESOLVED to close, and a RESOLVED here
         # would be an all-clear for an alarm nobody raised. Posting one would also root a
         # new thread with a RESOLVED, which the chat policy forbids. So: journal it, and
         # clear the key so the NEXT incident opens its own thread. The gateway's dead-man
         # already covered the window, because the refused cycles did not refresh it.
-        log "incident ${INCIDENT_THREAD_KEY} (opened ${INCIDENT_OPENED_AT}) recovered with NOTHING delivered — no root, no alert. Nothing to close, so nothing posted; retired ${INCIDENT_THREAD_KEY} so the next incident opens its own thread."
+        log "incident ${INCIDENT_THREAD_KEY} (opened ${INCIDENT_OPENED_AT}) recovered with NOTHING delivered — every root and alert attempt was refused. Nothing to close, so nothing posted; retired ${INCIDENT_THREAD_KEY} so the next incident opens its own thread."
         LAST_POSTED_CONDITION="ok"
         INCIDENT_THREAD_KEY=""
         INCIDENT_OPENED_AT=""
         THREAD_ROOT_DELIVERED=0
-        INCIDENT_ALERT_DELIVERED=0
+        INCIDENT_MAY_HAVE_DELIVERED=0
     elif [ -n "$INCIDENT_THREAD_KEY" ]; then
         # RESOLVED — quiet, and it MUST reply into the open thread.
         post_notify "info" \
@@ -540,7 +565,7 @@ Action: none." \
             INCIDENT_THREAD_KEY=""
             INCIDENT_OPENED_AT=""
             THREAD_ROOT_DELIVERED=0
-            INCIDENT_ALERT_DELIVERED=0
+            INCIDENT_MAY_HAVE_DELIVERED=0
         fi
     else
         # Healthy, and no incident was ever open. Post nothing at all.
@@ -567,7 +592,8 @@ $(body_for "$condition")" \
         "$(action_for "$condition")" \
         "${SOURCE_NAME}-gv-session-${condition}" \
         "$INCIDENT_THREAD_KEY" \
-        && INCIDENT_ALERT_DELIVERED=1
+        && INCIDENT_MAY_HAVE_DELIVERED=1
+    [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ] && INCIDENT_MAY_HAVE_DELIVERED=1
     [ "$NOTIFY_FAILED" -eq 0 ] && LAST_POSTED_CONDITION="$condition"
 fi
 

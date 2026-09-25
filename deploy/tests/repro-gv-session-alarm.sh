@@ -418,6 +418,45 @@ next_root="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | hea
 check "…and the next incident opens a NEW thread" "different" \
       "$([ -n "$next_root" ] && [ "$next_root" != "$root_only" ] && echo different || echo same)"
 
+# ⛔ A TIMEOUT IS NOT PROOF OF NON-DELIVERY (pre-merge review 2026-09-25). The 2026-09-20
+# failure was curl 28. If the gateway accepted and delivered while our curl gave up, the
+# owner SAW the alert — and retiring it silently would leave it open forever. So a timed-out
+# incident is closed with a RESOLVED under its key, not retired.
+start_gateway --delay-notify 3
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'
+GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>"$WORK/err.txt"
+rc=$?
+check "gateway slower than our timeout -> exit 1" "1" "$rc"
+check "…and the journal says it MAY have been delivered, not that nothing was" "yes" \
+      "$(grep -q 'MAY have delivered' "$WORK/err.txt" && echo yes || echo no)"
+sleep 4                                   # let the stub finish delivering what we gave up on
+timed_out_key="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "…while the gateway DID deliver the alert" "yes" \
+      "$([ -n "$timed_out_key" ] && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery closes it with a RESOLVED under that key, not a silent retirement" "$timed_out_key" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# A state file written by the PRE-2026-09-25 script has no INCIDENT_MAY_HAVE_DELIVERED. It
+# must load under `set -u` and still close a delivered incident normally.
+reset
+cat > "$GV_ALARM_STATE_FILE" <<'EOF'
+LAST_POSTED_CONDITION=browser_stale
+INCIDENT_THREAD_KEY=rotaryphone-gv-session-20260901T000000Z
+INCIDENT_OPENED_AT=2026-09-01T00:00:00Z
+PENDING_CONDITION=browser_stale
+PENDING_POLLS=4
+THREAD_ROOT_DELIVERED=1
+EOF
+serve '{"browserRefreshOutcome":"Succeeded"}'
+rc="$(run)"
+check "old-format state file -> exit 0" "0" "$rc"
+check "…and the delivered incident is closed under its own key" "rotaryphone-gv-session-20260901T000000Z" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
 echo "=== Task 10 — flapping threads under ONE incident ==="
 reset
 serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null
