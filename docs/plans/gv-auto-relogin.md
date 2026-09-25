@@ -2437,3 +2437,56 @@ in a state that is worse than not having started.**
 >
 > **And when the outcome is one you do not recognise, stop. An unrecognised outcome is not evidence that trying
 > again is safe.**
+
+---
+
+## 7. Build record
+
+Written by the builder on `feat/gv-auto-relogin`, additively. Nothing above this line was rewritten.
+
+### 7.1 Task 1 — the owner's gates, recorded 2026-09-25
+
+| Gate | Owner's answer | Measurement the owner read, verbatim |
+|---|---|---|
+| **G1** — is the cannibalisation test concluded? | ✅ **met** | `~/.local/state/gv-cannibal-test.log`: 2026-09-09 17:36 → 2026-09-13 03:01 (ended by the Sunday 03:00 `radio-weekly-maintenance` reboot), 2,448 samples, 8 stale in two episodes (2026-09-10 11:41 ~2 min; 2026-09-12 01:41–01:53 ~12 min), both self-recovered, no sign-in. |
+| **G2** — does the result clear the actuator? | ✅ **met** — sessions last days | Alarm journal 2026-09-13 → 2026-09-25: 1,533 `condition=ok`, 58 `not_attempted`, zero signed-out conditions; the session survived two weekly reboots without a sign-in. |
+
+⚠ G2 is met as the **owner's** reading of that data. This record adds no duration of its own (§1.2, Task 1).
+
+### 7.2 Task 2 — the escalation-path gate, read-only on the box, 2026-09-25 09:30 EDT
+
+```
+$ ls -l --time-style=long-iso ~/bin/gv-session-alarm.sh
+-rwxr-xr-x 1 mmack mmack 31172 2026-09-10 12:10 /home/mmack/bin/gv-session-alarm.sh
+$ sha256sum ~/bin/gv-session-alarm.sh /opt/rotary-phone/deploy/gv-session-alarm.sh
+db782b6b48275ba7218d7641a773d3f2efe64ee1db1b74a61caf6a23d7c763ff  /home/mmack/bin/gv-session-alarm.sh
+db782b6b48275ba7218d7641a773d3f2efe64ee1db1b74a61caf6a23d7c763ff  /opt/rotary-phone/deploy/gv-session-alarm.sh
+$ systemctl --user list-unit-files 'gv-session-alarm.*'
+gv-session-alarm.service static  -
+gv-session-alarm.timer   enabled enabled
+$ systemctl --user list-timers 'gv-session-alarm.*'
+NEXT Fri 2026-09-25 09:30:22 EDT (10s)   LAST Fri 2026-09-25 09:25:22 EDT   gv-session-alarm.timer
+$ journalctl --user -u gv-session-alarm --since -30min | grep -E 'heartbeat refreshed|NOTIFY|condition='
+... 13:25:22Z outcome=Succeeded condition=ok age=320 polls=1336 last_posted=ok
+... 13:25:22Z heartbeat refreshed http=200 schedule=every:5m grace=30m
+```
+
+| Acceptance | Result |
+|---|---|
+| sha256 pair matches; both units listed | ✅ |
+| plain `list-timers` shows NEXT within 5 minutes | ✅ (10 s) |
+| ⛔ owner has SEEN a delivered message | ✅ **via the dead-man path**: the owner saw the gateway's missing-check alert in Google Chat on 2026-09-20 |
+
+⚠ **Two things this gate did not settle, recorded rather than resolved:**
+
+1. **The installed alarm is not `main`'s alarm.** Installed == shipped (the pair above matches), but both are the
+   build *before* `a2077a0` (`git show main:deploy/gv-session-alarm.sh | sha256sum` = `f0c6423b…`). The diff is
+   the heartbeat-schedule fix: the installed script still defaults to `schedule=5m`, which the gateway refuses.
+   The box works because `~/.rotaryphone-env` carries `GV_ALARM_HEARTBEAT_SCHEDULE=every:5m`. Merged ≠ deployed
+   again, currently harmless because of the override. The next deploy + `install-gv-session-alarm.sh` closes it.
+2. **The 2026-09-20 03:04–08:10 EDT delivery failure is unexplained.** After the weekly reboot refresh was
+   `NotAttempted` and all 112 gateway POSTs timed out (curl exit 28), `THREAD_ROOT_DELIVERED=0`; it self-recovered
+   08:14. A human was reached only through the gateway's dead-man. Tracked separately; not investigated here.
+
+⛔ So Task 2 is recorded as **passing on the owner's confirmation**, with the owner aware that the one proven
+delivery path to date is the dead-man, not the alarm's own notify.
