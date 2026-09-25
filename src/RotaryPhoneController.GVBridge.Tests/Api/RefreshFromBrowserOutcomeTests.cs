@@ -39,11 +39,29 @@ public class RefreshFromBrowserOutcomeTests
 {
   private const int ConfiguredCdpPort = 9224;
 
-  private sealed class FakeCdpExtractor(CdpExtractionResult result) : ICdpCookieExtractor
+  private sealed class FakeCdpExtractor(params CdpExtractionResult[] results) : ICdpCookieExtractor
   {
+    private int _next;
+    public int? LastPort { get; private set; }
+
+    /// <summary>Returns the results in order, repeating the last one.</summary>
     public Task<CdpExtractionResult> ExtractAsync(int cdpPort, string targetUrl, CancellationToken ct = default)
-      => Task.FromResult(result);
+    {
+      LastPort = cdpPort;
+      return Task.FromResult(results[Math.Min(_next++, results.Length - 1)]);
+    }
   }
+
+  private static readonly GvCookieSet Extracted = new()
+  {
+    Sapisid = "SAPISID-EXTRACTED", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
+  };
+
+  private static CdpExtractionResult Ok() => new(CdpExtractionStatus.Success, Extracted, 20, null);
+  private static CdpExtractionResult Gone() =>
+    CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "Chrome not reachable");
+  private static CdpExtractionResult NoSession() =>
+    CdpExtractionResult.Fail(CdpExtractionStatus.MissingRequiredCookies, "no session");
 
   private sealed record Rig(
     GVBridgeController Controller,
@@ -53,7 +71,8 @@ public class RefreshFromBrowserOutcomeTests
 
   private static Rig Build(
     ICdpCookieExtractor extractor,
-    GVApiAdapter.BrowserRefreshOutcome startingOutcome = GVApiAdapter.BrowserRefreshOutcome.Succeeded)
+    GVApiAdapter.BrowserRefreshOutcome startingOutcome = GVApiAdapter.BrowserRefreshOutcome.Succeeded,
+    int configuredCdpPort = ConfiguredCdpPort)
   {
     var registry = new Mock<ICallAdapterRegistry>();
     registry.Setup(r => r.ActiveMode).Returns(CallAdapterMode.GVApi);
@@ -64,11 +83,12 @@ public class RefreshFromBrowserOutcomeTests
       GvApiKey = "test",
       CookieFilePath = "test.enc",
       CookieEncryptionKey = Convert.ToBase64String(new byte[32]),
-      ChromeCdpPort = ConfiguredCdpPort,
+      ChromeCdpPort = configuredCdpPort,
     });
 
     var adapter = new GVApiAdapter(config, NullLogger<GVApiAdapter>.Instance, NullLoggerFactory.Instance);
     GVApiAdapterRecoveryTests.SetField(adapter, "_lastBrowserRefreshOutcome", startingOutcome);
+    GVApiAdapterRecoveryTests.SetAvailable(adapter, true);
 
     var cookieManager = new Mock<IGvCookieManager>();
     cookieManager.Setup(m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()))
@@ -112,6 +132,7 @@ public class RefreshFromBrowserOutcomeTests
       m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()), Times.Never);
     rig.Registry.Verify(
       r => r.SwitchModeAsync(It.IsAny<CallAdapterMode>(), It.IsAny<CancellationToken>()), Times.Never);
+    Assert.True(rig.Adapter.IsAvailable);   // a status write, not an availability change
   }
 
   [Fact]
@@ -144,30 +165,89 @@ public class RefreshFromBrowserOutcomeTests
   }
 
   [Fact]
-  public async Task NoVoiceTab_AndNoGooglePage_RecordsUnreachable_NotSignedOut()
+  public async Task NoVoiceTab_AndNoGooglePage_IsUnreachable_NotSignedOut()
   {
     // Chrome on an unrelated page tells us nothing about the login: the historical classification, not
-    // an unearned "signed out".
+    // an unearned "signed out". Unreachable from this periodic caller needs two in a row (see below).
     var rig = Build(ExtractorSeeingTabs("https://www.google.com/search?q=hello"));
 
-    var result = await rig.Controller.RefreshCookiesFromBrowser(null);
+    var first = await rig.Controller.RefreshCookiesFromBrowser(null);
+    Assert.IsType<NotFoundObjectResult>(first);
+    Assert.Equal("Succeeded", rig.Adapter.BrowserRefreshOutcomeName);   // one is not enough
 
-    Assert.IsType<NotFoundObjectResult>(result);
+    var second = await rig.Controller.RefreshCookiesFromBrowser(null);
+    Assert.IsType<NotFoundObjectResult>(second);
     Assert.Equal("Unreachable", rig.Adapter.BrowserRefreshOutcomeName);
     AssertNoRecoverySideEffects(rig);
   }
 
   [Fact]
-  public async Task ChromeGone_RecordsUnreachable_AndKeeps503()
+  public async Task ChromeGone_RecordsUnreachable_OnTheSecondConsecutiveFailure_AndKeeps503()
   {
-    var rig = Build(new FakeCdpExtractor(
-      CdpExtractionResult.Fail(CdpExtractionStatus.ChromeUnreachable, "Chrome not reachable")));
+    var rig = Build(new FakeCdpExtractor(Gone()));
 
-    var result = await rig.Controller.RefreshCookiesFromBrowser(null);
+    var first = await rig.Controller.RefreshCookiesFromBrowser(null);
+    Assert.Equal(503, Assert.IsType<ObjectResult>(first).StatusCode);
+    Assert.Equal("Succeeded", rig.Adapter.BrowserRefreshOutcomeName);
 
-    Assert.Equal(503, Assert.IsType<ObjectResult>(result).StatusCode);
+    var second = await rig.Controller.RefreshCookiesFromBrowser(null);
+    Assert.Equal(503, Assert.IsType<ObjectResult>(second).StatusCode);
     Assert.Equal("Unreachable", rig.Adapter.BrowserRefreshOutcomeName);
     AssertNoRecoverySideEffects(rig);
+  }
+
+  [Theory]
+  // Pre-merge review 2026-09-25: from the cron, ONE 10 s CDP timeout used to be enough to overwrite a TRUE
+  // Stale/SignedOut with Unreachable for 20 minutes — paging browser_unreachable and switching the
+  // auto-relogin actuator (which acts on Stale/SignedOut only) off.
+  [InlineData("Stale")]
+  [InlineData("SignedOut")]
+  [InlineData("Succeeded")]
+  public async Task OneTransientUnreachable_OverwritesNothing(string before)
+  {
+    var rig = Build(new FakeCdpExtractor(Gone()),
+      startingOutcome: Enum.Parse<GVApiAdapter.BrowserRefreshOutcome>(before));
+
+    await rig.Controller.RefreshCookiesFromBrowser(null);
+
+    Assert.Equal(before, rig.Adapter.BrowserRefreshOutcomeName);
+  }
+
+  [Fact]
+  public async Task TheUnreachableStreak_IsBrokenByASuccessfulExtraction()
+  {
+    // gone, reached, gone: never two IN A ROW, so never recorded.
+    var rig = Build(new FakeCdpExtractor(Gone(), Ok(), Gone()));
+
+    for (var i = 0; i < 3; i++) await rig.Controller.RefreshCookiesFromBrowser(null);
+
+    Assert.Equal("Succeeded", rig.Adapter.BrowserRefreshOutcomeName);
+  }
+
+  [Fact]
+  public async Task TheUnreachableStreak_IsBrokenByASignedOutObservation()
+  {
+    // gone, signed-out, gone: the sign-out is recorded at once and is not then erased by one fault.
+    var rig = Build(new FakeCdpExtractor(Gone(), NoSession(), Gone()));
+
+    for (var i = 0; i < 3; i++) await rig.Controller.RefreshCookiesFromBrowser(null);
+
+    Assert.Equal("SignedOut", rig.Adapter.BrowserRefreshOutcomeName);
+  }
+
+  [Fact]
+  public async Task AnEmptyBody_ProbesTheConfiguredPort_AndRecords()
+  {
+    // The cron posts "{}". RefreshFromBrowserRequest used to default CdpPort to a literal 9224, which
+    // ignored GVBridgeConfig.ChromeCdpPort — and, with the bridge-Chrome guard, would have made this fix
+    // go silently quiet the day the configured port moved.
+    var extractor = new FakeCdpExtractor(NoSession());
+    var rig = Build(extractor, configuredCdpPort: 9555);
+
+    await rig.Controller.RefreshCookiesFromBrowser(new RefreshFromBrowserRequest());
+
+    Assert.Equal(9555, extractor.LastPort);
+    Assert.Equal("SignedOut", rig.Adapter.BrowserRefreshOutcomeName);
   }
 
   [Theory]
@@ -206,19 +286,13 @@ public class RefreshFromBrowserOutcomeTests
     // Success is unchanged: the controller writes nothing itself. Succeeded/Stale is decided by
     // GVApiAdapter.TryAdoptAndPersistCookiesAsync from a LIVE probe — here mocked out, so the value
     // must be exactly what it was.
-    var extracted = new GvCookieSet
-    {
-      Sapisid = "SAPISID-EXTRACTED", Sid = "sid", Hsid = "hsid", Ssid = "ssid", Apisid = "apisid",
-    };
-    var rig = Build(
-      new FakeCdpExtractor(new CdpExtractionResult(CdpExtractionStatus.Success, extracted, 20, null)),
-      startingOutcome: GVApiAdapter.BrowserRefreshOutcome.NotAttempted);
+    var rig = Build(new FakeCdpExtractor(Ok()), startingOutcome: GVApiAdapter.BrowserRefreshOutcome.NotAttempted);
 
     var result = await rig.Controller.RefreshCookiesFromBrowser(null);
 
     Assert.IsType<OkObjectResult>(result);
     Assert.Equal("NotAttempted", rig.Adapter.BrowserRefreshOutcomeName);
     rig.CookieManager.Verify(
-      m => m.SetCookiesAsync(extracted, It.IsAny<CancellationToken>()), Times.Once);
+      m => m.SetCookiesAsync(Extracted, It.IsAny<CancellationToken>()), Times.Once);
   }
 }

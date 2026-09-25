@@ -501,6 +501,33 @@ public class GVApiAdapterCookieLineageTests
         File.Delete(Path.GetDirectoryName(unwritable)!);
     }
 
+    [Theory]
+    [InlineData("SignedOut")]
+    [InlineData("Unreachable")]
+    public async Task Adoption_WhenTheSaveThrows_StillRecordsTheBrowserAsSucceeded(string earlier)
+    {
+        // Since 2026-09-25 the cron's refresh-from-browser records SignedOut/Unreachable on a failed
+        // extraction. If the NEXT fire extracts a set Google accepts but the disk refuses, the browser half
+        // demonstrably worked — leaving the earlier failure pinned would keep the alarm paging on a healthy
+        // Chrome. Rung 3 already records Succeeded on the same disk failure; this is the adopt path matching it.
+        var unwritable = NewUnwritableCookiePath();
+        using var adapter = GVApiAdapterRecoveryTests.CreateAdapter();
+        adapter.HealthProbeOverride = _ => Task.FromResult(true);
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieStore",
+            new GvCookieStore(unwritable, Convert.ToBase64String(new byte[32])));
+        GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet", GVApiAdapterRecoveryTests.NewCookies("SAPISID-GOOD"));
+        GVApiAdapterRecoveryTests.SetField(adapter, "_lastBrowserRefreshOutcome",
+            Enum.Parse<GVApiAdapter.BrowserRefreshOutcome>(earlier));
+
+        var outcome = await adapter.TryAdoptAndPersistCookiesAsync(
+            GVApiAdapterRecoveryTests.NewCookies("SAPISID-FRESH"), "refresh-from-browser");
+
+        Assert.Equal(GVApiAdapter.CookieAdoptionOutcome.PersistFailed, outcome);
+        Assert.Equal("Succeeded", adapter.BrowserRefreshOutcomeName);
+
+        File.Delete(Path.GetDirectoryName(unwritable)!);
+    }
+
     // ------------- the validation window: a rollback must not undo a concurrent recovery
     //
     // TryValidateCandidateAsync publishes an UNVALIDATED candidate into _cookieSet and then awaits a

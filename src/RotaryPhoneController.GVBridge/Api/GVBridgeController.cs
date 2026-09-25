@@ -174,7 +174,13 @@ public class GVBridgeController : ControllerBase
         var cdpPort = request?.CdpPort ?? _config.ChromeCdpPort;
         var targetUrl = request?.TargetUrl ?? GVApiAdapter.BridgeChromeTargetUrl;
 
+        var isBridgeChrome = cdpPort == _config.ChromeCdpPort
+            && string.Equals(targetUrl, GVApiAdapter.BridgeChromeTargetUrl, StringComparison.OrdinalIgnoreCase);
+
         var extraction = await _cdpExtractor.ExtractAsync(cdpPort, targetUrl);
+        if (extraction.Success && isBridgeChrome)
+            _adapter.NoteBrowserExtractionSucceeded();
+
         if (!extraction.Success)
         {
             // ⛔ RECORD IT (2026-09-25). This used to return the error and write nothing, so /status kept
@@ -182,12 +188,9 @@ public class GVBridgeController : ControllerBase
             // ever saw it — the cron that POSTs here every 20 minutes could not move the field.
             // Only for the BRIDGE Chrome's Voice tab: browserRefreshOutcome describes that session, and a
             // probe of another port or tab has learned nothing about it. Status write only — no recovery.
-            if (cdpPort == _config.ChromeCdpPort
-                && string.Equals(targetUrl, GVApiAdapter.BridgeChromeTargetUrl, StringComparison.OrdinalIgnoreCase))
-            {
-                _adapter.RecordFailedBrowserExtraction(extraction, "refresh-from-browser");
-            }
-
+            // Unreachable is debounced (see RecordFailedBrowserExtraction): this is the periodic caller.
+            if (isBridgeChrome)
+                _adapter.RecordFailedBrowserExtraction(extraction, "refresh-from-browser", debounceUnreachable: true);
 
             return extraction.Status switch
             {

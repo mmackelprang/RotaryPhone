@@ -948,6 +948,12 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         {
             // The candidate itself PASSED, and TryValidateCandidateAsync has already published it, so
             // the adapter keeps working on proven credentials. Only the durable copy is missing.
+            //
+            // The BROWSER half succeeded — Chrome answered and Google accepted what it handed over — so
+            // the outcome is Succeeded, exactly as rung 3 records it on the same disk failure. Leaving it
+            // untouched would pin a SignedOut/Unreachable that the cron recorded earlier over a browser
+            // that is demonstrably fine now, and keep the alarm paging on it.
+            _lastBrowserRefreshOutcome = BrowserRefreshOutcome.Succeeded;
             _logger.LogError(ex,
                 "GVApi: a cookie set from {Source} passed a live probe but could NOT be written to "
                 + "{Path}. It is in use in memory; the OLD set is still on disk, so a restart reverts to "
@@ -1364,23 +1370,6 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
 
     private BrowserRefreshOutcome _lastBrowserRefreshOutcome = BrowserRefreshOutcome.NotAttempted;
 
-    /// <summary>
-    /// What a FAILED extraction says about the browser. Only a failure to talk to Chrome at all is
-    /// <c>Unreachable</c>; a Chrome that answered without a Google session is <c>SignedOut</c>.
-    /// </summary>
-    /// <remarks>
-    /// ⛔ MEASURED 2026-09-25: this used to be a flat "every failure is Unreachable". The box's Chrome sat
-    /// on <c>accounts.google.com/v3/signin/challenge/pwd?…continue=https%3A%2F%2Fvoice.google.com…</c> —
-    /// a URL that CONTAINS "voice.google.com", so it matched as the Voice tab and extraction returned
-    /// <c>MissingRequiredCookies</c>. Recorded as Unreachable, the ladder logged "CHROME WAS UNREACHABLE …
-    /// confirm Chrome is running" and the alarm told the owner to restart a healthy Chrome.
-    /// <para>
-    /// The cookie statuses are decided by the cookie jar, which is authoritative whatever the page URL
-    /// says. <c>NoMatchingTab</c> is decided by the tab URLs, so it earns <c>SignedOut</c> only when a tab
-    /// is on one of the two known signed-out pages; any other page tells us nothing about the login and
-    /// keeps the historical classification rather than gaining an unearned new claim.
-    /// </para>
-    /// </remarks>
     /// <summary>The tab the bridge Chrome's Voice session lives in — what every CDP extraction here targets.</summary>
     public const string BridgeChromeTargetUrl = "voice.google.com";
 
@@ -1402,18 +1391,82 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     /// Only for a failed extraction. Success is recorded by the adopt path from a LIVE probe
     /// (<c>Succeeded</c> or <c>Stale</c>), because a successful extraction proves nothing about Google.
     /// </para>
+    /// <para>
+    /// ⚠ <paramref name="debounceUnreachable"/> is for the PERIODIC caller (the endpoint the cron hits).
+    /// Before this path recorded anything, <c>Unreachable</c> could only come from rung 3 — a real
+    /// incident. From the cron, one 10 s CDP WebSocket timeout or one Chrome restart would flip the field
+    /// for a full 20-minute cycle: the alarm pages <c>browser_unreachable</c> on its next 5-minute poll,
+    /// and a TRUE <c>Stale</c>/<c>SignedOut</c> is overwritten, which switches the auto-relogin actuator
+    /// off. So <c>Unreachable</c> from the periodic caller is recorded only on the
+    /// <see cref="PeriodicUnreachableThreshold"/>-th consecutive such failure. <c>SignedOut</c> is never
+    /// debounced: the cookie jar (or a tab on a sign-in page) is authoritative on the first observation.
+    /// Rung 3 is never debounced either: it runs only when the phone's own auth has already failed.
+    /// </para>
     /// </remarks>
-    public void RecordFailedBrowserExtraction(CdpExtractionResult result, string source)
+    public void RecordFailedBrowserExtraction(
+        CdpExtractionResult result, string source, bool debounceUnreachable = false)
     {
         if (result.Success && result.Cookies != null)
             throw new ArgumentException("A successful extraction is recorded by the adopt path, not here.", nameof(result));
 
-        _lastBrowserRefreshOutcome = ClassifyFailedExtraction(result);
+        var outcome = ClassifyFailedExtraction(result);
+
+        if (outcome != BrowserRefreshOutcome.Unreachable)
+        {
+            Interlocked.Exchange(ref _periodicUnreachableStreak, 0);
+        }
+        else if (debounceUnreachable)
+        {
+            var streak = Interlocked.Increment(ref _periodicUnreachableStreak);
+            if (streak < PeriodicUnreachableThreshold)
+            {
+                _logger.LogWarning(
+                    "GVApi: CDP cookie extraction from the bridge Chrome failed ({Source}): {Status} {Error} — "
+                    + "Unreachable {Streak} of {Threshold} consecutive; NOT recorded yet (outcome stays {Outcome}) "
+                    + "so one transient CDP fault does not page.",
+                    source, result.Status, result.Error, streak, PeriodicUnreachableThreshold,
+                    _lastBrowserRefreshOutcome);
+                return;
+            }
+        }
+
+        _lastBrowserRefreshOutcome = outcome;
         _logger.LogWarning(
             "GVApi: CDP cookie extraction from the bridge Chrome failed ({Source}): {Status} {Error} — recorded as {Outcome}",
             source, result.Status, result.Error, _lastBrowserRefreshOutcome);
     }
 
+    /// <summary>
+    /// The periodic caller reached Chrome and extracted cookies: whatever happens next is decided by the
+    /// adopt path's live probe, and the consecutive-Unreachable streak is broken. Writes no outcome.
+    /// </summary>
+    public void NoteBrowserExtractionSucceeded() => Interlocked.Exchange(ref _periodicUnreachableStreak, 0);
+
+    /// <summary>
+    /// Consecutive periodic <c>Unreachable</c> failures needed before one is recorded. With the 20-minute
+    /// cron that surfaces a dead Chrome within 20–40 minutes, and never on a single transient fault.
+    /// </summary>
+    internal const int PeriodicUnreachableThreshold = 2;
+
+    private int _periodicUnreachableStreak;
+
+    /// <summary>
+    /// What a FAILED extraction says about the browser. Only a failure to talk to Chrome at all is
+    /// <c>Unreachable</c>; a Chrome that answered without a Google session is <c>SignedOut</c>.
+    /// </summary>
+    /// <remarks>
+    /// ⛔ MEASURED 2026-09-25: this used to be a flat "every failure is Unreachable". The box's Chrome sat
+    /// on <c>accounts.google.com/v3/signin/challenge/pwd?…continue=https%3A%2F%2Fvoice.google.com…</c> —
+    /// a URL that CONTAINS "voice.google.com", so it matched as the Voice tab and extraction returned
+    /// <c>MissingRequiredCookies</c>. Recorded as Unreachable, the ladder logged "CHROME WAS UNREACHABLE …
+    /// confirm Chrome is running" and the alarm told the owner to restart a healthy Chrome.
+    /// <para>
+    /// The cookie statuses are decided by the cookie jar, which is authoritative whatever the page URL
+    /// says. <c>NoMatchingTab</c> is decided by the tab URLs, so it earns <c>SignedOut</c> only when a tab
+    /// is on one of the two known signed-out pages; any other page tells us nothing about the login and
+    /// keeps the historical classification rather than gaining an unearned new claim.
+    /// </para>
+    /// </remarks>
     internal static BrowserRefreshOutcome ClassifyFailedExtraction(CdpExtractionResult result) => result.Status switch
     {
         CdpExtractionStatus.MissingRequiredCookies or CdpExtractionStatus.NoCookies
