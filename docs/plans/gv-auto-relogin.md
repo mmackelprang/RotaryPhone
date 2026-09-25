@@ -2534,3 +2534,151 @@ is not asserted separately from the post-`mv` chmod.
 - Pass `--status` / `--reset` through to the breaker, because every reason text and
 the alarm's ACTION name `gv-auto-relogin.sh --reset` — until the actuator exists the working command is
 `gv-auto-relogin-breaker.sh --reset`; read `gv-account.conf` without exporting it.
+
+### 7.4 Second build session (2026-09-25, afternoon): the owner writes the driver, this branch builds around it
+
+⛔ **Owner decision, 2026-09-25.** The owner writes the sign-in driver themselves. That is Task 10a,
+`deploy/gv-relogin-signin.py`, the one component that fills in and submits Google's password. This branch
+contains **no code that types into or submits Google's sign-in form.** It builds everything around the driver
+and specifies the driver's interface in [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md).
+Task 10b, the hand-off, is built into the actuator.
+
+⚠ **Edited in this session: this §7.4 only.** The spec and the rest of this plan are untouched, because PR #89
+is revising their top-of-file banners. Task 18a's spec §11 write-back is therefore recorded in §7.4.5, not in
+the spec.
+
+#### 7.4.1 Step 0: merge PR #90, and two fixes to the relogin track
+
+- Merged `origin/main` at `54d77ca`. The one conflict was side-by-side state fields in `gv-session-alarm.sh`,
+  and both sides were kept.
+- **(a) Stranded relogin thread key.** This is PR #90's defect 1 on the relogin track. It is fixed with PR #90's
+  rules:
+  - A re-arm with nothing provably delivered retires the key silently.
+  - Anything that may have been seen gets a RESOLVED in its own thread, with the root posted again first.
+  - A root that is still refused withholds the RESOLVED.
+  - A new state field, `RELOGIN_MAY_HAVE_DELIVERED`, supports this. The fix also closes §7.3's deferred LOW (b).
+- **(b) State file read as data.** The alarm reads the breaker state file as **data**: whitelisted `NAME=`
+  lines, and a pure-bash `printf %q` decoder that handles both the backslash form and the `$'…'` form,
+  including UTF-8 written under the C locale as octal escapes. It is never sourced. `AlarmCopyDriftTests` now
+  pins `relogin_field <KEY>`.
+- **Evidence:** `repro-gv-session-alarm.sh` passes 172/172. Before the fix, 9 of the 17 new cases failed. 7
+  mutants were each caught.
+
+#### 7.4.2 What was built, and where it supersedes the drafts above
+
+| Task | Built as | Supersedes the draft because |
+|---|---|---|
+| 11 (helper) | `deploy/gv-cdp.py`, **shipped**, with only `targets`/`url`/`navigate`; exit 4 on transport faults | The draft called `${HERE}/../tools/gv-cdp.py`, which never ships: the deploy glob was `deploy/*.sh` with no `-Recurse`. The deploy now ships `deploy/*.py` too. The spike-only `eval`/`shot`/`dump` were dropped. This file is the helper's one home, agreed with PR #89 |
+| 9 | Gate on **`Stale` or `SignedOut`** | `SignedOut` is PR #90's. Spike finding 3 showed that a Chrome on the sign-in page was never `Stale` |
+| 9 | `breaker_lock` is the only lock; `breaker_verdict` must return exactly `AUTHORISED` | Per §7.3 |
+| 9 | **No driver → nothing.** It exits 0 before the lock, the breaker, the poll and the credential file | The safe resting state until the owner's file exists. The alarm journals "not installed" |
+| 9 | Stands down unless the reauth assist's state file is absent or says exactly `STATE=IDLE`, read as data. `PREPARED`, `SIGNED_IN_UNCONFIRMED`, `CONFIRM_FAILED`, any unknown word, a stray CR, or no single `STATE` line all stand down. This is not a trip and nothing is spent | The ask in PR #89's spec §5.1, implemented as an allow-list after review |
+| 9 | `gv-account.conf` is **parsed as data**: mode 600, our uid, a regular file, LF only, exactly two keys, and the value is verbatim after the first `=` | The draft **sourced** it. A CR from a Windows editor would have become part of the password, meaning one rejection and a permanent stop. Refusals name line numbers, never keys found in the file |
+| 10b | stdin as five `key=value` lines. The verdict is **the last stdout line with exit 0**, one of `SIGNED_IN`/`CREDENTIAL_REJECTED`/`CHALLENGED`/`TRANSPORT`/`UNRECOGNISED` | The draft used JSON built by `jq --arg`, and `--arg` is **argv**. A non-zero exit, a timeout (120 s), silence or anything else is `UNRECOGNISED`, which trips |
+| 10b | `TRANSPORT` **hands back** the credential attempt, but still spends the hourly spacing and one transport count | The draft charged it, contrary to spec §9.4 |
+| 10b | The attempt is written to disk with `BREAKER_LAST_OUTCOME=in_flight` **before** the driver starts. The next run trips `interrupted` if it finds that marker | A run killed mid-driver was otherwise invisible |
+| 11 | The target is **chosen before the driver runs** from each page's live `window.location.href`, with the host parsed. First choice is `voice`/`accounts.google.com`; otherwise a lone `workspace.google.com/products/voice…` page; no candidate at all is treated as transport; two or more trip `target_unrecognised`. The driver and the verification use that same id | The draft's `TARGET_ID` was undefined |
+| 11 | Verification requires the landing host to be **exactly `voice.google.com`** (not merely "not workspace"), a POST that answered **200** (202 means unproven), `Succeeded`, and `validatedAt` moving across a **freshly read** pre-POST value | The draft accepted any landing except workspace and ignored the POST status |
+| 12 | `repro-gv-relogin.sh`: 115 cases and 26 mutants, **141/141** | Uses stubs for the service, the CDP helper and the driver. The driver stub records its argv and environ, and every ancestor's cmdline, **while it runs** — a deterministic reading, not §0.3's sampler |
+| 15 | `install-gv-auto-relogin.sh`: the timer is installed **disabled** and the breaker is never armed. `--enable` refuses on **four** counts; the fourth is "no driver installed" | The driver is the owner's; enabling without it would only log "not installed" every 5 minutes |
+| 15 | Drift group `relogin`: 5 required files plus the driver as an **optional** pair | The driver's absence everywhere is reported, not failed. Present anywhere, it is checked like the rest |
+
+**Harness results, all in the Debian container as non-root unless noted:**
+
+| Harness | Result |
+|---|---|
+| `repro-gv-relogin.sh` | 141/141 |
+| `repro-install-gv-auto-relogin.sh` | 27/27, including 5 mutants |
+| `repro-installed-drift.sh` | 38/38 |
+| `repro-gv-session-alarm.sh` | 172/172 |
+| `repro-gv-relogin-breaker.sh` | 83/83, unchanged |
+| `check-relogin-driver.sh --self-test` | 11/11 in WSL; 9/9 in the container, where the unshare isolation case cannot run |
+| `repro-gv-cdp.sh` | 19/19, on Windows with a throwaway headless Chrome |
+| `repro-tar-clobber.sh` | all cases, in WSL |
+| `dotnet test` | green |
+
+#### 7.4.3 Plan errors this session found
+
+1. **Task 9 gated on `Stale` alone.** Since PR #90 a signed-out Chrome reports `SignedOut`, so the draft would
+   never have acted on the most direct signed-out shape.
+2. **Task 9 sourced `gv-account.conf`.** Values were therefore shell-interpreted rather than verbatim, and a
+   CRLF file became a wrong password.
+3. **Task 10b's draft embeds a literal NUL byte** in this markdown file: `split("␀")` is written as a raw byte.
+   That makes `grep` and `git` treat the plan as **binary**, and a reader sees it as `split(" ")`. It was not
+   carried into code. The actuator uses no jq on the credential at all.
+4. **Task 10b charged the credential budget on transport**, contrary to spec §9.4.
+5. **Task 11 called a helper that never ships**, and navigated a `TARGET_ID` that nothing defined.
+6. **Task 11 accepted any landing except `workspace.google.com`.** An `accounts.google.com` landing went
+   on to POST cookies.
+7. **Task 13 read the breaker file with `grep|cut|sed`** (§7.3), and the replacement then sourced it in a
+   subshell, which still executes it (fixed in §7.4.1).
+8. **Task 15's `--enable` had three counts.** With the driver owner-written, a fourth is needed.
+
+Also found while building: a driver that leaves a helper process holding its stderr stalled the actuator for
+that helper's lifetime. The redactor's stdout was the command substitution's pipe. It is fixed, and a harness
+case and a mutant cover it.
+
+#### 7.4.3a Pre-merge review (session model): no HIGH, three MEDIUM, all fixed
+
+The reviewer ran every harness and fuzzed the alarm's `%q` decoder: 6,000 random strings round-tripped through
+real `printf %q`, in C and UTF-8 locales for both writer and reader, with 0 mismatches.
+
+1. **MEDIUM: the driver checker could send the fixture password to the real account.** This would happen with a
+   draft driver that hard-codes port 9224, if the checker were run on the box.
+   - **Fix:** driver runs are now network-isolated with `unshare -rn` and a private loopback. Where that is not
+     permitted, the checker refuses to run on anything that looks like the box.
+   - **Tests:** self-test cases for both paths, each with a precondition.
+2. **MEDIUM: the assist stand-down was a deny-list.**
+   - **Fix:** it is now an allow-list: proceed only on `IDLE` or an absent file.
+   - **Tests:** cases for `CONFIRM_FAILED`, `CONFIRM_REFUSED`, an unknown word and `IDLE`, plus a mutant.
+3. **MEDIUM: `verification_failed` always said "NOT overwritten".** That is false on a 202 (the cold path writes
+   the file).
+   - **Fix:** the reason text now states what happened to the cookie set according to the POST's code.
+   - **Tests:** per-code cases, plus a mutant.
+
+**LOW, fixed:**
+
+- `export -n` of the credential variables. A caller's export no longer carries the real value into a child
+  process. Covered by a case and a mutant.
+- Zero candidate pages is now handled as transport, not a permanent trip. Covered by a case and a mutant.
+- The mutant previously named `charge-after-driver` was renamed to `no-in-flight-marker`, which is what it
+  actually breaks.
+
+**LOW, deferred:**
+
+- `gv-cdp.py navigate` can accept a buffered load event from an earlier navigation, rather than matching the
+  navigation's `loaderId`.
+  - Stage 2 of the verification (a POST returning 200, a `Succeeded` outcome and a moved `validatedAt`) still
+    decides the outcome, so this is not a safety hole.
+  - Fix it when the assist adds its own subcommands.
+
+#### 7.4.4 What remains, in order, and who does it
+
+1. **The owner writes `deploy/gv-relogin-signin.py`** to [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md),
+   and runs `bash deploy/tests/check-relogin-driver.sh` (Linux/WSL) until it passes.
+2. **Task 16, deploy and prove it is installed**, not gated on G2. Run a normal deploy, then on the box:
+   `list-unit-files 'gv-auto-relogin.*'` should show both units **disabled**; `--print-config`; `--status`
+   should report **TRIPPED** (`state_missing`); `check-installed-drift.sh --group relogin` should report 6/6.
+   `gv-account.conf` has its sha256 and mode recorded before and after if it exists, together with **which
+   deploy branch ran**.
+3. **The owner creates `/opt/rotary-phone/gv-account.conf`** on the box, by hand, mode 600.
+4. **The owner arms the automation:** `install-gv-auto-relogin.sh --enable`, then `gv-auto-relogin.sh --reset`.
+5. **Task 17, the attended runs 17a–17g**, with at most four real credential attempts.
+
+#### 7.4.5 Task 18a's content, for the spec's §11 once PR #89's banner edits have landed
+
+Spec §8 said *"nothing here has been tested against Google's actual sign-in page."* The spike
+(`docs/spikes/2026-09-09-gv-signin-cdp-recording.md`, 2026-09-25) tested it once, attended, and found the
+following:
+
+- **No challenge** of any kind from this profile, on a correct sign-in, a wrong password, or the restore.
+- The profile remembers the account. The flow is an **account chooser → password page → Voice**, and there is
+  no email field on that path.
+- A rejection keeps the URL, marks `Passwd` as `aria-invalid`, and fills `#c0` with the wrong-password text.
+- ⛔ Google pre-renders a hidden "Too many failed attempts" region and dormant CAPTCHA elements. Any classifier
+  must decide on **visibility**.
+- A Chrome on the sign-in page used to report `Unreachable`. PR #90 made it `SignedOut`, and auto-relogin
+  triggers on it.
+
+**The design is not ruled out.** This is one observation, not evidence that Google will never challenge, which
+is why every unrecognised outcome still trips.

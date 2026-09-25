@@ -47,14 +47,17 @@ The actuator starts the driver only after **all** of these hold, in this order:
 3. The breaker is `ARMED`, and its verdict is exactly `AUTHORISED`. That covers the rate limits, a clock
    running backwards, and a corrupt state file.
 4. `GET /api/gvbridge/status` returns `browserRefreshOutcome` equal to **`Stale` or `SignedOut`**.
-5. The reauth assist (PR #89) is not showing a human the sign-in page, i.e. its state is not `PREPARED` or
-   `SIGNED_IN_UNCONFIRMED`.
+5. The reauth assist (PR #89) is idle. Its state file must be absent or say exactly `STATE=IDLE`. Any other
+   state, including `PREPARED` and `SIGNED_IN_UNCONFIRMED` (a human is mid sign-in), makes the actuator stand
+   down. Standing down is not a trip and spends nothing.
 6. `/opt/rotary-phone/gv-account.conf` is valid (see §4).
 7. Exactly one page in the bridge's Chrome is a candidate, judged by its **live** `window.location.href` with
    the host parsed:
    - First choice: a page on `voice.google.com` or `accounts.google.com`.
    - Otherwise: a lone page on `workspace.google.com/products/voice…`.
-   - Anything else stops the breaker with reason `target_unrecognised`, and no attempt is made.
+   - **No** candidate (for example Chrome's own error page during a network blip) counts as a transport fault:
+     no trip, no credential spent, and the hourly spacing applies.
+   - **Two or more** candidates stop the breaker with reason `target_unrecognised`, and no attempt is made.
 8. The attempt has already been **charged and written to disk** with `BREAKER_LAST_OUTCOME=in_flight`. If
    the actuator is killed while your driver runs, the next run finds that marker and stops the breaker
    (`interrupted`). It never assumes the attempt went well.
@@ -255,11 +258,11 @@ Each of these is a state your driver will not recognise, and §5.1 says what to 
 
 ### 9.1 Verified by the actuator harness, with a stub in place of your driver
 
-`deploy/tests/repro-gv-relogin.sh`: 108 cases and 22 mutants. It needs no browser and no Google. Each item
+`deploy/tests/repro-gv-relogin.sh`: 115 cases and 26 mutants. It needs no browser and no Google. Each item
 below is a named case, and each ⛔ item also has a mutant that must be caught.
 
-- [x] Your driver is started **only** on `Stale`/`SignedOut`, only with the breaker `AUTHORISED`, and never
-  while the reauth assist is `PREPARED`/`SIGNED_IN_UNCONFIRMED` ⛔
+- [x] Your driver is started **only** on `Stale`/`SignedOut`, only with the breaker `AUTHORISED`, and only
+  while the reauth assist is absent or exactly `IDLE` ⛔
 - [x] stdin is **exactly** the five lines of §4.2, with values verbatim, including `=`, spaces, `"`, `\` and `$` ⛔
 - [x] The password and the email are in **no argv and no environment**, for your process and every ancestor,
   read while your driver runs ⛔
@@ -282,7 +285,11 @@ below is a named case, and each ⛔ item also has a mutant that must be caught.
 
 ### 9.2 Checked against YOUR driver: `bash deploy/tests/check-relogin-driver.sh`
 
-Run it on Linux (WSL, or the harness container) once `deploy/gv-relogin-signin.py` exists. It reports a loud
+⛔ **Never run it on `radio`.** Run it on Linux (WSL, or the harness container) once `deploy/gv-relogin-signin.py`
+exists. Where `unshare -rn` works (WSL), every driver run gets its own network namespace, so it can reach nothing. Where
+it does not (a Docker container), the checker **refuses to run** if the machine looks like the box: hostname
+`radio`, `~/.config/gv-bridge-chrome`, or anything listening on `127.0.0.1:9224`. A draft driver that ignored
+`cdp_port` could otherwise submit the fixture password to the real account. It reports a loud
 SKIP while the file is absent. It **never contacts Google**: the only port it gives your driver is one where
 nothing listens. It checks that:
 

@@ -199,9 +199,14 @@ log "outcome=${outcome} — the browser session is signed out. The breaker autho
 # and records it. Driving the page then would navigate it out from under someone who is
 # mid-password. This is NOT a trip and spends NO budget: nothing is written.
 # Read as DATA — the file is never sourced. `STATE=` lines, value after the first `=`.
-# ⚠ A file that EXISTS but has no single readable STATE line also stands down: we cannot
-# tell whether a human is mid sign-in, and waiting costs only time (the alarm still
-# reports the session). An absent file means no assist is installed.
+# ⛔ AN ALLOW-LIST, NOT A DENY-LIST (pre-merge review 2026-09-25): we proceed ONLY on
+# `STATE=IDLE`, exactly, or on an absent file (no assist installed). Every other value
+# stands down — PREPARED and SIGNED_IN_UNCONFIRMED (a human is mid sign-in), but also
+# CONFIRM_FAILED / CONFIRM_REFUSED / PREPARE_FAILED / NOT_SIGNED_OUT (a human was just on
+# this page, or the assist has a finding the owner has not seen), a value we have never
+# heard of, a stray CR, and a file with no single STATE line. Standing down costs only
+# time: no trip, no budget, and the session alarm still reports the session. Returning to
+# IDLE is the assist's job (spec §5.1: "until the assist returns to IDLE").
 if [ -e "$ASSIST_STATE_FILE" ]; then
     assist_state=""; assist_n=0
     if [ -f "$ASSIST_STATE_FILE" ] && [ -r "$ASSIST_STATE_FILE" ]; then
@@ -214,8 +219,13 @@ if [ -e "$ASSIST_STATE_FILE" ]; then
         exit 0
     fi
     case "$assist_state" in
+        IDLE) ;;
         PREPARED|SIGNED_IN_UNCONFIRMED)
             log "standing down: a human sign-in is in progress (reauth assist STATE=${assist_state}). Not a trip; nothing spent."
+            exit 0 ;;
+        *)
+            # The value is printed only if it is a plain word; the file is not ours.
+            log "standing down: the reauth assist is not IDLE (STATE=$([[ "$assist_state" =~ ^[A-Z_]{1,40}$ ]] && echo "$assist_state" || echo '<unrecognised>')). Not a trip; nothing spent."
             exit 0 ;;
     esac
 fi
@@ -236,6 +246,10 @@ fi
 # found in the file. A line like `hunter2=` would otherwise put a password in the journal.
 # Every refusal TRIPS without an attempt: a configuration fault is not transient, and
 # none of them spends the credential budget.
+# ⚠ `export -n` first: assigning "" does not remove an export inherited from the caller, and
+# an ACCT_PASSWORD exported by a stray Environment= or a manual shell would otherwise carry
+# the real value into every child's environ (pre-merge review 2026-09-25).
+export -n ACCT_EMAIL ACCT_PASSWORD 2>/dev/null
 ACCT_EMAIL=""
 ACCT_PASSWORD=""
 account_refuse() { # account_refuse REASON TEXT
@@ -325,6 +339,13 @@ if [ "${#tier1[@]}" -eq 1 ]; then
     TARGET_ID="${tier1[0]}"
 elif [ "${#tier1[@]}" -eq 0 ] && [ "${#tier2[@]}" -eq 1 ]; then
     TARGET_ID="${tier2[0]}"
+elif [ "${#tier1[@]}" -eq 0 ] && [ "${#tier2[@]}" -eq 0 ]; then
+    # NO candidate is "nothing to drive", not an ambiguity: a Voice tab showing Chrome's own
+    # error page during a network blip, or no tabs at all. No page was touched and no
+    # credential offered, so it is handled like a transport fault (hourly spacing and the
+    # transport ceiling still apply) instead of a permanent stop that pages a human for a
+    # blip (pre-merge review 2026-09-25). TWO or more candidates still trip, below.
+    record_transport_and_exit "no page on a Google sign-in or Voice host (live hosts:${seen_hosts:- none})"
 else
     ACCT_EMAIL=""; ACCT_PASSWORD=""
     breaker_trip target_unrecognised \
@@ -442,9 +463,24 @@ esac
 # stale renders that lie about login state (KNOWN-ISSUES.md:16-22); a forced navigation is
 # the only reading that means anything. Anything but voice.google.com — the signed-out
 # Workspace page, the sign-in host, a failure, silence — and NO cookies are posted.
+# ⚠ WHAT HAPPENED TO THE SERVICE'S COOKIE SET DEPENDS ON THE POST, and the alarm relays this
+# text to the owner word for word, so it must not claim more than it knows (pre-merge review
+# 2026-09-25: it used to say "NOT overwritten" unconditionally, which is false on a 202).
+# GVBridgeController.RefreshCookiesFromBrowser: 502 = Google refused, the working set was
+# kept; 202 = cold path, the file WAS overwritten with an unproven set; 200 = adopted.
+POST_CODE=""   # empty = no refresh-from-browser POST has been made
+cookie_fate() {
+    case "$POST_CODE" in
+        "")  echo "No cookies were posted to the service, so its cookie set was not touched." ;;
+        502) echo "Google refused the harvested cookies; the service kept its previously-working set (it was NOT overwritten)." ;;
+        202) echo "The service WROTE the harvested cookies without proving them (HTTP 202): its previous cookie file WAS overwritten with an unproven set. Check GET /api/gvbridge/status." ;;
+        200) echo "The service adopted the harvested cookies (HTTP 200), but its status did not confirm the session afterwards." ;;
+        *)   echo "refresh-from-browser answered HTTP ${POST_CODE}; what happened to the service's cookie set is not known — read the service journal." ;;
+    esac
+}
 verify_fail() { # verify_fail DETAIL
     breaker_trip verification_failed \
-        "Auto-relogin is STOPPED PERMANENTLY: its sign-in driver reported success, but the outcome check did not confirm it (${1}). The driver's report cannot be trusted. The previously-working cookie set was NOT overwritten. A human must re-login by hand at voice.google.com in the box's Chrome, and then run: gv-auto-relogin.sh --reset"
+        "Auto-relogin is STOPPED PERMANENTLY: its sign-in driver reported success, but the outcome check did not confirm it (${1}). The driver's report cannot be trusted. $(cookie_fate) A human must re-login by hand at voice.google.com in the box's Chrome, and then run: gv-auto-relogin.sh --reset"
     breaker_write || exit 1
     exit 0
 }
@@ -472,6 +508,7 @@ before_row="$(status_read)" || verify_fail "the service status could not be read
 validated_before="${before_row#*$'\t'}"
 post_code="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -X POST "$REFRESH_URL" \
                 -H 'Content-Type: application/json' --data-binary '{}' 8>&- 2>/dev/null)"
+POST_CODE="${post_code:-000}"   # 000 = curl got no HTTP answer at all
 after_row="$(status_read)" || verify_fail "refresh-from-browser answered ${post_code:-nothing}, and then the service status could not be read"
 outcome_after="${after_row%%$'\t'*}"
 validated_after="${after_row#*$'\t'}"
@@ -483,4 +520,4 @@ if [ "$post_code" = "200" ] && [ "$outcome_after" = "Succeeded" ] \
     log "RESTORED: refresh-from-browser 200, browserRefreshOutcome=Succeeded, browserSessionValidatedAt moved ${validated_before:-none} -> ${validated_after}."
     exit 0
 fi
-verify_fail "refresh-from-browser answered ${post_code:-nothing}; browserRefreshOutcome is ${outcome_after:-unknown}; browserSessionValidatedAt ${validated_before:-none} -> ${validated_after:-none}. Google did not accept cookies harvested from the browser, or the service did not confirm it"
+verify_fail "refresh-from-browser answered ${post_code:-nothing}; browserRefreshOutcome is ${outcome_after:-unknown}; browserSessionValidatedAt ${validated_before:-none} -> ${validated_after:-none}. The service did not confirm a working session"

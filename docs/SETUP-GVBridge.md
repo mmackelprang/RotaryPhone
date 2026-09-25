@@ -198,14 +198,34 @@ The GVBridge section (update IPs for your network):
 | `~/.local/state/gv-bridge-restart.log` | Launch / restart log |
 | `/opt/rotary-phone/refresh-gv-cookies.sh` | Cron `*/20` — refreshes cookies, mutes the tab |
 | `/opt/rotary-phone/ChromeExtension/` | Extension source. Passed to Chrome but **not loaded** |
-| `/opt/rotary-phone/gv-account.conf` | Auto-relogin credential, **mode 600**, owner-populated. Not yet in use — see below |
+| `/opt/rotary-phone/gv-account.conf` | Auto-relogin credential, **mode 600**, owner-populated. Read only by `gv-auto-relogin.sh` — see below |
+| `~/bin/gv-auto-relogin.sh`, `gv-auto-relogin-breaker.sh`, `gv-cdp.py` | Auto-relogin actuator, circuit breaker, CDP helper (`install-gv-auto-relogin.sh`) |
+| `~/bin/gv-relogin-signin.py` | The **owner-written** sign-in driver. Until it exists, auto-relogin does nothing |
+| `~/.local/state/gv-auto-relogin.state` | Breaker state. Inspect with `gv-auto-relogin.sh --status`; only `--reset` (a human) arms it |
 
-### gv-account.conf (auto-relogin credential — not yet in use)
+### Auto-relogin (built on PR #88; inert until the owner's driver and the owner's `--enable`)
 
-> ⚠ **Auto-relogin has not shipped.** This section documents the file's shape and protection so they are
-> fixed before any code reads it. Nothing on the box reads this file today, and there is no reason to create
-> it until the actuator is installed. Design: `docs/superpowers/specs/2026-09-09-gv-auto-relogin-design.md`;
-> plan: `docs/plans/gv-auto-relogin.md`.
+> ⚠ **Merged ≠ deployed ≠ INSTALLED ≠ ENABLED ≠ ARMED.** The deploy runs `install-gv-auto-relogin.sh`, which
+> installs the files and a **disabled** timer and never arms the breaker. Without `~/bin/gv-relogin-signin.py`
+> every cycle logs "not installed" and changes nothing. Interface the driver must meet:
+> [`docs/gv-relogin-driver-contract.md`](gv-relogin-driver-contract.md). Design:
+> `docs/superpowers/specs/2026-09-09-gv-auto-relogin-design.md`; plan: `docs/plans/gv-auto-relogin.md`.
+
+```bash
+~/bin/gv-auto-relogin.sh --status          # breaker state, today's counts, driver installed or not
+~/bin/gv-auto-relogin.sh --print-config    # resolved paths; never a credential value
+~/bin/gv-auto-relogin.sh --reset           # a HUMAN arms the breaker (counters are kept)
+bash /opt/rotary-phone/deploy/install-gv-auto-relogin.sh --enable   # the owner's act; refuses without
+                                           # gv-account.conf (600, ours), the alarm, and the driver
+bash /opt/rotary-phone/deploy/check-installed-drift.sh --group relogin
+```
+
+### gv-account.conf (auto-relogin credential)
+
+Read by `gv-auto-relogin.sh` **as data**: `KEY=value` lines, the value being everything after the first `=`,
+verbatim (no quotes removed, no whitespace trimmed); `#` lines and blank lines ignored; exactly the two keys
+below, once each; **LF line endings** (a CR would become part of the password). A malformed file stops the
+breaker without any sign-in attempt.
 
 ```
 # /opt/rotary-phone/gv-account.conf — mode 600, owner mmack.

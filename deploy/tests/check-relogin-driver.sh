@@ -55,6 +55,31 @@ if [ "${1:-}" = "--self-test" ]; then
         's/^import socket$/import socket, subprocess/'
     mutant argv-secret "static: no argv option for a secret" \
         's/^import sys$/import sys, argparse; argparse.ArgumentParser().add_argument("--password")/'
+    echo "=== self-test: without isolation, a live 127.0.0.1:9224 means the driver is NEVER run ==="
+    printf 'open("%s", "w").write("ran")
+print("UNRECOGNISED")
+' "$WORK/driver-ran" > "$WORK/marker.py"
+    # PRECONDITION, so "never ran" cannot pass because the marker driver is broken.
+    python3 "$WORK/marker.py" >/dev/null 2>&1
+    check "PRECONDITION the marker driver leaves its mark when run" "yes" "$([ -e "$WORK/driver-ran" ] && echo yes || echo no)"
+    rm -f "$WORK/driver-ran"
+    python3 -c 'import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("127.0.0.1",9224)); s.listen(5); time.sleep(20)' &
+    LPID=$!; sleep 1
+    out="$(GV_CHECK_NO_UNSHARE=1 GV_RELOGIN_DRIVER_UNDER_TEST="$WORK/marker.py" bash "$0" 2>&1)"; rc=$?
+    if unshare -rn sh -c 'ip link set lo up' 2>/dev/null; then
+        # With isolation, a driver that hard-codes 9224 must NOT reach the listener outside.
+        printf 'import socket\ntry:\n    socket.create_connection(("127.0.0.1", 9224), 3).close(); open("%s", "w").write("reached")\nexcept OSError:\n    pass\nprint("UNRECOGNISED")\n' "$WORK/reached" > "$WORK/hardcoded.py"
+        GV_RELOGIN_DRIVER_UNDER_TEST="$WORK/hardcoded.py" bash "$0" >/dev/null 2>&1
+        check "⛔ isolated: a driver hard-coding 9224 cannot reach a live listener outside" "absent" \
+              "$([ -e "$WORK/reached" ] && echo REACHED || echo absent)"
+        python3 "$WORK/hardcoded.py" >/dev/null 2>&1
+        check "PRECONDITION …and the same driver, NOT isolated, does reach it" "yes" "$([ -e "$WORK/reached" ] && echo yes || echo no)"
+    else
+        echo "  (unshare -rn not permitted here: the isolation case runs only where it is, e.g. WSL)"
+    fi
+    kill "$LPID" 2>/dev/null
+    check "⛔ bridge port live, no unshare -> refuses (exit 2) and the driver never ran" "2:yes:absent"           "$rc:$(printf '%s
+' "$out" | grep -q 'REFUSING TO RUN' && echo yes || echo no):$([ -e "$WORK/driver-ran" ] && echo RAN || echo absent)"
     echo
     if [ "$fail" -eq 0 ]; then echo "ALL ${cases} SELF-TEST CASES PASSED"; else echo "FAILURES PRESENT (${cases} self-test cases run)"; fi
     exit "$fail"
@@ -64,6 +89,29 @@ if [ ! -f "$DRIVER" ]; then
     # ⛔ LOUD, never a silent pass.
     echo "SKIPPED-LOUDLY: no driver at ${DRIVER}. Nothing was checked. (Auto-relogin is inert until it exists.)"
     exit 2
+fi
+
+# ⛔ NO NETWORK FOR THE DRIVER, OR NO RUN AT ALL (pre-merge review 2026-09-25). The checker
+# hands the driver a fixture password. A draft driver that ignores cdp_port and falls back
+# to 9224 would, on the box, reach the LIVE bridge Chrome — whose account chooser needs no
+# email — and submit that fixture as a real, wrong password: a credential rejection
+# outside the breaker. So every driver run is either in an empty network namespace
+# (`unshare -rn`: nothing reachable) or, where that is not permitted (a Docker container),
+# only after proving this is not a machine with a bridge Chrome on it. Never run on `radio`.
+# GV_CHECK_NO_UNSHARE=1 forces the fallback path, for --self-test only.
+# Inside the namespace only its OWN loopback is brought up, so the dead-port case is a real
+# "connection refused" (as on a normal machine) and nothing outside is reachable.
+if [ -z "${GV_CHECK_NO_UNSHARE:-}" ] && unshare -rn sh -c 'ip link set lo up' 2>/dev/null; then
+    ISOLATE=(unshare -rn sh -c 'ip link set lo up && exec "$@"' _)
+    echo "  (driver runs isolated: its own network namespace, private loopback only)"
+else
+    ISOLATE=()
+    if [ "$(hostname)" = "radio" ] || [ -e "${HOME}/.config/gv-bridge-chrome" ] \
+       || (exec 3<>/dev/tcp/127.0.0.1/9224) 2>/dev/null; then
+        echo "FAILURES PRESENT: REFUSING TO RUN. unshare -rn is not available here, and this machine looks like it hosts the GV bridge Chrome (hostname radio, ~/.config/gv-bridge-chrome, or something listening on 127.0.0.1:9224). A driver that ignores cdp_port could submit the fixture password to the real account. Run this in WSL or in a container, never on the box."
+        exit 2
+    fi
+    echo "  (unshare -rn not permitted here; proceeding because nothing listens on 127.0.0.1:9224 and no bridge profile exists — prefer: docker run --network none …)"
 fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -87,7 +135,7 @@ check "static: does not read gv-account.conf or call refresh-from-browser" "0" \
 run_driver() {
     local t0 t1 rc last
     t0=$(date +%s)
-    timeout 30 python3 "$DRIVER" < "$2" > "$WORK/$1.out" 2> "$WORK/$1.err"; rc=$?
+    "${ISOLATE[@]}" timeout 30 python3 "$DRIVER" < "$2" > "$WORK/$1.out" 2> "$WORK/$1.err"; rc=$?
     t1=$(date +%s)
     cat "$WORK/$1.out" "$WORK/$1.err" >> "$ALL_OUT"
     last="$(tail -n 1 "$WORK/$1.out" 2>/dev/null)"

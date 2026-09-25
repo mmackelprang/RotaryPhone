@@ -110,6 +110,7 @@ cdp_calls()   { count_lines "$GV_STUB_DIR/cdp/calls.log"; }
 posts()       { if [ -f "$SVC/requests.log" ]; then grep -c 'POST /api/gvbridge/cookies/refresh-from-browser' "$SVC/requests.log"; else echo 0; fi; }
 requests()    { count_lines "$SVC/requests.log"; }
 age_hour()    { sed -i "s/^BREAKER_LAST_ATTEMPT_AT=.*/BREAKER_LAST_ATTEMPT_AT=$(( $(date -u +%s) - 7200 ))/" "$GV_RELOGIN_STATE_FILE"; }
+reason_has()  { bash "$BREAKER_LIB" --status 2>/dev/null | grep -qF -- "$1" && echo yes || echo no; }
 journal_has() { grep -qF -- "$1" "$WORK/err.txt" && echo yes || echo no; }
 
 echo "=== Task 9 — the gate: act ONLY on Stale or SignedOut ==="
@@ -174,6 +175,12 @@ fresh; printf 'garbage\n' > "$GV_RELOGIN_ASSIST_STATE_FILE"
 check "assist file with no STATE line -> stand down (cannot tell)" "0" "$(act >/dev/null; driver_runs)"
 fresh; printf 'STATE=IDLE\nSTATE=PREPARED\n' > "$GV_RELOGIN_ASSIST_STATE_FILE"
 check "assist file with two STATE lines -> stand down" "0" "$(act >/dev/null; driver_runs)"
+for st in CONFIRM_FAILED CONFIRM_REFUSED HIBERNATING; do
+    fresh; printf 'STATE=%s\n' "$st" > "$GV_RELOGIN_ASSIST_STATE_FILE"
+    check "⛔ assist STATE=$st (not IDLE) -> stand down, nothing spent" "0:0" "$(act >/dev/null; driver_runs):$(field BREAKER_DAY_CREDENTIAL_ATTEMPTS)"
+done
+fresh; printf 'STATE=IDLE\r\n' > "$GV_RELOGIN_ASSIST_STATE_FILE"
+check "assist STATE=IDLE with a stray CR -> stand down (not exactly IDLE)" "0" "$(act >/dev/null; driver_runs)"
 fresh; SENT="$WORK/assist-executed"; printf 'STATE=$(touch %s)\n' "$SENT" > "$GV_RELOGIN_ASSIST_STATE_FILE"; act >/dev/null
 check "the assist file is DATA: nothing in it is executed" "absent" "$([ -e "$SENT" ] && echo EXECUTED || echo absent)"
 
@@ -204,8 +211,8 @@ check "…it reaches the driver VERBATIM, comments and blank lines skipped" "yes
 
 echo "=== Task 11 — target selection by LIVE location ==="
 fresh; pages 'T1\thttps://example.com/\n'; act >/dev/null
-check "⛔ no page on a Google sign-in/Voice host -> TRIPPED target_unrecognised, no driver" "target_unrecognised:0" "$(field BREAKER_REASON):$(driver_runs)"
-check "…and no credential spent" "0" "$(field BREAKER_DAY_CREDENTIAL_ATTEMPTS)"
+check "no page on a Google sign-in/Voice host -> transport, NOT a trip: ARMED, no driver, credential 0, transport 1" \
+      "ARMED:0:0:1" "$(field BREAKER_STATE):$(driver_runs):$(field BREAKER_DAY_CREDENTIAL_ATTEMPTS):$(field BREAKER_DAY_TRANSPORT_FAILURES)"
 fresh; pages 'T1\thttps://voice.google.com/u/0/voicemail\nT2\thttps://accounts.google.com/v3/signin/challenge/pwd\n'; act >/dev/null
 check "⛔ two candidates -> TRIPPED target_unrecognised (never a guess)" "target_unrecognised:0" "$(field BREAKER_REASON):$(driver_runs)"
 fresh; pages 'P1\thttps://workspace.google.com/products/voice/\nT9\thttps://accounts.google.com/v3/signin/accountchooser?x=1\n'; act >/dev/null
@@ -215,7 +222,7 @@ fresh; pages 'W1\thttps://workspace.google.com/products/voice/\n'; act >/dev/nul
 check "only the Workspace Voice page (a signed-out Voice tab) -> it is driven" "target_id=W1" \
       "$(grep -a '^target_id=' "$GV_STUB_DIR/driver/stdin.bin")"
 fresh; pages 'E1\thttps://accounts.google.com.evil.example/\n'; act >/dev/null
-check "host is PARSED, not substring-matched (accounts.google.com.evil.example)" "target_unrecognised:0" "$(field BREAKER_REASON):$(driver_runs)"
+check "host is PARSED, not substring-matched (accounts.google.com.evil.example): no candidate, no driver" "0:1" "$(driver_runs):$(field BREAKER_DAY_TRANSPORT_FAILURES)"
 fresh; printf '4' > "$GV_STUB_DIR/cdp/targets.rc"; rc="$(act)"
 check "CDP does not answer -> transport: ARMED, no driver, credential 0, transport 1" "0:ARMED:0:0:1" \
       "$rc:$(field BREAKER_STATE):$(driver_runs):$(field BREAKER_DAY_CREDENTIAL_ATTEMPTS):$(field BREAKER_DAY_TRANSPORT_FAILURES)"
@@ -319,18 +326,22 @@ fresh; landing 'https://workspace.google.com/products/voice/'; act >/dev/null
 check "⛔ the driver lied (forced navigation lands on the signed-out page) -> TRIPPED" "TRIPPED:verification_failed" \
       "$(field BREAKER_STATE):$(field BREAKER_REASON)"
 check "⛔ …and the service saw ZERO refresh-from-browser POSTs" "0" "$(posts)"
+check "…and the reason says no cookies were posted" "yes" "$(reason_has 'No cookies were posted to the service')"
 fresh; landing 'https://accounts.google.com/v3/signin/challenge/pwd'; act >/dev/null
 check "forced navigation lands on the sign-in host -> TRIPPED, no POST" "TRIPPED:0" "$(field BREAKER_STATE):$(posts)"
 fresh; printf '4' > "$GV_STUB_DIR/cdp/navigate.rc"; act >/dev/null
 check "the forced navigation fails -> TRIPPED, no POST" "TRIPPED:verification_failed:0" "$(field BREAKER_STATE):$(field BREAKER_REASON):$(posts)"
 fresh; post_code 502; after_post "$STALE"; act >/dev/null
 check "Google refused the cookies (502, still Stale) -> TRIPPED" "TRIPPED:verification_failed" "$(field BREAKER_STATE):$(field BREAKER_REASON)"
+check "…and only THIS reason says the working set was NOT overwritten" "yes" "$(reason_has 'kept its previously-working set (it was NOT overwritten)')"
 fresh; post_code 202; act >/dev/null
 check "⛔ 202 (written but UNPROVEN) is not success, even with validatedAt moved -> TRIPPED" "TRIPPED:verification_failed" "$(field BREAKER_STATE):$(field BREAKER_REASON)"
+check "⛔ …and the reason says the previous file WAS overwritten, never that it was not" "yes:no" \
+      "$(reason_has 'previous cookie file WAS overwritten'):$(reason_has 'NOT overwritten')"
 fresh; after_post '{}' 500; act >/dev/null
 check "the service died mid-verify -> TRIPPED" "TRIPPED:verification_failed" "$(field BREAKER_STATE):$(field BREAKER_REASON)"
-check "…and the reason says the old cookie set survived" "yes" \
-      "$(grep -q 'NOT\\ overwritten' "$GV_RELOGIN_STATE_FILE" && echo yes || echo no)"
+check "…and the reason says the POST was accepted but not confirmed (no guess about the file)" "yes:no" \
+      "$(reason_has 'adopted the harvested cookies (HTTP 200)'):$(reason_has 'NOT overwritten')"
 
 echo "=== ⛔ the credential: stdin only, in the documented format ==="
 fresh; act >/dev/null
@@ -345,6 +356,10 @@ check "⛔ password in NO environment (driver + every ancestor)" "0" \
       "$(cat "$GV_STUB_DIR/driver/environ.txt" "$GV_STUB_DIR/driver/ancestors.environ" | grep -caF "$FIXTURE_PW")"
 check "the email in no argv and no environment either" "0" \
       "$(cat "$GV_STUB_DIR/driver/argv.txt" "$GV_STUB_DIR/driver/ancestors.txt" "$GV_STUB_DIR/driver/environ.txt" "$GV_STUB_DIR/driver/ancestors.environ" | grep -caF "$FIXTURE_EMAIL")"
+
+fresh; ACCT_PASSWORD=pre-exported ACCT_EMAIL=pre-exported act >/dev/null
+check "⛔ an ACCT_PASSWORD already EXPORTED by the caller does not carry the real one to the driver" "0:0" \
+      "$(grep -caF "$FIXTURE_PW" "$GV_STUB_DIR/driver/environ.txt"):$(grep -caF "$FIXTURE_EMAIL" "$GV_STUB_DIR/driver/environ.txt")"
 
 echo "=== ⛔ the password is in no journal, state file, status or config output ==="
 # Every failure path, with the fixture account in place, into ONE journal.
@@ -372,7 +387,7 @@ check "password absent from --print-config (and no substring of it)" "0" \
 echo "=== ⛔ SOURCE assertions (plan §0.3: source, not sampling) ==="
 check "no --password style flag anywhere" "0" "$(grep -cE -- '--password|--pass[ =]|--credential' "$ACTUATOR")"
 check "the account file is never sourced" "0" "$(grep -cE '^[[:space:]]*(\.|source)[[:space:]]+"?\$\{?ACCOUNT_FILE' "$ACTUATOR")"
-check "nothing ACCT_ is exported" "0" "$(grep -cE '(export|declare -x)[^#]*ACCT_' "$ACTUATOR")"
+check "nothing ACCT_ is exported (only ever export -n)" "0" "$(grep -E '(export|declare -x)[^#]*ACCT_' "$ACTUATOR" | grep -vc 'export -n ACCT_')"
 check "the password variable is expanded on exactly 3 lines (the stdin printf, the redaction, the empty check)" "3" \
       "$(grep -cE '\$\{?ACCT_PASSWORD' "$ACTUATOR")"
 check "…none of which runs jq, curl, python3, timeout or a here-string" "0" \
@@ -426,12 +441,20 @@ mutant verdict-bypassed "⛔ Stale + breaker TRIPPED -> no driver, no CDP, no st
     's/^if \[ "\$verdict" != "AUTHORISED" \]; then$/if false; then/'
 mutant no-driver-check "…the breaker file is byte-identical (no trip, no counter)" \
     's/^if \[ ! -f "\$DRIVER" \]; then$/if false; then/'
-mutant no-stand-down "⛔ assist STATE=PREPARED -> exit 0, NO driver, NO CDP" \
-    's/^        PREPARED|SIGNED_IN_UNCONFIRMED)$/        NEVER-MATCHES)/'
+mutant assist-ignored "⛔ assist STATE=PREPARED -> exit 0, NO driver, NO CDP" \
+    's/^        IDLE) ;;$/        *) ;;/'
 mutant crlf-accepted "⛔ CRLF line endings -> TRIPPED malformed, never offered (a CR would be a wrong password)" \
     '/^            \*\$'"'"'\\r'"'"'\*) account_refuse/,/^                "line \${n} of \${ACCOUNT_FILE} ends in a carriage return/d'
 mutant key-echoed "⛔ …and the unknown key (which may be a password) is NOT in the journal or the state" \
     's/sets a key other than GV_ACCOUNT_EMAIL or GV_ACCOUNT_PASSWORD (the key is not repeated here in case it is not a key)./sets an unknown key ${key}./'
+mutant assist-denylist "⛔ assist STATE=CONFIRM_FAILED (not IDLE) -> stand down, nothing spent" \
+    's/^        IDLE) ;;$/        IDLE|CONFIRM_FAILED|CONFIRM_REFUSED|HIBERNATING) ;;/'
+mutant no-export-n "⛔ an ACCT_PASSWORD already EXPORTED by the caller does not carry the real one to the driver" \
+    '/^export -n ACCT_EMAIL ACCT_PASSWORD 2>\/dev\/null$/d'
+mutant fate-202-says-kept "⛔ …and the reason says the previous file WAS overwritten, never that it was not" \
+    's/^        202) echo "The service WROTE.*$/        202) echo "The previously-working cookie set was NOT overwritten." ;;/'
+mutant zero-candidates-trips "no page on a Google sign-in/Voice host -> transport, NOT a trip: ARMED, no driver, credential 0, transport 1" \
+    's/^    record_transport_and_exit "no page on a Google sign-in or Voice host.*$/    breaker_trip target_unrecognised x; breaker_write; exit 0/'
 mutant listing-not-live "a parked Workspace tab beside the sign-in page -> the sign-in page is driven" \
     's/^    href="\$(cdp url --target "\$tid")" || record_transport_and_exit.*$/    href="$_cached"/'
 mutant transport-charges-budget "⛔ TRANSPORT -> ARMED, credential budget HANDED BACK (0), transport 1" \
@@ -442,7 +465,7 @@ mutant nonzero-trusted "⛔ a verdict word with a NON-ZERO exit -> TRIPPED (a cr
     's/^if \[ "\$driver_rc" -ne 0 \]; then$/if false; then/'
 mutant no-in-flight-check "⛔ LAST_OUTCOME=in_flight on an ARMED breaker -> TRIPPED interrupted, no driver" \
     's/^if \[ "\$BREAKER_STATE" = "ARMED" \] && \[ "\$BREAKER_LAST_OUTCOME" = "in_flight" \]; then$/if false; then/'
-mutant charge-after-driver "⛔ the attempt is persisted BEFORE the driver runs (credential 1, in_flight)" \
+mutant no-in-flight-marker "⛔ the attempt is persisted BEFORE the driver runs (credential 1, in_flight)" \
     's/^BREAKER_LAST_OUTCOME="in_flight"$/BREAKER_LAST_OUTCOME="succeeded"/'
 mutant no-lock "⛔ two runs at once: the second exits 0 without acting" \
     's/^if ! breaker_lock; then$/if false; then/'
