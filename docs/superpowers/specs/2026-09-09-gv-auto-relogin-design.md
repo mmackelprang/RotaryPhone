@@ -1,5 +1,9 @@
 # GV auto-relogin — design
 
+> ⛔ **ABANDONED by owner decision, 2026-09-25.** Nothing will store, read or submit a Google password. Superseded
+> by [`2026-09-25-gv-reachable-reauth-design.md`](2026-09-25-gv-reachable-reauth-design.md). Kept unedited below as
+> the record of the reasoning.
+
 **Date:** 2026-09-09 (evening)
 **Status:** shape approved by owner; not started
 **Depends on:** `2026-09-09-gv-session-alarm-design.md` (shipped as PR #85) and the

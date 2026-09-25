@@ -1,5 +1,10 @@
 # Plan — GV auto-relogin: automate the routine case, and stop hard when it stops being routine
 
+> ⛔ **ABANDONED by owner decision, 2026-09-25.** Nothing will store, read or submit a Google password. Superseded
+> by [`gv-reachable-reauth.md`](gv-reachable-reauth.md) and
+> [`../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md`](../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md),
+> whose §9 lists which parts of draft PR #88 carry forward. Kept unedited below as the record of the reasoning.
+
 **Spec:** [`../superpowers/specs/2026-09-09-gv-auto-relogin-design.md`](../superpowers/specs/2026-09-09-gv-auto-relogin-design.md) —
 read it first. Its §2 prerequisites (no 2FA, dedicated account) and its §5 placement rationale are settled and
 are **not** re-opened here.
