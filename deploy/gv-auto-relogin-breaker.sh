@@ -118,22 +118,28 @@ breaker_load() {
         # ⛔ READ IN A SUBSHELL, AND ONLY THE KNOWN FIELDS COME BACK. Sourcing the file
         # in THIS shell would let any line in it do anything — `BREAKER_MAX_PER_DAY=99`
         # would hand itself a budget, and a function definition could replace this
-        # one. The subshell sources it, then prints the whitelisted fields in %q form;
-        # only that print is evaluated here. A field the file does not set comes back
-        # as the __UNSET__ marker, which is how a PARTIAL file is caught below.
-        local dump
+        # one. The subshell sources it, then prints the whitelisted fields' VALUES,
+        # NUL-separated, in a fixed order; this shell reads them back as DATA with no
+        # eval, so nothing the file does in the subshell (even redefining printf) can
+        # assign anything here except those fields, and those are validated below. A
+        # field the file does not set comes back as the __UNSET__ marker, which is how
+        # a PARTIAL file is caught.
+        local -a vals=()
+        local nfields=0 f
+        for f in $BREAKER_ALL_FIELDS; do nfields=$((nfields + 1)); done
         # shellcheck disable=SC1090
-        dump="$(
+        mapfile -d '' -t vals < <(
             for f in $BREAKER_ALL_FIELDS; do printf -v "$f" '%s' __UNSET__; done
             . "$BREAKER_STATE_FILE" >/dev/null 2>&1 || exit 1
-            for f in $BREAKER_ALL_FIELDS; do printf '%s=%q\n' "$f" "${!f}"; done
-        )"
-        if [ $? -ne 0 ] || [ -z "$dump" ]; then
+            for f in $BREAKER_ALL_FIELDS; do printf '%s\0' "${!f}"; done
+        )
+        if [ "${#vals[@]}" -ne "$nfields" ]; then
             breaker_fail_closed state_unreadable \
                 "Auto-relogin is stopped because its breaker state file at ${BREAKER_STATE_FILE} could not be read. The attempt history is unknown, so no further attempt can be authorised. A human must run: gv-auto-relogin.sh --reset"
         else
-            eval "$dump"
-            local f missing=""
+            local i=0
+            for f in $BREAKER_ALL_FIELDS; do printf -v "$f" '%s' "${vals[$i]}"; i=$((i + 1)); done
+            local missing=""
             for f in $BREAKER_REQUIRED_FIELDS; do
                 [ "${!f}" = "__UNSET__" ] && missing="${missing} ${f}"
             done

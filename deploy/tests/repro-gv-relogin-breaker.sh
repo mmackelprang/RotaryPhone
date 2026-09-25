@@ -134,6 +134,11 @@ printf 'BREAKER_MAX_PER_DAY=99\n' >> "$GV_RELOGIN_STATE_FILE"
 check "a state file cannot raise its own budget" "3" \
       "$(bash -c '. "$1"; breaker_load; echo "$BREAKER_MAX_PER_DAY"' _ "$BREAKER")"
 fresh
+printf "printf() { builtin printf 'ARMED\\\\0'; }\n" >> "$GV_RELOGIN_STATE_FILE"
+check "PRECONDITION: the hostile line is in the file" "1" "$(grep -c '^printf()' "$GV_RELOGIN_STATE_FILE")"
+check "a state file that redefines printf cannot inject values -> TRIPPED" "TRIPPED" "$(state)"
+check "...and refuses" "REFUSED" "$(may)"
+fresh
 act 'breaker_record_credential_attempt; breaker_record_credential_attempt; breaker_record_credential_attempt'
 set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 90000 ))"
 set_field BREAKER_DAY_BUCKET 2999-01-01

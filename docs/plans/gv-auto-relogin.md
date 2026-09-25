@@ -2497,7 +2497,7 @@ delivery path to date is the dead-man, not the alarm's own notify.
 |---|---|---|
 | 3 | built | `deploy/tests/repro-gv-cdp.sh` 14/14 against a throwaway headless Chrome; two mutants run (one caught live, one only by a source assertion — see the harness) |
 | 4 | ⛔ **not started** — attended, destructive, owner at the box | — |
-| 5, 6 | built | `repro-gv-relogin-breaker.sh` 71/71, including 12 breaker mutants each caught by its named case |
+| 5, 6 | built | `repro-gv-relogin-breaker.sh` 74/74, including 12 breaker mutants each caught by its named case |
 | 7, 8 | built | both exclusions; `repro-tar-clobber.sh` E/F/F-neg read the exclusions from the shipped `.ps1` |
 | 9–12 | ⛔ blocked on Task 4 | every selector, URL and timeout comes from the spike |
 | 13 | built | `repro-gv-session-alarm.sh` 121/121 (87 pre-existing unchanged); diff to the alarm is additions only |
