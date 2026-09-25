@@ -140,7 +140,7 @@ THREAD_ROOT_DELIVERED=0
 # answer. Only a refused connection or a non-2xx reply proves non-delivery. Guessing "not
 # delivered" on a timeout would retire an alert the owner may have SEEN without ever closing
 # it; guessing "delivered" costs at most one quiet RESOLVED. Pre-merge review 2026-09-25.
-# ⚠ Absent from a pre-2026-09-25 state file, where it defaults to 0. THREAD_ROOT_DELIVERED
+# ⚠ Absent from a state file written by any deployed version, where it defaults to 0. THREAD_ROOT_DELIVERED
 # still counts, so the only state that loses is "root refused, alert accepted" written by
 # the OLD script — which that script would have stranded anyway.
 INCIDENT_MAY_HAVE_DELIVERED=0
@@ -265,6 +265,8 @@ truncate_action() {
 post_notify() {
     local severity="$1" title="$2" body="$3" action="$4" dedupe="$5" thread="$6"
     local payload resp rc http out
+    # First statement, before any early return, so no call can read a previous call's value.
+    LAST_NOTIFY_MAYBE_DELIVERED=0
 
     # MEASURED: `action` and `timestamp` are SILENTLY DROPPED on severity=info.
     # So anything whose action matters goes on `warning`, never `info` — and we
@@ -290,7 +292,6 @@ post_notify() {
         || { log "NOTIFY FAILED: could not build the payload for ${dedupe}"; NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED+1)); NOTIFY_FAILED=$((NOTIFY_FAILED+1)); return 1; }
 
     NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED + 1))
-    LAST_NOTIFY_MAYBE_DELIVERED=0
 
     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$ROTARYPHONE_GATEWAY_TOKEN" \
         | curl -sS --max-time "$NOTIFY_MAX_TIME" -X POST --config - \
@@ -305,9 +306,12 @@ post_notify() {
     if [ "$rc" -ne 0 ]; then
         NOTIFY_FAILED=$((NOTIFY_FAILED + 1))
         case "$rc" in
-            # 28 timeout, 52 empty reply, 55/56 send/receive failure: the request may have
-            # reached the gateway, and it may have delivered. Not proof of non-delivery.
-            28|52|55|56)
+            # 28 timeout, 52 empty reply, 55/56 send/receive failure, 8 weird reply, 18 partial
+            # reply, 16/92 HTTP/2 framing/stream error: the request may have reached the gateway
+            # and been delivered. Not proof of non-delivery. (28 also covers a connect-phase
+            # timeout where nothing was sent — which is why the ok branch re-posts the root
+            # before any RESOLVED, rather than trusting this flag to mean "a thread exists".)
+            8|16|18|28|52|55|56|92)
                 LAST_NOTIFY_MAYBE_DELIVERED=1
                 log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. No confirmation — the gateway MAY have delivered it. Detail: ${out}" ;;
             *)
@@ -551,21 +555,33 @@ elif [ "$condition" = "ok" ]; then
         INCIDENT_MAY_HAVE_DELIVERED=0
     elif [ -n "$INCIDENT_THREAD_KEY" ]; then
         # RESOLVED — quiet, and it MUST reply into the open thread.
-        post_notify "info" \
-            "$(title_for ok)" \
-            "$(now_utc) · RESOLVED
+        # ⛔ NEVER THE FIRST MESSAGE IN ITS THREAD. If the root never provably landed (e.g. every
+        # post timed out — which may or may not have delivered), re-post the root FIRST; its
+        # dedupe_key embeds the incident key, so a root that did land collapses. Only with a
+        # root in place is the RESOLVED posted, so a RESOLVED can never start a thread, whatever
+        # the transport did. A root refused again leaves everything for the next cycle.
+        # (Pre-merge re-review 2026-09-25: a connect-phase timeout is curl 28 too, and nothing
+        # was sent — without this, that RESOLVED would have rooted its own thread.)
+        [ "$THREAD_ROOT_DELIVERED" = "1" ] || open_incident_thread
+        if [ "$THREAD_ROOT_DELIVERED" = "1" ]; then
+            post_notify "info" \
+                "$(title_for ok)" \
+                "$(now_utc) · RESOLVED
 \`browserRefreshOutcome\` is **Succeeded**: cookies pulled from the box's Chrome passed a live probe against
 Google. The session opened at ${INCIDENT_OPENED_AT} is closed.
 Action: none." \
-            "" \
-            "${SOURCE_NAME}-gv-session-resolved-${INCIDENT_THREAD_KEY}" \
-            "$INCIDENT_THREAD_KEY"
-        if [ "$NOTIFY_FAILED" -eq 0 ]; then
-            LAST_POSTED_CONDITION="ok"
-            INCIDENT_THREAD_KEY=""
-            INCIDENT_OPENED_AT=""
-            THREAD_ROOT_DELIVERED=0
-            INCIDENT_MAY_HAVE_DELIVERED=0
+                "" \
+                "${SOURCE_NAME}-gv-session-resolved-${INCIDENT_THREAD_KEY}" \
+                "$INCIDENT_THREAD_KEY"
+            if [ "$NOTIFY_FAILED" -eq 0 ]; then
+                LAST_POSTED_CONDITION="ok"
+                INCIDENT_THREAD_KEY=""
+                INCIDENT_OPENED_AT=""
+                THREAD_ROOT_DELIVERED=0
+                INCIDENT_MAY_HAVE_DELIVERED=0
+            fi
+        else
+            log "RESOLVED WITHHELD for ${INCIDENT_THREAD_KEY}: its thread root could not be delivered, and a RESOLVED must never start a thread. Retrying next cycle."
         fi
     else
         # Healthy, and no incident was ever open. Post nothing at all.

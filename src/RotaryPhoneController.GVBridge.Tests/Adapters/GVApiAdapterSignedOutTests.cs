@@ -146,6 +146,23 @@ public class GVApiAdapterSignedOutTests
         Assert.Equal("Unreachable", adapter.BrowserRefreshOutcomeName);
     }
 
+    [Theory]
+    // A CDP error reply, and a reply with no result.cookies, are protocol faults. Returning an empty
+    // jar for them would read as NoCookies -> SignedOut: a fault reported as a sign-out.
+    [InlineData("""{"id":1,"error":{"code":-32601,"message":"'Network.getCookies' wasn't found"}}""")]
+    [InlineData("""{"id":1,"result":{}}""")]
+    public void GetCookiesReply_ProtocolFault_Throws_NotAnEmptyJar(string reply)
+        => Assert.Throws<InvalidOperationException>(() => CdpCookieExtractor.ParseGetCookiesReply(reply));
+
+    [Fact]
+    public void GetCookiesReply_GenuinelyEmptyJar_IsEmpty_NotAFault()
+    {
+        // The signed-out case proper: Chrome answered correctly and holds no cookies for Voice.
+        var (header, count) = CdpCookieExtractor.ParseGetCookiesReply("""{"id":1,"result":{"cookies":[]}}""");
+        Assert.Equal("", header);
+        Assert.Equal(0, count);
+    }
+
     [Fact]
     public async Task ChromeTrulyUnreachable_IsStillUnreachable()
     {

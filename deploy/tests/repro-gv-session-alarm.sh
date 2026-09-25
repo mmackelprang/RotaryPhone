@@ -394,9 +394,12 @@ serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
 seen_alert="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
 check "root refused, alert accepted -> the alert WAS delivered" "yes" \
       "$([ -n "$seen_alert" ] && echo yes || echo no)"
+start_gateway                             # the gateway accepts roots again by recovery time
 serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
 check "…so recovery posts a RESOLVED, threaded under the alert the owner saw" "$seen_alert" \
       "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+check "…with the missing root placed in that thread FIRST" "$seen_alert" \
+      "$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
 
 # ⚠ PARTIAL DELIVERY, root accepted but the alert refused. A thread root exists and says
 # what closes it; the thread must be closable, so it gets its RESOLVED — and the key must
@@ -431,14 +434,55 @@ rc=$?
 check "gateway slower than our timeout -> exit 1" "1" "$rc"
 check "…and the journal says it MAY have been delivered, not that nothing was" "yes" \
       "$(grep -q 'MAY have delivered' "$WORK/err.txt" && echo yes || echo no)"
-sleep 4                                   # let the stub finish delivering what we gave up on
-timed_out_key="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+# Let the stub finish delivering what we gave up on. POLL with a deadline, never a fixed
+# sleep: the stub is single-threaded, so root and alert land ~3s apart after the alarm exits.
+timed_out_key=""
+for _ in $(seq 150); do
+    timed_out_key="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+    [ -n "$timed_out_key" ] && break
+    sleep 0.1
+done
 check "…while the gateway DID deliver the alert" "yes" \
       "$([ -n "$timed_out_key" ] && echo yes || echo no)"
 start_gateway
 serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
 check "…so recovery closes it with a RESOLVED under that key, not a silent retirement" "$timed_out_key" \
       "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# ⛔ A TIMEOUT THAT DELIVERED NOTHING (pre-merge re-review 2026-09-25). curl 28 also covers a
+# connect-phase timeout, where no byte was sent — the most likely shape of 2026-09-20. The
+# incident is "maybe delivered", so it is not retired silently; but a RESOLVED posted straight
+# away would be the FIRST message in its thread — a RESOLVED rooting a thread, which the policy
+# forbids. The root must be re-posted first. Produced here with a stub that sleeps past our
+# timeout and then REFUSES, so curl sees 28 and the gateway kept nothing.
+start_gateway --delay-notify 2 --fail-notify 500
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'
+GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>"$WORK/err.txt"
+check "timed out AND refused -> journal says MAY have delivered (curl cannot tell)" "yes" \
+      "$(grep -q 'MAY have delivered' "$WORK/err.txt" && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+first_title="$(delivered | jq -r '.title' | head -1)"
+check "recovery re-posts the ROOT first — a RESOLVED never starts a thread" "yes" \
+      "$(case "$first_title" in *🧵*) echo yes ;; *) echo no ;; esac)"
+root_k="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "…and the RESOLVED follows under that root" "$root_k" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# …and if the root is STILL refused at recovery, the RESOLVED is withheld, not orphaned.
+start_gateway --delay-notify 2 --fail-notify 500
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+serve '{"browserRefreshOutcome":"Unreachable"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+start_gateway --fail-notify 500 --fail-notify-matching=-thread-
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "root still refused at recovery -> NO RESOLVED is delivered" "0" \
+      "$(delivered | jq -c 'select(.title|test("recovered"))' | wc -l)"
+check "…and the journal says it was withheld" "yes" \
+      "$(grep -q 'RESOLVED WITHHELD' "$WORK/err.txt" && echo yes || echo no)"
+start_gateway
 
 # A state file written by the PRE-2026-09-25 script has no INCIDENT_MAY_HAVE_DELIVERED. It
 # must load under `set -u` and still close a delivered incident normally.

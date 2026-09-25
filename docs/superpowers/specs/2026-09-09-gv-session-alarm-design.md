@@ -172,7 +172,11 @@ move past.
   was refused — the `RESOLVED` is posted under that key as usual. **"Nothing delivered" must be
   proven:** only a refused connection or a non-2xx reply counts. A timeout (curl 28) or a dropped
   reply may have delivered, so it is treated as delivered — the worst case is one quiet
-  `RESOLVED`, versus an alert the owner saw that is never closed. Measured cause: a key minted
+  `RESOLVED`, versus an alert the owner saw that is never closed.
+- **A `RESOLVED` is never the first message in its thread.** If the thread's root was never
+  confirmed delivered, the root is re-posted before the `RESOLVED` (its dedupe key embeds the
+  incident key, so a root that did land collapses). If the root is still refused, the `RESOLVED`
+  is withheld and retried next cycle. Measured cause: a key minted
   during a 2026-09-20 gateway outage survived its recovery and was reused by an unrelated
   incident five days later.
 

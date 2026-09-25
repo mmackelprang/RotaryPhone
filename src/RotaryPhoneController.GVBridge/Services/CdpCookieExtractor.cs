@@ -191,7 +191,15 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
 
         await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
 
-        var responseJson = responseBuilder.ToString();
+        return ParseGetCookiesReply(responseBuilder.ToString());
+    }
+
+    /// <summary>
+    /// Turn a CDP <c>Network.getCookies</c> reply into a cookie header. Throws on an error reply or a
+    /// malformed one, which <see cref="ExtractAsync"/> reports as <c>ExtractionFailed</c>.
+    /// </summary>
+    internal static (string RawCookieHeader, int CookieCount) ParseGetCookiesReply(string responseJson)
+    {
         using var doc = JsonDocument.Parse(responseJson);
         var root = doc.RootElement;
 
@@ -201,10 +209,12 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
         if (root.TryGetProperty("error", out var cdpError))
             throw new InvalidOperationException($"CDP Network.getCookies returned an error: {cdpError}");
 
+        // A reply with no result.cookies at all is malformed, not "an empty jar": same rule as above.
         if (!root.TryGetProperty("result", out var resultProp) ||
             !resultProp.TryGetProperty("cookies", out var cookiesArray))
         {
-            return ("", 0);
+            throw new InvalidOperationException(
+                "CDP Network.getCookies reply carried no result.cookies — a protocol fault, not a signed-out jar.");
         }
 
         var cookieParts = new List<string>();
