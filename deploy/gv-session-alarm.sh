@@ -147,6 +147,10 @@ LAST_POSTED_RELOGIN_TRIPPED_AT=""
 # key no message was ever posted under, which would leave the quiet RESOLVED invisible.)
 RELOGIN_THREAD_KEY=""
 RELOGIN_ROOT_DELIVERED=0
+# The relogin track's twin of INCIDENT_MAY_HAVE_DELIVERED, for the same reason and with the
+# same "POSSIBLY" (a timeout is not proof of non-delivery). It decides what a re-arm does
+# with a thread whose trip was never provably seen: retire it silently, or close it.
+RELOGIN_MAY_HAVE_DELIVERED=0
 # ⛔ "MIGHT the owner have seen ANY message from this incident?" — root OR alert, delivered
 # OR possibly delivered. Not derivable from the other fields: a root refused while its alert
 # is accepted leaves THREAD_ROOT_DELIVERED=0 and LAST_POSTED_CONDITION unmoved, identical to
@@ -185,6 +189,7 @@ write_state() {
         printf 'LAST_POSTED_RELOGIN_TRIPPED_AT=%q\n' "$LAST_POSTED_RELOGIN_TRIPPED_AT"
         printf 'RELOGIN_THREAD_KEY=%q\n'        "$RELOGIN_THREAD_KEY"
         printf 'RELOGIN_ROOT_DELIVERED=%q\n'    "$RELOGIN_ROOT_DELIVERED"
+        printf 'RELOGIN_MAY_HAVE_DELIVERED=%q\n' "$RELOGIN_MAY_HAVE_DELIVERED"
         printf 'INCIDENT_MAY_HAVE_DELIVERED=%q\n' "$INCIDENT_MAY_HAVE_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
@@ -646,33 +651,137 @@ fi
 # is logged, not posted: the actuator's own next run rewrites it as TRIPPED with its
 # own reason text (the breaker fails closed), and THAT is what this block reports.
 #
-# ⚠ READ BY SOURCING, IN A SUBSHELL — not by grep. The breaker writes every field with
-# printf %q, which renders a sentence as `Auto-relogin\ is\ stopped\ \(x\).`; only the
-# shell can turn that back into the words. The plan's grep|cut|sed parse would have
-# delivered the backslashes to a human (measured 2026-09-25). The subshell keeps the
-# file's assignments out of this script's own variables.
+# ⛔ READ AS DATA — NEVER SOURCED, NOT EVEN IN A SUBSHELL. This used to source the file in
+# a subshell; a subshell still EXECUTES it, so a `$(…)` in a field ran and a line could
+# redefine printf. Now each whitelisted field is taken from its own `NAME=` line and the
+# value is decoded by relogin_unq, which understands exactly the two shapes the breaker's
+# `printf %q` produces — backslash-escaped, and ANSI-C `$'…'` (bash's choice for any
+# value with a control character, and for UTF-8 written under the C locale) — and runs
+# nothing. A field that is not in either shape is quoted RAW, as data, and the journal
+# says so; a missing or DUPLICATED BREAKER_STATE is `unreadable` (a sourced file takes
+# the last assignment; a data reader that silently picked one would be guessing).
+# (The plan's grep|cut|sed parse delivered %q's backslashes to a human — measured
+# 2026-09-25 — which is why a real decoder, not a strip, is needed.)
 # ⛔ Falls back through the BREAKER's own override before the shared default. If the
 # actuator is ever pointed elsewhere with GV_RELOGIN_STATE_FILE and this read only its
 # own variable, it would find nothing, call that "not installed", and every trip would
 # be silent. The default path literal is pinned against the breaker's by
 # AlarmCopyDriftTests.
 RELOGIN_STATE_FILE="${GV_ALARM_RELOGIN_STATE_FILE:-${GV_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}}"
+# The owner-written sign-in driver. Its absence is auto-relogin's safe resting state (the
+# actuator does nothing without it); the journal line below says so rather than "ARMED".
+RELOGIN_DRIVER="${GV_ALARM_RELOGIN_DRIVER:-${HOME}/bin/gv-relogin-signin.py}"
+
+# relogin_unq STRING — decode one printf-%q rendering into RELOGIN_UNQ. Returns 1 when
+# STRING is in neither of %q's shapes. Pure bash: no eval, no source, and no printf FORMAT
+# built from the file except the two validated escape classes (hex and octal digits).
+relogin_unq() {
+    local s="$1" out="" c d i=0 n
+    RELOGIN_UNQ=""
+    [ "$s" = "''" ] && return 0
+    if [ "${#s}" -ge 3 ] && [ "${s:0:2}" = "\$'" ] && [ "${s: -1}" = "'" ]; then
+        s="${s:2:${#s}-3}"; n=${#s}
+        while [ "$i" -lt "$n" ]; do
+            c="${s:i:1}"
+            if [ "$c" = "'" ]; then return 1; fi
+            if [ "$c" != "\\" ]; then out+="$c"; i=$((i + 1)); continue; fi
+            i=$((i + 1)); [ "$i" -lt "$n" ] || return 1
+            c="${s:i:1}"
+            case "$c" in
+                n) out+=$'\n' ;;  t) out+=$'\t' ;;  r) out+=$'\r' ;;  a) out+=$'\a' ;;
+                b) out+=$'\b' ;;  f) out+=$'\f' ;;  v) out+=$'\v' ;;  e|E) out+=$'\e' ;;
+                "\\"|"'"|'"'|'?') out+="$c" ;;
+                x)  d="${s:i+1:2}"; d="${d%%[!0-9A-Fa-f]*}"
+                    [ -n "$d" ] || return 1
+                    printf -v c "\\x${d}"; out+="$c"; i=$((i + ${#d})) ;;
+                [0-7]) d="${s:i:3}"; d="${d%%[!0-7]*}"
+                    printf -v c "\\${d}"; out+="$c"; i=$((i + ${#d} - 1)) ;;
+                *) return 1 ;;
+            esac
+            i=$((i + 1))
+        done
+        RELOGIN_UNQ="$out"; return 0
+    fi
+    n=${#s}
+    while [ "$i" -lt "$n" ]; do
+        c="${s:i:1}"
+        if [ "$c" = "\\" ]; then
+            i=$((i + 1)); [ "$i" -lt "$n" ] || return 1
+            out+="${s:i:1}"
+        else
+            # %q never leaves these bare. One that is bare means the line was not
+            # written by printf %q, and "decoding" it would be a guess.
+            case "$c" in
+                [[:space:]]|"'"|'"'|'$'|'`'|';'|'&'|'|'|'('|')'|'<'|'>') return 1 ;;
+            esac
+            out+="$c"
+        fi
+        i=$((i + 1))
+    done
+    RELOGIN_UNQ="$out"
+}
+
+# relogin_field NAME — sets RELOGIN_FIELD to NAME's decoded value from the state file.
+# Returns 1 if the field is absent, 2 if it is assigned more than once. A value that is
+# not a %q rendering is kept RAW, and RELOGIN_FIELD_RAW=1 says so.
+relogin_field() {
+    local name="$1" line found=0 raw=""
+    RELOGIN_FIELD=""; RELOGIN_FIELD_RAW=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "${name}="*) found=$((found + 1)); raw="${line#*=}" ;;
+        esac
+    done < "$RELOGIN_STATE_FILE"
+    [ "$found" -eq 0 ] && return 1
+    [ "$found" -gt 1 ] && return 2
+    if relogin_unq "$raw"; then RELOGIN_FIELD="$RELOGIN_UNQ"
+    else RELOGIN_FIELD="$raw"; RELOGIN_FIELD_RAW=1; fi
+    return 0
+}
 
 relogin_state="not_installed"
 relogin_tripped_at=""
 relogin_reason_text=""
 if [ -e "$RELOGIN_STATE_FILE" ]; then
-    relogin_fields="$(
-        BREAKER_STATE=""; BREAKER_TRIPPED_AT=""; BREAKER_REASON_TEXT=""
-        # shellcheck disable=SC1090
-        . "$RELOGIN_STATE_FILE" >/dev/null 2>&1 || exit 1
-        printf '%s\n%s\n%s' "$BREAKER_STATE" "$BREAKER_TRIPPED_AT" "$BREAKER_REASON_TEXT"
-    )" || relogin_fields=""
-    relogin_state="$(printf '%s\n' "$relogin_fields" | sed -n 1p)"
-    relogin_tripped_at="$(printf '%s\n' "$relogin_fields" | sed -n 2p)"
-    relogin_reason_text="$(printf '%s\n' "$relogin_fields" | sed -n '3,$p')"
-    [ -n "$relogin_state" ] || relogin_state="unreadable"
+    relogin_state="unreadable"
+    if [ -f "$RELOGIN_STATE_FILE" ] && [ -r "$RELOGIN_STATE_FILE" ] \
+       && relogin_field BREAKER_STATE && [ "$RELOGIN_FIELD_RAW" = 0 ]; then
+        relogin_state="$RELOGIN_FIELD"
+        relogin_field BREAKER_TRIPPED_AT && relogin_tripped_at="$RELOGIN_FIELD"
+        if relogin_field BREAKER_REASON_TEXT; then
+            relogin_reason_text="$RELOGIN_FIELD"
+            [ "$RELOGIN_FIELD_RAW" = 1 ] \
+                && log "auto-relogin: BREAKER_REASON_TEXT is not in printf-%q form; quoting it RAW, as written."
+        fi
+    fi
 fi
+
+# open_relogin_thread — post the relogin track's 🧵 root under RELOGIN_THREAD_KEY. Same
+# rule as open_incident_thread: every thread opens with a Thread Title, and a refused
+# root is re-attempted under the SAME key (its dedupe_key embeds the key).
+open_relogin_thread() {
+    if post_notify "info" \
+        "[${SOURCE_NAME}] 🧵 GV auto-relogin — stopped" \
+        "Subject: the auto-relogin circuit breaker on \`radio\` (state \`${RELOGIN_STATE_FILE}\`).
+Closes when: a human re-arms it with \`gv-auto-relogin.sh --reset\`.
+Identifiers: thread \`${RELOGIN_THREAD_KEY}\`, tripped ${relogin_tripped_at:-at an unrecorded time}." \
+        "" \
+        "${SOURCE_NAME}-gv-relogin-thread-${RELOGIN_THREAD_KEY}" \
+        "$RELOGIN_THREAD_KEY"
+    then
+        RELOGIN_ROOT_DELIVERED=1
+        RELOGIN_MAY_HAVE_DELIVERED=1
+    elif [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ]; then
+        RELOGIN_MAY_HAVE_DELIVERED=1
+    fi
+}
+
+relogin_forget_thread() {
+    LAST_POSTED_RELOGIN_TRIPPED_AT=""
+    RELOGIN_THREAD_KEY=""
+    RELOGIN_ROOT_DELIVERED=0
+    RELOGIN_MAY_HAVE_DELIVERED=0
+}
 
 if [ "$relogin_state" = "TRIPPED" ] \
    && { [ "$LAST_POSTED_RELOGIN_STATE" != "TRIPPED" ] \
@@ -685,26 +794,14 @@ if [ "$relogin_state" = "TRIPPED" ] \
         if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" = "1" ]; then
             RELOGIN_THREAD_KEY="$INCIDENT_THREAD_KEY"
             RELOGIN_ROOT_DELIVERED=1
+            RELOGIN_MAY_HAVE_DELIVERED=1
         else
             RELOGIN_THREAD_KEY="${SOURCE_NAME}-gv-relogin-$(date -u +%Y%m%dT%H%M%SZ)"
             RELOGIN_ROOT_DELIVERED=0
+            RELOGIN_MAY_HAVE_DELIVERED=0
         fi
     fi
-    if [ "$RELOGIN_ROOT_DELIVERED" != "1" ]; then
-        # Same rule as the session track's open_incident_thread: every thread opens
-        # with a 🧵 Thread Title, and a refused root is re-attempted under the SAME key.
-        if post_notify "info" \
-            "[${SOURCE_NAME}] 🧵 GV auto-relogin — stopped" \
-            "Subject: the auto-relogin circuit breaker on \`radio\` (state \`${RELOGIN_STATE_FILE}\`).
-Closes when: a human re-arms it with \`gv-auto-relogin.sh --reset\`.
-Identifiers: thread \`${RELOGIN_THREAD_KEY}\`, tripped ${relogin_tripped_at:-at an unrecorded time}." \
-            "" \
-            "${SOURCE_NAME}-gv-relogin-thread-${RELOGIN_THREAD_KEY}" \
-            "$RELOGIN_THREAD_KEY"
-        then
-            RELOGIN_ROOT_DELIVERED=1
-        fi
-    fi
+    [ "$RELOGIN_ROOT_DELIVERED" = "1" ] || open_relogin_thread
     if [ "$RELOGIN_ROOT_DELIVERED" = "1" ]; then
         # ⚠ The dedupe key names THIS TRIP (its timestamp), not the condition: a second
         # trip weeks later is a new event and must not be swallowed by a gateway that
@@ -724,27 +821,55 @@ are two different facts, and either can be true without the other." \
         then
             LAST_POSTED_RELOGIN_STATE="TRIPPED"
             LAST_POSTED_RELOGIN_TRIPPED_AT="$relogin_tripped_at"
+            RELOGIN_MAY_HAVE_DELIVERED=1
+        elif [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ]; then
+            RELOGIN_MAY_HAVE_DELIVERED=1
         fi
     fi
 elif [ "$relogin_state" = "TRIPPED" ]; then
     log "auto-relogin still TRIPPED; already posted, nothing to say."
-elif [ "$relogin_state" = "ARMED" ] && [ "$LAST_POSTED_RELOGIN_STATE" = "TRIPPED" ]; then
-    # A human cleared it. Quiet lane — safe ONLY because it replies into the thread
-    # the alert was posted in, which is why that key is persisted.
-    if post_notify "info" \
-        "[${SOURCE_NAME}] GV auto-relogin — re-armed" \
-        "$(now_utc) · RESOLVED
+elif [ "$relogin_state" = "ARMED" ] && [ -n "$RELOGIN_THREAD_KEY" ] \
+     && [ "$RELOGIN_ROOT_DELIVERED" != "1" ] && [ "$RELOGIN_MAY_HAVE_DELIVERED" != "1" ]; then
+    # ⛔ RETIRED, SILENTLY — PR #90's rule for the session track, applied here. Every root
+    # and alert for this trip was PROVABLY refused, so nothing reached the owner, there is
+    # nothing to close, and a RESOLVED would root a thread. Without this the key survived
+    # the re-arm (the branch below required LAST_POSTED_RELOGIN_STATE=TRIPPED, which an
+    # undelivered trip never reaches) and the NEXT trip, days later, re-rooted under it.
+    log "auto-relogin re-armed; the trip under ${RELOGIN_THREAD_KEY} was never delivered — every attempt was refused. Nothing to close, so nothing posted; retired ${RELOGIN_THREAD_KEY} so the next trip opens its own thread."
+    LAST_POSTED_RELOGIN_STATE="ARMED"
+    relogin_forget_thread
+elif [ "$relogin_state" = "ARMED" ] && [ -n "$RELOGIN_THREAD_KEY" ]; then
+    # A human cleared it, and something from this trip reached (or may have reached) the
+    # owner: close it. Quiet lane — safe ONLY because it replies into the thread the alert
+    # was posted in, which is why that key is persisted.
+    # ⛔ NEVER THE FIRST MESSAGE IN ITS THREAD: a root that never provably landed is
+    # re-posted first (its dedupe_key collapses one that did), and a root still refused
+    # withholds the RESOLVED for the next cycle.
+    [ "$RELOGIN_ROOT_DELIVERED" = "1" ] || open_relogin_thread
+    if [ "$RELOGIN_ROOT_DELIVERED" = "1" ]; then
+        if post_notify "info" \
+            "[${SOURCE_NAME}] GV auto-relogin — re-armed" \
+            "$(now_utc) · RESOLVED
 The auto-relogin breaker has been re-armed by a human. Automatic re-login is available again.
 Action: none." \
-        "" \
-        "${SOURCE_NAME}-gv-relogin-rearmed-${RELOGIN_THREAD_KEY}" \
-        "$RELOGIN_THREAD_KEY"
-    then
-        LAST_POSTED_RELOGIN_STATE="ARMED"
-        LAST_POSTED_RELOGIN_TRIPPED_AT=""
-        RELOGIN_THREAD_KEY=""
-        RELOGIN_ROOT_DELIVERED=0
+            "" \
+            "${SOURCE_NAME}-gv-relogin-rearmed-${RELOGIN_THREAD_KEY}" \
+            "$RELOGIN_THREAD_KEY"
+        then
+            LAST_POSTED_RELOGIN_STATE="ARMED"
+            relogin_forget_thread
+        fi
+    else
+        log "auto-relogin RESOLVED WITHHELD for ${RELOGIN_THREAD_KEY}: its thread root could not be delivered, and a RESOLVED must never start a thread. Retrying next cycle."
     fi
+elif [ "$relogin_state" = "ARMED" ] && [ "$LAST_POSTED_RELOGIN_STATE" = "TRIPPED" ]; then
+    # Posted TRIPPED with no thread on record (a state file from before the key was kept).
+    # There is no thread to reply into, and a RESOLVED must not root one: journal it.
+    log "auto-relogin re-armed; the earlier trip has no recorded thread, so no RESOLVED is posted (it would start a thread)."
+    LAST_POSTED_RELOGIN_STATE="ARMED"
+    relogin_forget_thread
+elif [ ! -e "$RELOGIN_DRIVER" ] && [ "$relogin_state" != "unreadable" ]; then
+    log "auto-relogin not installed (no sign-in driver at ${RELOGIN_DRIVER}; breaker ${relogin_state}); nothing to post."
 else
     log "auto-relogin state=${relogin_state}; nothing to post."
 fi

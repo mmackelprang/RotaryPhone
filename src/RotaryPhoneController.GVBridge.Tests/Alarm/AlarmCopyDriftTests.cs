@@ -111,10 +111,10 @@ public class AlarmCopyDriftTests
         var missing = new List<string>();
 
         // 1. Every field the alarm reads is one the breaker writes, in the %q form the alarm's
-        //    subshell-source parse depends on.
+        //    data parser (relogin_field + relogin_unq: never sourced) decodes.
         foreach (var key in new[] { "BREAKER_STATE", "BREAKER_TRIPPED_AT", "BREAKER_REASON_TEXT" })
         {
-            if (!alarm.Contains("$" + key, StringComparison.Ordinal))
+            if (!alarm.Contains("relogin_field " + key, StringComparison.Ordinal))
                 missing.Add($"the alarm no longer reads {key} — update this guard deliberately if that is intended");
             if (!breaker.Contains($"printf '{key}=%q\\n'", StringComparison.Ordinal))
                 missing.Add($"the breaker no longer writes {key} with printf %q — the alarm reads it by name");

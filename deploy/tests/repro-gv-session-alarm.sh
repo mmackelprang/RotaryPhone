@@ -877,6 +877,110 @@ check "relogin: ...and the journal says so" "yes" \
       "$(grep -q 'auto-relogin state=unreadable' "$WORK/err.txt" && echo yes || echo no)"
 rm -f "$GV_RELOGIN_STATE_FILE"
 
+echo "=== auto-relogin track — a trip that never reached the owner retires its thread key ==="
+# ⛔ PR #90's defect 1, on the relogin track. A trip whose root (or alert) the gateway
+# REFUSED leaves LAST_POSTED_RELOGIN_STATE short of TRIPPED. A human re-arms; the ARMED
+# branch only fired when LAST_POSTED was TRIPPED, so nothing cleared RELOGIN_THREAD_KEY,
+# and the NEXT trip — days later — re-rooted under the stale key. Same rules as the
+# session track: nothing (provably) delivered -> retire silently; anything that MAY have
+# reached the owner -> close it with a RESOLVED in that thread, root first.
+start_gateway --fail-notify 500
+reset; trip
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+stranded="$(jq -r 'select(.kind=="notify") | .body.thread_key' "$GW_LOG" | head -1)"
+check "relogin-retire: PRECONDITION the refused trip minted a key" "yes" \
+      "$([ -n "$stranded" ] && echo yes || echo no)"
+start_gateway
+rearm; run >/dev/null
+check "relogin-retire: re-armed with NOTHING delivered -> nothing posted" "0" "$(relogin_msgs | count)"
+check "relogin-retire: ...and the journal says the key was retired" "yes" \
+      "$(grep -qF "retired ${stranded}" "$WORK/err.txt" && echo yes || echo no)"
+sleep 1
+trip "Later trip. A human must run: gv-auto-relogin.sh --reset"; run >/dev/null
+later="$(relogin_alerts | jq -r .thread_key | head -1)"
+check "⛔ relogin-retire: the NEXT trip opens a NEW thread, not the stranded one" "different" \
+      "$([ -n "$later" ] && [ "$later" != "$stranded" ] && echo different || echo same)"
+check "relogin-retire: ...with its own 🧵 root" "$later" \
+      "$(relogin_msgs | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+
+# Root ACCEPTED, alert refused: a thread exists and says what closes it, so the re-arm
+# closes it — and the key is cleared so the next trip does not thread under it.
+start_gateway --fail-notify 500 --fail-notify-matching=gv-relogin-unavailable
+reset; trip
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+rootonly="$(relogin_msgs | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "relogin-retire: PRECONDITION root delivered, alert refused" "yes:0" \
+      "$([ -n "$rootonly" ] && echo yes || echo no):$(relogin_alerts | count)"
+start_gateway
+rearm; run >/dev/null
+check "⛔ relogin-retire: re-armed after a delivered root -> RESOLVED in that thread" "$rootonly" \
+      "$(delivered | jq -r 'select(.title|test("re-armed")) | .thread_key' | head -1)"
+sleep 1
+trip "Later trip. A human must run: gv-auto-relogin.sh --reset"; run >/dev/null
+check "⛔ relogin-retire: ...and the next trip opens a NEW thread" "different" \
+      "$(k="$(relogin_alerts | jq -r .thread_key | head -1)"; [ -n "$k" ] && [ "$k" != "$rootonly" ] && echo different || echo same)"
+
+# A TIMEOUT may have delivered: not retired silently, and the RESOLVED is never the first
+# message in its thread — the root is re-posted first.
+start_gateway --delay-notify 2 --fail-notify 500
+reset; trip
+serve '{"browserRefreshOutcome":"Succeeded"}'; GV_ALARM_NOTIFY_MAX_TIME=1 bash "$ALARM" >/dev/null 2>&1
+start_gateway
+rearm; run >/dev/null
+first_relogin_title="$(relogin_msgs | jq -r .title | head -1)"
+check "relogin-retire: timed-out trip, re-armed -> root re-posted FIRST" "yes" \
+      "$(case "$first_relogin_title" in *🧵*) echo yes ;; *) echo no ;; esac)"
+tk_root="$(relogin_msgs | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+tk_res="$(delivered | jq -r 'select(.title|test("re-armed")) | .thread_key' | head -1)"
+check "relogin-retire: ...then the RESOLVED under it" "yes" \
+      "$([ -n "$tk_res" ] && [ "$tk_res" = "$tk_root" ] && echo yes || echo "no(root=${tk_root} resolved=${tk_res})")"
+
+echo "=== auto-relogin track — the breaker file is DATA, never executed ==="
+# ⛔ The alarm used to source the breaker's state file in a subshell. A subshell still
+# EXECUTES it: a `$(…)` in a field runs, and a line can redefine printf. The file is now
+# parsed line by line and printf-%q escapes are decoded without eval.
+reset
+SENTINEL="$WORK/executed-by-the-alarm"
+rm -f "$SENTINEL"
+{
+    printf 'BREAKER_STATE=TRIPPED\n'
+    printf 'BREAKER_TRIPPED_AT=2026-09-25T00:00:00Z\n'
+    printf 'BREAKER_REASON_TEXT=$(touch %s)\n' "$SENTINEL"
+    printf 'printf() { touch %s; }\n' "$SENTINEL"
+} > "$GV_RELOGIN_STATE_FILE"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "⛔ relogin-data: nothing in the breaker file was EXECUTED" "absent" \
+      "$([ -e "$SENTINEL" ] && echo EXECUTED || echo absent)"
+check "relogin-data: the trip is still reported" "1" "$(relogin_alerts | count)"
+check "relogin-data: ...quoting the field LITERALLY" "yes" \
+      "$(relogin_alerts | jq -r .body | grep -qF "> \$(touch ${SENTINEL})" && echo yes || echo no)"
+
+# The real breaker's %q forms decode exactly: $'…' with a newline, UTF-8 written under
+# the C locale (bash renders the bytes as octal escapes there), and quotes/backslashes.
+reset
+TRICKY=$'Line one \xe2\x80\x94 with "quotes", a \\backslash and $dollar;\nline two. A human must run: gv-auto-relogin.sh --reset'
+rm -f "$GV_RELOGIN_STATE_FILE"; bash "$BREAKER" --reset >/dev/null
+LC_ALL=C bash -c '. "$1"; breaker_load; breaker_trip challenged "$2"; breaker_write' _ "$BREAKER" "$TRICKY" 2>/dev/null
+check "relogin-data: PRECONDITION the C-locale file uses an ANSI-C \$'…' form" "yes" \
+      "$(grep -q "^BREAKER_REASON_TEXT=\\\$'" "$GV_RELOGIN_STATE_FILE" && echo yes || echo no)"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "relogin-data: a \$'…' reason decodes byte-for-byte" "yes" \
+      "$(relogin_alerts | jq -r .body | grep -qF "> ${TRICKY%%$'\n'*}" && relogin_alerts | jq -r .body | grep -qxF 'line two. A human must run: gv-auto-relogin.sh --reset' && echo yes || echo no)"
+reset
+bash "$BREAKER" --reset >/dev/null
+bash -c '. "$1"; breaker_load; breaker_trip challenged "$2"; breaker_write' _ "$BREAKER" 'Plain (x) & "y" \z. A human must run: gv-auto-relogin.sh --reset' 2>/dev/null
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "relogin-data: a backslash-escaped reason decodes exactly" "yes" \
+      "$(relogin_alerts | jq -r .body | grep -qxF '> Plain (x) & "y" \z. A human must run: gv-auto-relogin.sh --reset' && echo yes || echo no)"
+# Two assignments of one field: a sourced file would take the last; a data reader that
+# silently picked either would be guessing. It is unreadable.
+reset
+printf 'BREAKER_STATE=ARMED\nBREAKER_STATE=TRIPPED\n' > "$GV_RELOGIN_STATE_FILE"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "relogin-data: a duplicated BREAKER_STATE is unreadable, not a guess" "yes:0" \
+      "$(grep -q 'auto-relogin state=unreadable' "$WORK/err.txt" && echo yes || echo no):$(relogin_msgs | count)"
+rm -f "$GV_RELOGIN_STATE_FILE"
+
 echo "=== Housekeeping ==="
 check "no .new debris anywhere under HOME" "0" \
       "$(find "$HOME" -name '*.new' 2>/dev/null | wc -l)"
