@@ -332,6 +332,87 @@ check "state lost mid-incident -> NO resolved message at all (nothing to close)"
 check "…and the alert's thread is therefore left open" "yes" \
       "$([ -n "$lost_from" ] && echo yes || echo no)"
 
+echo "=== 2026-09-25 — an incident that recovers UNDELIVERED retires its thread key ==="
+# ⛔ MEASURED ON THE BOX. 2026-09-20 03:04–08:10 EDT every gateway POST timed out; an
+# incident opened as rotaryphone-gv-session-20260920T071522Z with its root undelivered.
+# At 08:14 the condition returned to ok — but LAST_POSTED_CONDITION was still `ok`,
+# because nothing had ever been delivered, so the "unchanged since the last post" branch
+# swallowed the recovery and the key was never cleared. FIVE DAYS LATER, 2026-09-25
+# 15:08:02Z, an unrelated browser_unreachable "re-attempted the incident thread root"
+# for the 09-20 key and delivered a new alert under a five-day-old thread identity.
+#
+# The rule: an incident whose condition returns to ok with NOTHING delivered is retired
+# silently — no alert was ever seen, so there is nothing to close, and a RESOLVED would
+# be an all-clear for an alarm nobody raised. The next incident opens its own thread.
+# ⚠ The stub truncates its log on restart, so the refused key is read BEFORE restarting.
+start_gateway
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null      # LAST_POSTED_CONDITION=ok, as on the box
+start_gateway --fail-notify 500
+serve '{"browserRefreshOutcome":"Unreachable"}'
+rc="$(run)"
+check "gateway down at incident open -> exit 1" "1" "$rc"
+retired_key="$(jq -r 'select(.kind=="notify" and .status==500) | .body.thread_key' "$GW_LOG" | head -1)"
+check "…and a thread key WAS minted for the refused incident" "yes" \
+      "$([ -n "$retired_key" ] && echo yes || echo no)"
+start_gateway                                                     # the gateway comes back
+serve '{"browserRefreshOutcome":"Succeeded"}'
+rc="$(run)"
+check "undelivered incident recovers -> exit 0" "0" "$rc"
+check "…and posts NOTHING (no alert was ever seen, so there is nothing to close)" "0" \
+      "$(delivered | wc -l)"
+check "…and the journal says the key was retired" "yes" \
+      "$(grep -qF "retired ${retired_key}" "$WORK/err.txt" && echo yes || echo no)"
+sleep 1                  # keys are second-resolution; do not let a fast run mint the same one
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+new_root="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "the NEXT incident delivers its own thread root" "yes" \
+      "$([ -n "$new_root" ] && echo yes || echo no)"
+check "…under a NEW key, not the retired one" "different" \
+      "$([ -n "$new_root" ] && [ "$new_root" != "$retired_key" ] && echo different || echo same)"
+check "…its alert threads under that new root" "$new_root" \
+      "$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "…and nothing is re-attempted under the retired key" "0" \
+      "$(delivered | jq -c --arg k "$retired_key" 'select(.thread_key==$k)' | wc -l)"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…and its RESOLVED closes the NEW thread" "$new_root" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# ⚠ PARTIAL DELIVERY, root refused but the ALERT accepted. The owner SAW an alert, under
+# a thread_key whose root never arrived — so the alert itself is that thread's first
+# message. It must be closed, and in that same thread. Retiring it silently would leave
+# a notified alert open forever.
+start_gateway --fail-notify 500 --fail-notify-matching=-thread-
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+seen_alert="$(delivered | jq -r 'select(.severity=="alert") | .thread_key' | head -1)"
+check "root refused, alert accepted -> the alert WAS delivered" "yes" \
+      "$([ -n "$seen_alert" ] && echo yes || echo no)"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery posts a RESOLVED, threaded under the alert the owner saw" "$seen_alert" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+
+# ⚠ PARTIAL DELIVERY, root accepted but the alert refused. A thread root exists and says
+# what closes it; the thread must be closable, so it gets its RESOLVED — and the key must
+# still be cleared, or the next incident threads under this one.
+start_gateway --fail-notify 500 --fail-notify-matching=browser_unreachable
+reset
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+serve '{"browserRefreshOutcome":"Unreachable"}'; run >/dev/null
+root_only="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "root accepted, alert refused -> the root WAS delivered" "yes" \
+      "$([ -n "$root_only" ] && echo yes || echo no)"
+start_gateway
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "…so recovery closes that thread with a RESOLVED" "$root_only" \
+      "$(delivered | jq -r 'select(.title|test("recovered")) | .thread_key' | head -1)"
+sleep 1
+serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null
+next_root="$(delivered | jq -r 'select(.title|test("🧵")) | .thread_key' | head -1)"
+check "…and the next incident opens a NEW thread" "different" \
+      "$([ -n "$next_root" ] && [ "$next_root" != "$root_only" ] && echo different || echo same)"
+
 echo "=== Task 10 — flapping threads under ONE incident ==="
 reset
 serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null

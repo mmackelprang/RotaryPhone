@@ -91,7 +91,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "no such route"})
 
     def _notify(self, body):
-        if ARGS.fail_notify:
+        # --fail-notify-matching narrows --fail-notify to messages whose dedupe_key contains
+        # the substring, so a PARTIAL delivery (root refused, alert accepted, or the reverse)
+        # can be produced. Without it every notify fails together.
+        match = ARGS.fail_notify_matching
+        if ARGS.fail_notify and (not match or match in str(body.get("dedupe_key", ""))):
             self._record("notify", ARGS.fail_notify, body)
             return self._send(ARGS.fail_notify, {"error": "forced failure (--fail-notify)"})
 
@@ -155,6 +159,8 @@ if __name__ == "__main__":
     ap.add_argument("--log", default="/tmp/gv-alarm-gateway-stub.jsonl")
     ap.add_argument("--fail-notify", type=int, default=0,
                     help="return this status for every /v1/notify")
+    ap.add_argument("--fail-notify-matching", default="",
+                    help="with --fail-notify, fail only notifies whose dedupe_key contains this")
     ARGS = ap.parse_args()
     open(ARGS.log, "w").close()
     print(f"stub gateway on 127.0.0.1:{ARGS.port}, log {ARGS.log}", file=sys.stderr)

@@ -130,6 +130,13 @@ PENDING_POLLS=0
 # replying into nothing. A gateway that is down when an incident opens is a correlated
 # failure, not an exotic one. Found in pre-merge review 2026-09-09.
 THREAD_ROOT_DELIVERED=0
+# ⛔ "Did the owner see ANY message from this incident?" — root OR alert. Not derivable
+# from the other fields: a root refused while its alert is accepted leaves
+# THREAD_ROOT_DELIVERED=0 and LAST_POSTED_CONDITION unmoved, identical to an incident
+# where nothing arrived at all. The two must end differently on recovery (see the ok
+# branch), so the alert's delivery is recorded on its own. Absent from a pre-2026-09-25
+# state file, where it defaults to 0 — safe, because THREAD_ROOT_DELIVERED still counts.
+INCIDENT_ALERT_DELIVERED=0
 
 if [ -r "$STATE_FILE" ]; then
     # shellcheck disable=SC1090
@@ -150,6 +157,7 @@ write_state() {
         printf 'PENDING_CONDITION=%q\n'     "$PENDING_CONDITION"
         printf 'PENDING_POLLS=%q\n'         "$PENDING_POLLS"
         printf 'THREAD_ROOT_DELIVERED=%q\n' "$THREAD_ROOT_DELIVERED"
+        printf 'INCIDENT_ALERT_DELIVERED=%q\n' "$INCIDENT_ALERT_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
     return 0
@@ -479,12 +487,29 @@ if [ "$condition" = "ignore" ]; then
     # the gateway dead-man covers a service that never returns. Raised in pre-merge
     # review 2026-09-09; recorded rather than guessed at.
     log "outcome=TornDown — service teardown, not a fault. Nothing posted."
-elif [ "$condition" = "$LAST_POSTED_CONDITION" ]; then
+elif [ "$condition" = "$LAST_POSTED_CONDITION" ] && { [ "$condition" != "ok" ] || [ -z "$INCIDENT_THREAD_KEY" ]; }; then
+    # ⛔ ok WITH AN OPEN KEY IS NEVER "UNCHANGED". An incident that never delivered anything
+    # leaves LAST_POSTED_CONDITION at `ok`, so its recovery looks like a repeat — and on
+    # 2026-09-20 this branch swallowed exactly that, stranding the key for five days until
+    # an unrelated alert on 2026-09-25 re-rooted under it. It falls through to the ok branch.
     log "condition unchanged since the last post (${condition}); nothing posted."
 elif [ "$PENDING_POLLS" -lt "$MIN_POLLS_TO_POST" ]; then
     log "condition=${condition} seen ${PENDING_POLLS}/${MIN_POLLS_TO_POST} consecutive polls; not posting yet."
 elif [ "$condition" = "ok" ]; then
-    if [ -n "$INCIDENT_THREAD_KEY" ]; then
+    if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" != "1" ] && [ "$INCIDENT_ALERT_DELIVERED" != "1" ]; then
+        # RETIRED, SILENTLY. Nothing from this incident ever reached the owner — not the root,
+        # not the alert — so there is no alert for a RESOLVED to close, and a RESOLVED here
+        # would be an all-clear for an alarm nobody raised. Posting one would also root a
+        # new thread with a RESOLVED, which the chat policy forbids. So: journal it, and
+        # clear the key so the NEXT incident opens its own thread. The gateway's dead-man
+        # already covered the window, because the refused cycles did not refresh it.
+        log "incident ${INCIDENT_THREAD_KEY} (opened ${INCIDENT_OPENED_AT}) recovered with NOTHING delivered — no root, no alert. Nothing to close, so nothing posted; retired ${INCIDENT_THREAD_KEY} so the next incident opens its own thread."
+        LAST_POSTED_CONDITION="ok"
+        INCIDENT_THREAD_KEY=""
+        INCIDENT_OPENED_AT=""
+        THREAD_ROOT_DELIVERED=0
+        INCIDENT_ALERT_DELIVERED=0
+    elif [ -n "$INCIDENT_THREAD_KEY" ]; then
         # RESOLVED — quiet, and it MUST reply into the open thread.
         post_notify "info" \
             "$(title_for ok)" \
@@ -500,6 +525,7 @@ Action: none." \
             INCIDENT_THREAD_KEY=""
             INCIDENT_OPENED_AT=""
             THREAD_ROOT_DELIVERED=0
+            INCIDENT_ALERT_DELIVERED=0
         fi
     else
         # Healthy, and no incident was ever open. Post nothing at all.
@@ -525,7 +551,8 @@ else
 $(body_for "$condition")" \
         "$(action_for "$condition")" \
         "${SOURCE_NAME}-gv-session-${condition}" \
-        "$INCIDENT_THREAD_KEY"
+        "$INCIDENT_THREAD_KEY" \
+        && INCIDENT_ALERT_DELIVERED=1
     [ "$NOTIFY_FAILED" -eq 0 ] && LAST_POSTED_CONDITION="$condition"
 fi
 
