@@ -120,11 +120,19 @@ public class AlarmCopyDriftTests
         // 1b. Both find the file at the same default path. If either default moved alone,
         //     the alarm would read a file that never exists, call it "not installed", and
         //     every trip would be silent.
-        const string defaultPath = "${HOME}/.local/state/gv-auto-relogin.state";
-        if (!alarm.Contains(defaultPath, StringComparison.Ordinal))
-            missing.Add($"the alarm's default breaker path is no longer {defaultPath}");
-        if (!breaker.Contains(defaultPath, StringComparison.Ordinal))
-            missing.Add($"the breaker's default state path is no longer {defaultPath} — the alarm reads it there");
+        //     Whole assignment lines, not the path alone: a path in a comment must not
+        //     satisfy this, and the alarm's fall-back through the breaker's own override
+        //     (GV_RELOGIN_STATE_FILE) is part of the link.
+        const string alarmLine =
+            "RELOGIN_STATE_FILE=\"${GV_ALARM_RELOGIN_STATE_FILE:-${GV_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}}\"";
+        const string breakerLine =
+            "BREAKER_STATE_FILE=\"${GV_RELOGIN_STATE_FILE:-${HOME}/.local/state/gv-auto-relogin.state}\"";
+        bool HasLine(string text, string line) =>
+            text.Replace("\r", "").Split('\n').Any(l => l.Trim() == line);
+        if (!HasLine(alarm, alarmLine))
+            missing.Add($"the alarm no longer finds the breaker file with: {alarmLine}");
+        if (!HasLine(breaker, breakerLine))
+            missing.Add($"the breaker no longer places its state file with: {breakerLine} — the alarm reads it there");
 
         // 2. The two state words the alarm branches on are the breaker's own.
         foreach (var word in new[] { "TRIPPED", "ARMED" })

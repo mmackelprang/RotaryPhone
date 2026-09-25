@@ -2497,7 +2497,7 @@ delivery path to date is the dead-man, not the alarm's own notify.
 |---|---|---|
 | 3 | built | `deploy/tests/repro-gv-cdp.sh` 14/14 against a throwaway headless Chrome; two mutants run (one caught live, one only by a source assertion — see the harness) |
 | 4 | ⛔ **not started** — attended, destructive, owner at the box | — |
-| 5, 6 | built | `repro-gv-relogin-breaker.sh` 74/74, including 12 breaker mutants each caught by its named case |
+| 5, 6 | built | `repro-gv-relogin-breaker.sh` 83/83, including 12 breaker mutants each caught by its named case |
 | 7, 8 | built | both exclusions; `repro-tar-clobber.sh` E/F/F-neg read the exclusions from the shipped `.ps1` |
 | 9–12 | ⛔ blocked on Task 4 | every selector, URL and timeout comes from the spike |
 | 13 | built | `repro-gv-session-alarm.sh` 121/121 (87 pre-existing unchanged); diff to the alarm is additions only |
@@ -2524,8 +2524,13 @@ RESOLVED can read as closed while the relogin stop is still open; (b) a delivere
 refused and then reset before the next poll leaves a root with no alert; (c) the `.new` file's mode-600-from-birth
 is not asserted separately from the post-`mv` chmod.
 
-**For Task 9, from this build:** ask the breaker through `breaker_verdict`, never through
-`breaker_may_attempt`'s exit code; take `breaker_lock` (it uses the same lock file the plan's actuator names)
-around the whole load → write; pass `--status` / `--reset` through to the breaker, because every reason text and
+**For Task 9, from this build — these supersede the Task 9 draft above where they differ:**
+- Ask the breaker through `breaker_verdict` and compare the WHOLE output: `[ "$(breaker_verdict)" = AUTHORISED ]`.
+  Never use `breaker_may_attempt`'s exit code (the draft does), never `grep`, never `while read`.
+- ⛔ **`breaker_lock` is the actuator's ONLY lock.** The draft's `exec 9>"$LOCK_FILE"; flock -n 9` on the same
+  file would block `breaker_lock` for its full wait on every run (flock locks are per open file). Delete the
+  draft's fd-9 lock and call `breaker_lock` once, around the whole load → write; it is idempotent in-process.
+  Run long-lived children (python, anything touching Chrome) with `8>&-` so they do not inherit the lock.
+- Pass `--status` / `--reset` through to the breaker, because every reason text and
 the alarm's ACTION name `gv-auto-relogin.sh --reset` — until the actuator exists the working command is
 `gv-auto-relogin-breaker.sh --reset`; read `gv-account.conf` without exporting it.

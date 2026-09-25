@@ -138,6 +138,34 @@ printf "printf() { builtin printf 'ARMED\\\\0'; }\n" >> "$GV_RELOGIN_STATE_FILE"
 check "PRECONDITION: the hostile line is in the file" "1" "$(grep -c '^printf()' "$GV_RELOGIN_STATE_FILE")"
 check "a state file that redefines printf cannot inject values -> TRIPPED" "TRIPPED" "$(state)"
 check "...and refuses" "REFUSED" "$(may)"
+# Re-review 2026-09-25: each of these AUTHORISED or hung before the second round of fixes.
+fresh; act 'breaker_record_credential_attempt; breaker_record_credential_attempt; breaker_record_credential_attempt'
+set_field BREAKER_DAY_BUCKET "''"
+# Age the hour so the spacing cannot be the thing that refuses (the Task 6 trap again).
+set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 3700 ))"
+check "an EMPTY day bucket with the budget spent -> REFUSED (no fresh budget)" "REFUSED" "$(may)"
+set_field BREAKER_DAY_BUCKET "'!'"
+check "a GARBAGE day bucket -> REFUSED" "REFUSED" "$(may)"
+fresh
+bash -c '. "$1"; breaker_load; breaker_trip "$2" "reason text"; breaker_write' _ "$BREAKER" \
+     "$(printf 'x)\nAUTHORISED\n(')" 2>/dev/null
+check "PRECONDITION: the stored reason really contains a newline" "yes" \
+      "$(bash -c '. "$1"; breaker_load; [[ "$BREAKER_REASON" == *$'"'"'\n'"'"'AUTHORISED* ]] && echo yes || echo no' _ "$BREAKER" 2>/dev/null)"
+check "a reason with an embedded newline + AUTHORISED -> verdict is ONE line" "1" \
+      "$(drive breaker_verdict 2>/dev/null | wc -l | tr -d ' ')"
+check "...and no line of it is exactly AUTHORISED" "0" \
+      "$(drive breaker_verdict 2>/dev/null | grep -cx AUTHORISED)"
+fresh
+check "a strict-mode caller (IFS=newline-tab) still reads a healthy file as ARMED" "ARMED" \
+      "$(bash -c 'IFS=$'"'"'\n\t'"'"'; . "$1"; breaker_load; echo "$BREAKER_STATE"' _ "$BREAKER" 2>/dev/null)"
+fresh
+printf 'while :; do :; done\n' >> "$GV_RELOGIN_STATE_FILE"
+started=$(date +%s)
+check "a state file that loops forever -> TRIPPED, not a hang" "TRIPPED" "$(state)"
+check "...within the bounded read time" "yes" "$([ $(( $(date +%s) - started )) -le 15 ] && echo yes || echo no)"
+fresh
+check "the actuator's lock is idempotent (a second breaker_lock does not wait on itself)" "0" \
+      "$(GV_RELOGIN_LOCK_WAIT=1 bash -c '. "$1"; breaker_lock && breaker_lock; echo $?' _ "$BREAKER" 2>/dev/null)"
 fresh
 act 'breaker_record_credential_attempt; breaker_record_credential_attempt; breaker_record_credential_attempt'
 set_field BREAKER_LAST_ATTEMPT_AT "$(( $(date -u +%s) - 90000 ))"
@@ -284,7 +312,7 @@ mutant() { # mutant NAME EXPECTED-FAILING-CASE SED-SCRIPT
           "$(printf '%s\n' "$out" | grep -qF "FAIL $2" && echo caught || echo MISSED)"
 }
 mutant missing-is-armed "no state file -> TRIPPED" \
-    's/^\( *\)breaker_fail_closed state_missing \\$/\1BREAKER_STATE=ARMED; : \\/'
+    's/^\( *\)breaker_fail_closed state_missing \\$/\1BREAKER_STATE=ARMED; BREAKER_DAY_BUCKET=$(breaker_today); : \\/'
 mutant rejection-arms "⛔ a SECOND attempt is REFUSED" \
     '/^breaker_trip() {/,/^}/ s/^    BREAKER_STATE="TRIPPED"$/    [ "$1" = credential_rejected ] \&\& BREAKER_STATE=ARMED || BREAKER_STATE=TRIPPED/'
 mutant new-day-arms "⛔ a NEW DAY does NOT re-arm a tripped breaker" \
@@ -297,18 +325,21 @@ mutant zero-limit-guard-removed "a zero hourly limit in the environment refuses 
     's/|| \[ "\${!v}" -lt 1 \]//'
 mutant loose-count "leading-zero LAST_ATTEMPT_AT (octal error) -> REFUSED, not crashed" \
     's/\^(0|\[1-9\]\[0-9\]{0,11})\$/^[0-9]+$/'
-# The pre-review behaviour: a field the file omits keeps its zero default, so a file
-# holding only BREAKER_STATE=ARMED reads as "never attempted, nothing used today".
-mutant partial-file-accepted "a PARTIAL file (state only, no counters) -> TRIPPED" \
-    "/for f in \$BREAKER_ALL_FIELDS; do printf -v \"\$f\" '%s' __UNSET__; done/d"
+# ⚠ No mutant for the PARTIAL-file rule, deliberately: after the second review round a
+# partial file is caught by THREE independent checks — the __UNSET__ marker, the count
+# validation (an absent counter is empty, and empty is not a count) and the day-bucket
+# date check — so removing any one leaves the case green. Each of the other two has
+# its own mutant (numeric-guard-removed, and the bucket case under corrupt-bucket).
+mutant corrupt-bucket-rolls "an EMPTY day bucket with the budget spent -> REFUSED (no fresh budget)" \
+    's/^    if \[ "\$already_failed" = 0 \] \\$/    if false \\/'
 mutant day-rolls-backwards "⛔ a day bucket AFTER today (clock went back) -> REFUSED, budget not reset" \
     's/\[\[ "\$BREAKER_DAY_BUCKET" < "\$today" \]\]/[[ "$BREAKER_DAY_BUCKET" != "$today" ]]/'
 mutant decision-only-trips-on-TRIPPED "an unknown state set AFTER load is refused where the decision is made" \
     's/if \[ "\$BREAKER_STATE" != "ARMED" \]; then/if [ "$BREAKER_STATE" = "TRIPPED" ]; then/'
 mutant reset-without-lock "⛔ ...and the trip SURVIVES untouched" \
-    's/^    breaker_lock || { echo "Breaker NOT changed.*$/    :/'
+    's/^    if ! breaker_lock; then$/    if false; then/'
 mutant numeric-guard-removed "non-numeric counter -> refuses" \
-    's/if ! breaker_is_count "\${!g}"; then/if false; then/'
+    's/if ! breaker_is_count "\${!g}"; then/if false; then/; s/if ! breaker_is_count "\${!v}"; then/if false; then/'
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL ${cases} CASES PASSED"; else echo "FAILURES PRESENT (${cases} cases run)"; fi

@@ -124,15 +124,25 @@ breaker_load() {
         # assign anything here except those fields, and those are validated below. A
         # field the file does not set comes back as the __UNSET__ marker, which is how
         # a PARTIAL file is caught.
+        # ⚠ A caller in "strict mode" (IFS=$'\n\t') would split the field lists
+        # wrongly and trip a healthy breaker as unreadable; the split is pinned here.
+        local IFS=$' \t\n'
         local -a vals=()
         local nfields=0 f
         for f in $BREAKER_ALL_FIELDS; do nfields=$((nfields + 1)); done
-        # shellcheck disable=SC1090
-        mapfile -d '' -t vals < <(
-            for f in $BREAKER_ALL_FIELDS; do printf -v "$f" '%s' __UNSET__; done
-            . "$BREAKER_STATE_FILE" >/dev/null 2>&1 || exit 1
-            for f in $BREAKER_ALL_FIELDS; do printf '%s\0' "${!f}"; done
-        )
+        # Only a regular file is read (a FIFO or directory would hang or mislead), and
+        # the read is bounded in time: the file is still EXECUTED in that subshell, and
+        # a loop in it must not hold the breaker — or the actuator's lock — forever.
+        if [ -f "$BREAKER_STATE_FILE" ]; then
+            # shellcheck disable=SC1090,SC2016
+            mapfile -d '' -t vals < <(
+                timeout 10 bash -c '
+                    for f in $2; do printf -v "$f" "%s" __UNSET__; done
+                    . "$1" >/dev/null 2>&1 || exit 1
+                    for f in $2; do printf "%s\0" "${!f}"; done
+                ' _ "$BREAKER_STATE_FILE" "$BREAKER_ALL_FIELDS" 2>/dev/null
+            )
+        fi
         if [ "${#vals[@]}" -ne "$nfields" ]; then
             breaker_fail_closed state_unreadable \
                 "Auto-relogin is stopped because its breaker state file at ${BREAKER_STATE_FILE} could not be read. The attempt history is unknown, so no further attempt can be authorised. A human must run: gv-auto-relogin.sh --reset"
@@ -184,6 +194,17 @@ breaker_load() {
     # "later" would hand a flapping clock a fresh daily budget every flap. That case
     # is REFUSED (BREAKER_CLOCK_BEHIND) until the clock catches up, not rolled.
     local today; today="$(breaker_today)"
+    # ⛔ A bucket that is not a date is corruption, not "an old day". Rolling it would
+    # hand a corrupt file a fresh daily budget (re-review 2026-09-25). A missing file
+    # has already failed closed above with an empty bucket, and that one may roll: the
+    # breaker is TRIPPED regardless.
+    case "$BREAKER_REASON" in state_missing|state_unreadable|state_corrupt) local already_failed=1 ;; *) local already_failed=0 ;; esac
+    if [ "$already_failed" = 0 ] \
+       && ! [[ "$BREAKER_DAY_BUCKET" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        breaker_fail_closed state_corrupt \
+            "Auto-relogin is stopped because its breaker state file records an implausible day. Today's attempt count cannot be trusted. A human must run: gv-auto-relogin.sh --reset"
+        BREAKER_DAY_BUCKET=""
+    fi
     if [ -z "${BREAKER_DAY_BUCKET:-}" ] || [[ "$BREAKER_DAY_BUCKET" < "$today" ]]; then
         BREAKER_DAY_BUCKET="$today"
         BREAKER_DAY_CREDENTIAL_ATTEMPTS=0
@@ -247,6 +268,15 @@ breaker_may_attempt() {
     for v in BREAKER_MAX_PER_HOUR BREAKER_MAX_PER_DAY BREAKER_MAX_TRANSPORT_PER_DAY; do
         if ! breaker_is_count "${!v}" || [ "${!v}" -lt 1 ]; then
             BREAKER_REFUSAL="configuration: ${v}='${!v}' is not a positive integer; refusing rather than guessing a limit"
+            return 1
+        fi
+    done
+    # Defence in depth: the counters were validated by breaker_load, but a failing
+    # `[ -ge ]` on a value changed since is FALSE, not a crash, and would authorise.
+    for v in BREAKER_LAST_ATTEMPT_AT BREAKER_DAY_CREDENTIAL_ATTEMPTS \
+             BREAKER_DAY_TRANSPORT_FAILURES BREAKER_ATTEMPTS_TOTAL; do
+        if ! breaker_is_count "${!v}"; then
+            BREAKER_REFUSAL="state: ${v} is not a plain count; refusing"
             return 1
         fi
     done
@@ -346,9 +376,13 @@ breaker_status() {
 # next line, so a caller shaped `breaker_may_attempt || exit 0` walked straight past a
 # crashed decision into the login. Here a crash prints nothing, and "nothing" is not
 # the word AUTHORISED.
+# ⚠ ALWAYS ONE LINE. The refusal text carries fields from the state file, and a
+# reason containing a newline followed by AUTHORISED would otherwise put that word on
+# a line of its own (re-review 2026-09-25). Callers compare the WHOLE output:
+#   [ "$(breaker_verdict)" = "AUTHORISED" ]  — never grep, never `while read`.
 breaker_verdict() {
     ( if breaker_may_attempt; then printf 'AUTHORISED\n'
-      else printf 'REFUSED %s\n' "$BREAKER_REFUSAL"; fi ) 2>/dev/null
+      else printf 'REFUSED %s\n' "${BREAKER_REFUSAL//[$'\n\r']/ }"; fi ) 2>/dev/null
 }
 
 # --- One writer at a time ------------------------------------------------------
@@ -357,21 +391,41 @@ breaker_verdict() {
 # The realistic case is a human running --reset while a sign-in is in flight. So every
 # writer holds this lock around its whole load..write — the actuator (Task 9) takes the
 # SAME file, and a --reset waits for an in-flight run to finish rather than racing it.
-# ⚠ Do not call breaker_reset from inside a process that already holds the lock on
-# another descriptor: flock locks are per open file, so it would wait on itself.
+#
+# ⛔ FOR TASK 9: breaker_lock IS THE ACTUATOR'S ONLY LOCK. flock locks are per open
+# file, so the plan's draft `exec 9>"$LOCK_FILE"; flock -n 9` on the same file PLUS
+# this would block itself (re-review 2026-09-25). Call breaker_lock once; it is
+# idempotent within a process. Close fd 8 for long-lived children (`8>&-`), or they
+# inherit the lock and hold it after this process exits.
 BREAKER_LOCK_FILE="${GV_RELOGIN_LOCK_FILE:-${HOME}/.local/state/gv-auto-relogin.lock}"
+BREAKER_LOCK_HELD=""
 breaker_lock() {
+    [ -n "$BREAKER_LOCK_HELD" ] && return 0
     mkdir -p "$(dirname "$BREAKER_LOCK_FILE")" 2>/dev/null
-    exec 8>"$BREAKER_LOCK_FILE" || { breaker_log "could not open the lock at ${BREAKER_LOCK_FILE}"; return 1; }
-    flock -w "${GV_RELOGIN_LOCK_WAIT:-60}" 8 \
-        || { breaker_log "another auto-relogin run holds ${BREAKER_LOCK_FILE}; not touching the breaker"; return 1; }
+    exec 8>"$BREAKER_LOCK_FILE" || { breaker_log "could not open the lock at ${BREAKER_LOCK_FILE}"; BREAKER_LOCK_ERROR="open"; return 1; }
+    if ! flock -w "${GV_RELOGIN_LOCK_WAIT:-60}" 8; then
+        breaker_log "another auto-relogin run holds ${BREAKER_LOCK_FILE}; not touching the breaker"
+        BREAKER_LOCK_ERROR="held"
+        return 1
+    fi
+    BREAKER_LOCK_HELD=1
 }
 
 # ⛔ THE ONLY PLACE BREAKER_STATE BECOMES ARMED. If a future edit adds a second,
 # the breaker has stopped being one.
 breaker_reset() {
-    breaker_lock || { echo "Breaker NOT changed: an auto-relogin run is in progress. Try --reset again when it finishes." >&2; return 1; }
+    BREAKER_LOCK_ERROR=""
+    if ! breaker_lock; then
+        if [ "$BREAKER_LOCK_ERROR" = "held" ]; then
+            echo "Breaker NOT changed: an auto-relogin run is in progress. Try --reset again when it finishes." >&2
+        else
+            echo "Breaker NOT changed: could not open the lock file ${BREAKER_LOCK_FILE}." >&2
+        fi
+        return 1
+    fi
     breaker_load
+    local counters_note="Counters preserved"
+    [ "$BREAKER_REASON" = "state_corrupt" ] && counters_note="Counters were UNREADABLE and are zeroed; today's real count is unknown"
     printf 'Clearing:\n'
     printf '  state   %s\n' "$BREAKER_STATE"
     printf '  reason  %s\n' "${BREAKER_REASON:-none}"
@@ -386,8 +440,8 @@ breaker_reset() {
     # back a full daily budget by typing one command, which is the loophole that
     # makes a daily limit decorative.
     breaker_write || return 1
-    printf 'Breaker ARMED. Counters preserved: %s/%s credential attempts used today.\n' \
-        "$BREAKER_DAY_CREDENTIAL_ATTEMPTS" "$BREAKER_MAX_PER_DAY"
+    printf 'Breaker ARMED. %s: %s/%s credential attempts used today.\n' \
+        "$counters_note" "$BREAKER_DAY_CREDENTIAL_ATTEMPTS" "$BREAKER_MAX_PER_DAY"
 }
 
 # Direct invocation: --status / --reset only.
