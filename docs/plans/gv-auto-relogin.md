@@ -2437,3 +2437,248 @@ in a state that is worse than not having started.**
 >
 > **And when the outcome is one you do not recognise, stop. An unrecognised outcome is not evidence that trying
 > again is safe.**
+
+---
+
+## 7. Build record
+
+Written by the builder on `feat/gv-auto-relogin`, additively. Nothing above this line was rewritten.
+
+### 7.1 Task 1 — the owner's gates, recorded 2026-09-25
+
+| Gate | Owner's answer | Measurement the owner read, verbatim |
+|---|---|---|
+| **G1** — is the cannibalisation test concluded? | ✅ **met** | `~/.local/state/gv-cannibal-test.log`: 2026-09-09 17:36 → 2026-09-13 03:01 (ended by the Sunday 03:00 `radio-weekly-maintenance` reboot), 2,448 samples, 8 stale in two episodes (2026-09-10 11:41 ~2 min; 2026-09-12 01:41–01:53 ~12 min), both self-recovered, no sign-in. |
+| **G2** — does the result clear the actuator? | ✅ **met** — sessions last days | Alarm journal 2026-09-13 → 2026-09-25: 1,533 `condition=ok`, 58 `not_attempted`, zero signed-out conditions; the session survived two weekly reboots without a sign-in. |
+
+⚠ G2 is met as the **owner's** reading of that data. This record adds no duration of its own (§1.2, Task 1).
+
+### 7.2 Task 2 — the escalation-path gate, read-only on the box, 2026-09-25 09:30 EDT
+
+```
+$ ls -l --time-style=long-iso ~/bin/gv-session-alarm.sh
+-rwxr-xr-x 1 mmack mmack 31172 2026-09-10 12:10 /home/mmack/bin/gv-session-alarm.sh
+$ sha256sum ~/bin/gv-session-alarm.sh /opt/rotary-phone/deploy/gv-session-alarm.sh
+db782b6b48275ba7218d7641a773d3f2efe64ee1db1b74a61caf6a23d7c763ff  /home/mmack/bin/gv-session-alarm.sh
+db782b6b48275ba7218d7641a773d3f2efe64ee1db1b74a61caf6a23d7c763ff  /opt/rotary-phone/deploy/gv-session-alarm.sh
+$ systemctl --user list-unit-files 'gv-session-alarm.*'
+gv-session-alarm.service static  -
+gv-session-alarm.timer   enabled enabled
+$ systemctl --user list-timers 'gv-session-alarm.*'
+NEXT Fri 2026-09-25 09:30:22 EDT (10s)   LAST Fri 2026-09-25 09:25:22 EDT   gv-session-alarm.timer
+$ journalctl --user -u gv-session-alarm --since -30min | grep -E 'heartbeat refreshed|NOTIFY|condition='
+... 13:25:22Z outcome=Succeeded condition=ok age=320 polls=1336 last_posted=ok
+... 13:25:22Z heartbeat refreshed http=200 schedule=every:5m grace=30m
+```
+
+| Acceptance | Result |
+|---|---|
+| sha256 pair matches; both units listed | ✅ |
+| plain `list-timers` shows NEXT within 5 minutes | ✅ (10 s) |
+| ⛔ owner has SEEN a delivered message | ✅ **via the dead-man path**: the owner saw the gateway's missing-check alert in Google Chat on 2026-09-20 |
+
+⚠ **Two things this gate did not settle, recorded rather than resolved:**
+
+1. **The installed alarm is not `main`'s alarm.** Installed == shipped (the pair above matches), but both are the
+   build *before* `a2077a0` (`git show main:deploy/gv-session-alarm.sh | sha256sum` = `f0c6423b…`). The diff is
+   the heartbeat-schedule fix: the installed script still defaults to `schedule=5m`, which the gateway refuses.
+   The box works because `~/.rotaryphone-env` carries `GV_ALARM_HEARTBEAT_SCHEDULE=every:5m`. Merged ≠ deployed
+   again, currently harmless because of the override. The next deploy + `install-gv-session-alarm.sh` closes it.
+2. **The 2026-09-20 03:04–08:10 EDT delivery failure is unexplained.** After the weekly reboot refresh was
+   `NotAttempted` and all 112 gateway POSTs timed out (curl exit 28), `THREAD_ROOT_DELIVERED=0`; it self-recovered
+   08:14. A human was reached only through the gateway's dead-man. Tracked separately; not investigated here.
+
+⛔ So Task 2 is recorded as **passing on the owner's confirmation**, with the owner aware that the one proven
+delivery path to date is the dead-man, not the alarm's own notify.
+
+### 7.3 What this branch built (2026-09-25), and what it did not
+
+| Task | State | Evidence |
+|---|---|---|
+| 3 | built | `deploy/tests/repro-gv-cdp.sh` 14/14 against a throwaway headless Chrome; two mutants run (one caught live, one only by a source assertion — see the harness) |
+| 4 | ⛔ **not started** — attended, destructive, owner at the box | — |
+| 5, 6 | built | `repro-gv-relogin-breaker.sh` 83/83, including 12 breaker mutants each caught by its named case |
+| 7, 8 | built | both exclusions; `repro-tar-clobber.sh` E/F/F-neg read the exclusions from the shipped `.ps1` |
+| 9–12 | ⛔ blocked on Task 4 | every selector, URL and timeout comes from the spike |
+| 13 | built | `repro-gv-session-alarm.sh` 121/121 (87 pre-existing unchanged); diff to the alarm is additions only |
+| 14 | built, **reshaped** | guards field names, state words, reset command and default path — not the four actuator sentences (see the test's remarks) |
+| 15–17 | ⛔ blocked on 9–11 | — |
+| 18c | built (comment-only) | the other parts of 18 wait for 4 and 17 |
+
+**Corrections to this plan's drafts, each backed by a failing check:** the 7c inline comment would have ended the
+PowerShell rsync command after its first exclusion (so `--delete` would have removed `data/` and `logs/`);
+Task 13's `grep|cut|sed` parse delivered `printf %q` backslashes, and its re-armed RESOLVED fell back to a thread
+nothing was posted under; Task 6's harness had three defects (shared state, budget overshoot, a refusal masked by
+the hourly spacing); Tasks 3 and 5's own code failed their vocabulary greps.
+
+**Pre-merge review (2026-09-25) found, and this branch fixed:** the breaker could AUTHORISE after a crashed
+decision (octal `09`, 20-digit overflow — an arithmetic error abandons the command and bash carries on), so the
+actuator must ask through `breaker_verdict` (a token; nothing is not `AUTHORISED`); a partial state file read as
+zeros; two writers could undo a trip (`breaker_lock`, taken by `--reset` and to be taken by the actuator on the
+same file); a clock stepping back across midnight reset the day's budget; the state file was sourced into the
+breaker's own shell; the alarm and breaker found the state file through different variables. Each has a harness
+case and, where it is a rule, a mutant.
+
+**Deferred, LOW, recorded:** (a) when the relogin alert joins an open session thread, that thread's session
+RESOLVED can read as closed while the relogin stop is still open; (b) a delivered relogin root whose alert is
+refused and then reset before the next poll leaves a root with no alert; (c) the `.new` file's mode-600-from-birth
+is not asserted separately from the post-`mv` chmod.
+
+**For Task 9, from this build — these supersede the Task 9 draft above where they differ:**
+- Ask the breaker through `breaker_verdict` and compare the WHOLE output: `[ "$(breaker_verdict)" = AUTHORISED ]`.
+  Never use `breaker_may_attempt`'s exit code (the draft does), never `grep`, never `while read`.
+- ⛔ **`breaker_lock` is the actuator's ONLY lock.** The draft's `exec 9>"$LOCK_FILE"; flock -n 9` on the same
+  file would block `breaker_lock` for its full wait on every run (flock locks are per open file). Delete the
+  draft's fd-9 lock and call `breaker_lock` once, around the whole load → write; it is idempotent in-process.
+  Run long-lived children (python, anything touching Chrome) with `8>&-` so they do not inherit the lock.
+- Pass `--status` / `--reset` through to the breaker, because every reason text and
+the alarm's ACTION name `gv-auto-relogin.sh --reset` — until the actuator exists the working command is
+`gv-auto-relogin-breaker.sh --reset`; read `gv-account.conf` without exporting it.
+
+### 7.4 Second build session (2026-09-25, afternoon): the owner writes the driver, this branch builds around it
+
+⛔ **Owner decision, 2026-09-25.** The owner writes the sign-in driver themselves. That is Task 10a,
+`deploy/gv-relogin-signin.py`, the one component that fills in and submits Google's password. This branch
+contains **no code that types into or submits Google's sign-in form.** It builds everything around the driver
+and specifies the driver's interface in [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md).
+Task 10b, the hand-off, is built into the actuator.
+
+⚠ **Edited in this session: this §7.4 only.** The spec and the rest of this plan are untouched, because PR #89
+is revising their top-of-file banners. Task 18a's spec §11 write-back is therefore recorded in §7.4.5, not in
+the spec.
+
+#### 7.4.1 Step 0: merge PR #90, and two fixes to the relogin track
+
+- Merged `origin/main` at `54d77ca`. The one conflict was side-by-side state fields in `gv-session-alarm.sh`,
+  and both sides were kept.
+- **(a) Stranded relogin thread key.** This is PR #90's defect 1 on the relogin track. It is fixed with PR #90's
+  rules:
+  - A re-arm with nothing provably delivered retires the key silently.
+  - Anything that may have been seen gets a RESOLVED in its own thread, with the root posted again first.
+  - A root that is still refused withholds the RESOLVED.
+  - A new state field, `RELOGIN_MAY_HAVE_DELIVERED`, supports this. The fix also closes §7.3's deferred LOW (b).
+- **(b) State file read as data.** The alarm reads the breaker state file as **data**: whitelisted `NAME=`
+  lines, and a pure-bash `printf %q` decoder that handles both the backslash form and the `$'…'` form,
+  including UTF-8 written under the C locale as octal escapes. It is never sourced. `AlarmCopyDriftTests` now
+  pins `relogin_field <KEY>`.
+- **Evidence:** `repro-gv-session-alarm.sh` passes 172/172. Before the fix, 9 of the 17 new cases failed. 7
+  mutants were each caught.
+
+#### 7.4.2 What was built, and where it supersedes the drafts above
+
+| Task | Built as | Supersedes the draft because |
+|---|---|---|
+| 11 (helper) | `deploy/gv-cdp.py`, **shipped**, with only `targets`/`url`/`navigate`; exit 4 on transport faults | The draft called `${HERE}/../tools/gv-cdp.py`, which never ships: the deploy glob was `deploy/*.sh` with no `-Recurse`. The deploy now ships `deploy/*.py` too. The spike-only `eval`/`shot`/`dump` were dropped. This file is the helper's one home, agreed with PR #89 |
+| 9 | Gate on **`Stale` or `SignedOut`** | `SignedOut` is PR #90's. Spike finding 3 showed that a Chrome on the sign-in page was never `Stale` |
+| 9 | `breaker_lock` is the only lock; `breaker_verdict` must return exactly `AUTHORISED` | Per §7.3 |
+| 9 | **No driver → nothing.** It exits 0 before the lock, the breaker, the poll and the credential file | The safe resting state until the owner's file exists. The alarm journals "not installed" |
+| 9 | Stands down unless the reauth assist's state file is absent or says exactly `STATE=IDLE`, read as data. `PREPARED`, `SIGNED_IN_UNCONFIRMED`, `CONFIRM_FAILED`, any unknown word, a stray CR, or no single `STATE` line all stand down. This is not a trip and nothing is spent | The ask in PR #89's spec §5.1, implemented as an allow-list after review |
+| 9 | `gv-account.conf` is **parsed as data**: mode 600, our uid, a regular file, LF only, exactly two keys, and the value is verbatim after the first `=` | The draft **sourced** it. A CR from a Windows editor would have become part of the password, meaning one rejection and a permanent stop. Refusals name line numbers, never keys found in the file |
+| 10b | stdin as five `key=value` lines. The verdict is **the last stdout line with exit 0**, one of `SIGNED_IN`/`CREDENTIAL_REJECTED`/`CHALLENGED`/`TRANSPORT`/`UNRECOGNISED` | The draft used JSON built by `jq --arg`, and `--arg` is **argv**. A non-zero exit, a timeout (120 s), silence or anything else is `UNRECOGNISED`, which trips |
+| 10b | `TRANSPORT` **hands back** the credential attempt, but still spends the hourly spacing and one transport count | The draft charged it, contrary to spec §9.4 |
+| 10b | The attempt is written to disk with `BREAKER_LAST_OUTCOME=in_flight` **before** the driver starts. The next run trips `interrupted` if it finds that marker | A run killed mid-driver was otherwise invisible |
+| 11 | The target is **chosen before the driver runs** from each page's live `window.location.href`, with the host parsed. First choice is `voice`/`accounts.google.com`; otherwise a lone `workspace.google.com/products/voice…` page; no candidate at all is treated as transport; two or more trip `target_unrecognised`. The driver and the verification use that same id | The draft's `TARGET_ID` was undefined |
+| 11 | Verification requires the landing host to be **exactly `voice.google.com`** (not merely "not workspace"), a POST that answered **200** (202 means unproven), `Succeeded`, and `validatedAt` moving across a **freshly read** pre-POST value | The draft accepted any landing except workspace and ignored the POST status |
+| 12 | `repro-gv-relogin.sh`: 115 cases and 26 mutants, **141/141** | Uses stubs for the service, the CDP helper and the driver. The driver stub records its argv and environ, and every ancestor's cmdline, **while it runs** — a deterministic reading, not §0.3's sampler |
+| 15 | `install-gv-auto-relogin.sh`: the timer is installed **disabled** and the breaker is never armed. `--enable` refuses on **four** counts; the fourth is "no driver installed" | The driver is the owner's; enabling without it would only log "not installed" every 5 minutes |
+| 15 | Drift group `relogin`: 5 required files plus the driver as an **optional** pair | The driver's absence everywhere is reported, not failed. Present anywhere, it is checked like the rest |
+
+**Harness results, all in the Debian container as non-root unless noted:**
+
+| Harness | Result |
+|---|---|
+| `repro-gv-relogin.sh` | 141/141 |
+| `repro-install-gv-auto-relogin.sh` | 27/27, including 5 mutants |
+| `repro-installed-drift.sh` | 38/38 |
+| `repro-gv-session-alarm.sh` | 172/172 |
+| `repro-gv-relogin-breaker.sh` | 83/83, unchanged |
+| `check-relogin-driver.sh --self-test` | 11/11 in WSL; 9/9 in the container, where the unshare isolation case cannot run |
+| `repro-gv-cdp.sh` | 19/19, on Windows with a throwaway headless Chrome |
+| `repro-tar-clobber.sh` | all cases, in WSL |
+| `dotnet test` | green |
+
+#### 7.4.3 Plan errors this session found
+
+1. **Task 9 gated on `Stale` alone.** Since PR #90 a signed-out Chrome reports `SignedOut`, so the draft would
+   never have acted on the most direct signed-out shape.
+2. **Task 9 sourced `gv-account.conf`.** Values were therefore shell-interpreted rather than verbatim, and a
+   CRLF file became a wrong password.
+3. **Task 10b's draft embeds a literal NUL byte** in this markdown file: `split("␀")` is written as a raw byte.
+   That makes `grep` and `git` treat the plan as **binary**, and a reader sees it as `split(" ")`. It was not
+   carried into code. The actuator uses no jq on the credential at all.
+4. **Task 10b charged the credential budget on transport**, contrary to spec §9.4.
+5. **Task 11 called a helper that never ships**, and navigated a `TARGET_ID` that nothing defined.
+6. **Task 11 accepted any landing except `workspace.google.com`.** An `accounts.google.com` landing went
+   on to POST cookies.
+7. **Task 13 read the breaker file with `grep|cut|sed`** (§7.3), and the replacement then sourced it in a
+   subshell, which still executes it (fixed in §7.4.1).
+8. **Task 15's `--enable` had three counts.** With the driver owner-written, a fourth is needed.
+
+Also found while building: a driver that leaves a helper process holding its stderr stalled the actuator for
+that helper's lifetime. The redactor's stdout was the command substitution's pipe. It is fixed, and a harness
+case and a mutant cover it.
+
+#### 7.4.3a Pre-merge review (session model): no HIGH, three MEDIUM, all fixed
+
+The reviewer ran every harness and fuzzed the alarm's `%q` decoder: 6,000 random strings round-tripped through
+real `printf %q`, in C and UTF-8 locales for both writer and reader, with 0 mismatches.
+
+1. **MEDIUM: the driver checker could send the fixture password to the real account.** This would happen with a
+   draft driver that hard-codes port 9224, if the checker were run on the box.
+   - **Fix:** driver runs are now network-isolated with `unshare -rn` and a private loopback. Where that is not
+     permitted, the checker refuses to run on anything that looks like the box.
+   - **Tests:** self-test cases for both paths, each with a precondition.
+2. **MEDIUM: the assist stand-down was a deny-list.**
+   - **Fix:** it is now an allow-list: proceed only on `IDLE` or an absent file.
+   - **Tests:** cases for `CONFIRM_FAILED`, `CONFIRM_REFUSED`, an unknown word and `IDLE`, plus a mutant.
+3. **MEDIUM: `verification_failed` always said "NOT overwritten".** That is false on a 202 (the cold path writes
+   the file).
+   - **Fix:** the reason text now states what happened to the cookie set according to the POST's code.
+   - **Tests:** per-code cases, plus a mutant.
+
+**LOW, fixed:**
+
+- `export -n` of the credential variables. A caller's export no longer carries the real value into a child
+  process. Covered by a case and a mutant.
+- Zero candidate pages is now handled as transport, not a permanent trip. Covered by a case and a mutant.
+- The mutant previously named `charge-after-driver` was renamed to `no-in-flight-marker`, which is what it
+  actually breaks.
+
+**LOW, deferred:**
+
+- `gv-cdp.py navigate` can accept a buffered load event from an earlier navigation, rather than matching the
+  navigation's `loaderId`.
+  - Stage 2 of the verification (a POST returning 200, a `Succeeded` outcome and a moved `validatedAt`) still
+    decides the outcome, so this is not a safety hole.
+  - Fix it when the assist adds its own subcommands.
+
+#### 7.4.4 What remains, in order, and who does it
+
+1. **The owner writes `deploy/gv-relogin-signin.py`** to [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md),
+   and runs `bash deploy/tests/check-relogin-driver.sh` (Linux/WSL) until it passes.
+2. **Task 16, deploy and prove it is installed**, not gated on G2. Run a normal deploy, then on the box:
+   `list-unit-files 'gv-auto-relogin.*'` should show both units **disabled**; `--print-config`; `--status`
+   should report **TRIPPED** (`state_missing`); `check-installed-drift.sh --group relogin` should report 6/6.
+   `gv-account.conf` has its sha256 and mode recorded before and after if it exists, together with **which
+   deploy branch ran**.
+3. **The owner creates `/opt/rotary-phone/gv-account.conf`** on the box, by hand, mode 600.
+4. **The owner arms the automation:** `install-gv-auto-relogin.sh --enable`, then `gv-auto-relogin.sh --reset`.
+5. **Task 17, the attended runs 17a–17g**, with at most four real credential attempts.
+
+#### 7.4.5 Task 18a's content, for the spec's §11 once PR #89's banner edits have landed
+
+Spec §8 said *"nothing here has been tested against Google's actual sign-in page."* The spike
+(`docs/spikes/2026-09-09-gv-signin-cdp-recording.md`, 2026-09-25) tested it once, attended, and found the
+following:
+
+- **No challenge** of any kind from this profile, on a correct sign-in, a wrong password, or the restore.
+- The profile remembers the account. The flow is an **account chooser → password page → Voice**, and there is
+  no email field on that path.
+- A rejection keeps the URL, marks `Passwd` as `aria-invalid`, and fills `#c0` with the wrong-password text.
+- ⛔ Google pre-renders a hidden "Too many failed attempts" region and dormant CAPTCHA elements. Any classifier
+  must decide on **visibility**.
+- A Chrome on the sign-in page used to report `Unreachable`. PR #90 made it `SignedOut`, and auto-relogin
+  triggers on it.
+
+**The design is not ruled out.** This is one observation, not evidence that Google will never challenge, which
+is why every unrecognised outcome still trips.

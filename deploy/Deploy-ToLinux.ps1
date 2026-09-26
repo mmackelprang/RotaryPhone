@@ -464,8 +464,39 @@ if ($rsyncAvailable) {
   # for the tar fallback below: a `throw` here would delete the fallback outright.
   # Its status is read by the `if ($LASTEXITCODE -eq 0)` just below -- that IS the
   # check, and it is deliberate rather than missing.
+  #
+  # ⛔ --exclude 'gv-account.conf' IS NOT THE SAME KIND OF EXCLUSION AS THE TAR ONE in
+  # the fallback below, and the difference is the point. The tar exclusion keeps a
+  # member OUT OF THE STREAM, so the box's file is never OVERWRITTEN. This one defends
+  # against --delete, which removes every destination file the source does not have --
+  # and the source is the publish output, which will never contain the box's Google
+  # account file. Without this line the first rsync deploy DELETES it, silently, and
+  # auto-relogin then trips its breaker with "credential file missing" on a box that is
+  # otherwise healthy. The file is populated by the owner, on the box, by hand
+  # (docs/SETUP-GVBridge.md); nothing in this repo creates it.
+  # See docs/plans/gv-auto-relogin.md §0.2, and deploy/tests/repro-tar-clobber.sh for
+  # the test that proves both exclusions, including the negative control.
+  #
+  # ⚠ The comment has to live up HERE: a comment line between backtick-continued
+  # arguments ENDS the command in PowerShell, so every exclusion after it would be
+  # silently dropped. (The plan's draft put it inline.)
+  #
+  # ⚠ EVERY FILE IN ${TargetPath} THAT THE PUBLISH OUTPUT DOES NOT CONTAIN IS DELETED
+  # BY --delete, and the exclusions below are the entire defence. Known unprotected,
+  # found 2026-09-09, re-listed against the box and the local publish tree 2026-09-25,
+  # and NOT fixed here because it is out of the auto-relogin arc's scope
+  # (docs/plans/gv-auto-relogin.md §0.2, Q7):
+  #   /opt/rotary-phone/refresh-gv-cookies.sh   <- the load-bearing */20 cookie cron
+  #   /opt/rotary-phone/mute-gv-browser.py
+  #   /opt/rotary-phone/scripts/
+  #   /opt/rotary-phone/ChromeExtension/
+  #   /opt/rotary-phone/*.bak*                  <- every hand-made config backup
+  # (/opt/rotary-phone/deploy/ is deleted too, then re-created by the scp step below.)
+  # The tar branch does not delete, which is why this has never been seen: rsync has
+  # never been on the deploying workstation's PATH. It is on the box.
   rsync -az --delete `
     --exclude 'appsettings.Production.json' `
+    --exclude 'gv-account.conf' `
     --exclude 'data/' `
     --exclude 'logs/' `
     -e ssh `
@@ -584,8 +615,15 @@ if (-not $synced) {
     #     tighten every FILE mode the extract writes, which is a permissions change on
     #     a production box and belongs to the owner, not to this PR. Tracked in the
     #     plan's follow-ups.
+    # --exclude=gv-account.conf defends the box's Google account file against an
+    # OVERWRITE (the rsync branch's --exclude defends it against a DELETION; see the
+    # comment there). The publish output never contains it, so today this is belt and
+    # braces -- it exists so that a stray copy in the publish tree can never be shipped
+    # over the owner's file, or off the workstation. docs/plans/gv-auto-relogin.md §0.2.
+    # UNANCHORED on purpose (no ./), matching the rsync exclusion, which also covers a
+    # copy at any depth; an anchored one would still ship a nested stray copy.
     "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
-      " tar --null --exclude=./appsettings.Production.json -czf - -T - |" +
+      " tar --null --exclude=./appsettings.Production.json --exclude=gv-account.conf -czf - -T - |" +
       # `set -e` in the REMOTE shell. Without it the compound's status is the LAST
       # command's -- chmod's -- so a failed tar reported 0. The remote shell does not
       # inherit the local `set -e -o pipefail` above: that one governs this script,
@@ -767,7 +805,14 @@ if (Test-Path $extensionDir) {
 # and it would land here as a stale or missing gv-bridge-ensure.sh on the box.
 $deployScripts = Join-Path $RepoRoot "deploy"
 $systemdDir = Join-Path $deployScripts "systemd"
-$shellScripts = @(Get-ChildItem -Path $deployScripts -Filter "*.sh" -File -ErrorAction SilentlyContinue)
+# ⚠ *.sh AND *.py, still with no -Recurse (deploy/tools/ and deploy/tests/ never ship).
+# The .py half exists for auto-relogin (docs/plans/gv-auto-relogin.md §7.4): the actuator
+# needs deploy/gv-cdp.py on the box, and the owner-written sign-in driver
+# deploy/gv-relogin-signin.py ships the same way once it exists. Before this, a .py
+# placed in deploy/ was silently NOT shipped -- the exact trap Task 11's draft fell into
+# by calling ${HERE}/../tools/gv-cdp.py, a file that never reaches the box.
+$shellScripts = @(Get-ChildItem -Path $deployScripts -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Extension -eq ".sh" -or $_.Extension -eq ".py" } | Sort-Object Name)
 $unitFiles = @(if (Test-Path $systemdDir) { Get-ChildItem -Path $systemdDir -File })
 
 if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
@@ -800,7 +845,8 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   # runs under `set -e`. It matters because setup-gvbridge.sh has to be executable for
   # the deploy to be able to run it.
   $chmodCmds = @()
-  if ($shellScripts.Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if (@($shellScripts | Where-Object { $_.Extension -eq ".sh" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
+  if (@($shellScripts | Where-Object { $_.Extension -eq ".py" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.py" }
   if ($unitFiles.Count -gt 0)    { $chmodCmds += "chmod 644 ${TargetPath}/deploy/systemd/*" }
   if ($chmodCmds.Count -gt 0) {
     ssh $SshTarget ("set -e; " + ($chmodCmds -join "; "))
@@ -932,6 +978,18 @@ $bridgeDriftExit = $LASTEXITCODE
 # blocked on a cross-repo exit-code decision (spec §8, §11 decision 4). Aborting here would
 # block every deploy on that decision. It must be LOUD and it must not be fatal.
 if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal; blocked on the gv-bridge-ensure.sh exit-code decision, spec §11 decision 4.)" -ForegroundColor Yellow }
+
+# --- GV auto-relogin: install (timer DISABLED, breaker never armed) and report ---
+# docs/plans/gv-auto-relogin.md Task 15. Safe on every deploy: the installer never enables
+# the timer and never arms the breaker, and without the owner's sign-in driver the actuator
+# does nothing at all. ⚠ NON-FATAL, like the bridge group: auto-relogin is an optional
+# layer, and a problem in it must be LOUD without aborting a deploy that is otherwise fine.
+ssh $SshTarget "bash ${TargetPath}/deploy/install-gv-auto-relogin.sh"
+$reloginInstallExit = $LASTEXITCODE
+ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group relogin --ship-dir '${TargetPath}/deploy'"
+$reloginDriftExit = $LASTEXITCODE
+if ($reloginInstallExit -ne 0) { Write-Host "  the GV auto-relogin installer FAILED (exit $reloginInstallExit) -- the drift report above states what is installed. Not fatal." -ForegroundColor Red }
+if ($reloginDriftExit -ne 0) { Write-Host "  (auto-relogin is not in sync -- see above. Not fatal.)" -ForegroundColor Yellow }
 
 Write-Host ""
 Write-Host "=== Deploy Complete ===" -ForegroundColor Green

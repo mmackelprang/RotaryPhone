@@ -4,6 +4,7 @@
 #
 #   check-installed-drift.sh --group alarm  [--manifest FILE] [--ship-dir DIR]
 #   check-installed-drift.sh --group bridge [--manifest FILE] [--ship-dir DIR]
+#   check-installed-drift.sh --group relogin [--manifest FILE] [--ship-dir DIR]
 #
 # Exit: 0 = every file in the group matches end to end
 #       1 = DRIFT — at least one link of the chain differs
@@ -53,7 +54,7 @@ while [ $# -gt 0 ]; do
         --group)    need_value "$@"; GROUP="$2";    shift 2 ;;
         --ship-dir) need_value "$@"; SHIP_DIR="$2"; shift 2 ;;
         --manifest) need_value "$@"; MANIFEST="$2"; shift 2 ;;
-        -h|--help)  sed -n '2,34p' "$0"; exit 0 ;;
+        -h|--help)  sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -61,6 +62,10 @@ done
 : "${MANIFEST:=${SHIP_DIR}/.shipped-manifest.sha256}"
 
 # group -> "shipped-relative-path|installed-absolute-path" pairs
+# OPTIONAL pairs are files the repo may legitimately not contain yet. Absent at ALL THREE
+# links, one is reported in a single line and does not count as drift; present at ANY
+# link, it is checked exactly like a required one.
+OPTIONAL=()
 case "$GROUP" in
   alarm)
     PAIRS=(
@@ -73,7 +78,20 @@ case "$GROUP" in
       "gv-bridge-ensure.sh|${HOME}/bin/gv-bridge-ensure.sh"
       "gv-bridge-restart.sh|${HOME}/bin/gv-bridge-restart.sh"
     ) ;;
-  *) echo "--group must be 'alarm' or 'bridge'" >&2; exit 2 ;;
+  relogin)
+    PAIRS=(
+      "gv-auto-relogin.sh|${HOME}/bin/gv-auto-relogin.sh"
+      "gv-auto-relogin-breaker.sh|${HOME}/bin/gv-auto-relogin-breaker.sh"
+      "gv-cdp.py|${HOME}/bin/gv-cdp.py"
+      "systemd/gv-auto-relogin.service|${HOME}/.config/systemd/user/gv-auto-relogin.service"
+      "systemd/gv-auto-relogin.timer|${HOME}/.config/systemd/user/gv-auto-relogin.timer"
+    )
+    # ⚠ The sign-in driver is OWNER-WRITTEN (docs/gv-relogin-driver-contract.md) and may
+    # not exist yet. Its absence everywhere is auto-relogin's safe resting state — the
+    # actuator does nothing without it — so it is reported, not failed. But a driver that
+    # is INSTALLED and not shipped, or shipped and not installed, is drift like any other.
+    OPTIONAL=( "gv-relogin-signin.py|${HOME}/bin/gv-relogin-signin.py" ) ;;
+  *) echo "--group must be 'alarm', 'bridge' or 'relogin'" >&2; exit 2 ;;
 esac
 
 if [ ! -r "$MANIFEST" ]; then
@@ -97,6 +115,15 @@ stamp_of()    { date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "unknown"; }
 
 matched=0
 total=${#PAIRS[@]}
+
+for pair in "${OPTIONAL[@]}"; do
+    rel="${pair%%|*}"; installed="${pair##*|}"
+    if [ -z "$(expected_of "$rel")" ] && [ ! -e "${SHIP_DIR}/${rel}" ] && [ ! -e "$installed" ]; then
+        echo "[drift-check] ${GROUP}: ${rel} is absent from the repo, the shipped tree and ${installed} — optional, and absent everywhere (auto-relogin stays inert without it)."
+    else
+        PAIRS+=("$pair"); total=$((total + 1))
+    fi
+done
 
 for pair in "${PAIRS[@]}"; do
     rel="${pair%%|*}"
@@ -131,6 +158,8 @@ for pair in "${PAIRS[@]}"; do
         if [ "$GROUP" = "bridge" ]; then
             echo "    setup-gvbridge.sh installs this and THE DEPLOY DOES NOT RUN IT."
             echo "    ACTION: bash ${SHIP_DIR}/setup-gvbridge.sh  (see plan §0.2 before you do)."
+        elif [ "$GROUP" = "relogin" ]; then
+            echo "    ACTION: bash ${SHIP_DIR}/install-gv-auto-relogin.sh"
         else
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-session-alarm.sh"
         fi
@@ -143,6 +172,8 @@ for pair in "${PAIRS[@]}"; do
         echo "    The box is executing an older file than the one this deploy shipped."
         if [ "$GROUP" = "bridge" ]; then
             echo "    ACTION: bash ${SHIP_DIR}/setup-gvbridge.sh  (see plan §0.2 before you do)."
+        elif [ "$GROUP" = "relogin" ]; then
+            echo "    ACTION: bash ${SHIP_DIR}/install-gv-auto-relogin.sh"
         else
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-session-alarm.sh"
         fi
