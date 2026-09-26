@@ -203,7 +203,7 @@ def wait_until(predicate, timeout, what):
 def open_entry(page):
     """Navigate the target page to the sign-in entry and identify where it landed.
     Page facts: contract §8 row 1 -- ServiceLogin redirects to /v3/signin/accountchooser
-    because the profile remembers the account[cite: 1].
+    because the profile remembers the account[cite: 2].
 
     Returns AT_CHOOSER (a rendered chooser item is on screen) or ALREADY_SIGNED_IN (the entry
     bounced straight to voice.google.com, i.e. the session is fine after all)."""
@@ -213,19 +213,35 @@ def open_entry(page):
         raise Unrecognised("entry navigation failed")  # after first send: not TRANSPORT
     page.wait_for("Page.loadEventFired", STEP_TIMEOUT_S)
 
+    last_debug = {}
+
     def landed():
+        nonlocal last_debug
         try:
             host, path = _host_and_path(page.live_href())
+            last_debug['host'] = host
+            last_debug['path'] = path
+            last_debug['visState'] = page.evaluate("document.visibilityState")
+
             if host == "voice.google.com":
                 return ALREADY_SIGNED_IN
+            
+            chooser_rendered = is_rendered(page, CHOOSER_ITEM)
+            last_debug['chooser_rendered'] = chooser_rendered
+
             if (host == "accounts.google.com" and path.startswith("/v3/signin/accountchooser")
-                    and is_rendered(page, CHOOSER_ITEM)):
+                    and chooser_rendered):
                 return AT_CHOOSER
         except Unrecognised:
             pass  # context swapped mid-redirect; poll again within budget
         return None
 
-    state = wait_until(landed, STEP_TIMEOUT_S, "a recognised landing page after the entry URL")
+    try:
+        state = wait_until(landed, STEP_TIMEOUT_S, "a recognised landing page after the entry URL")
+    except Unrecognised:
+        log(f"open_entry timeout debug: {last_debug}")
+        raise
+
     log(f"entry landed: {state}")
     return state
 
@@ -253,13 +269,40 @@ def choose_account(page, email):
     if not page.evaluate(click_expr):
         raise Unrecognised("target account missing from chooser or chooser not rendered")
 
+    last_debug = {}
+
     def at_pwd():
-        host, path = _host_and_path(page.live_href())
-        if host == "accounts.google.com" and path.startswith("/v3/signin/challenge/pwd"):
-            return is_rendered(page, 'input[type="password"][name="Passwd"]')
+        nonlocal last_debug
+        try:
+            host, path = _host_and_path(page.live_href())
+            last_debug['host'] = host
+            last_debug['path'] = path
+            last_debug['visState'] = page.evaluate("document.visibilityState")
+            
+            url_ok = (host == "accounts.google.com" and path.startswith("/v3/signin/challenge/pwd"))
+            last_debug['url_ok'] = url_ok
+
+            # Measure dimensions explicitly as requested
+            rect = page.evaluate(
+                "(() => { const e = document.querySelector('input[type=\"password\"][name=\"Passwd\"]');"
+                " return e ? {w: e.getBoundingClientRect().width, h: e.getBoundingClientRect().height} : null; })()"
+            )
+            last_debug['pwd_rect'] = rect
+
+            # Rely on the robust visibility check for logic
+            input_rendered = is_rendered(page, 'input[type="password"][name="Passwd"]')
+            last_debug['input_rendered'] = input_rendered
+
+            return url_ok and input_rendered
+        except Unrecognised:
+            pass  # context swapped mid-redirect; poll again within budget
         return False
 
-    wait_until(at_pwd, STEP_TIMEOUT_S, "password page to render")
+    try:
+        wait_until(at_pwd, STEP_TIMEOUT_S, "password page to render")
+    except Unrecognised:
+        log(f"choose_account timeout debug: {last_debug}")
+        raise
 
     hidden_email = page.evaluate("document.querySelector('input#hiddenEmail[name=\"identifier\"]').value")
     if not hidden_email or hidden_email.lower() != email.lower():
@@ -267,14 +310,14 @@ def choose_account(page, email):
 
 
 def submit_password_once(page, password):
-    """OWNER. Enter the password and submit -- EXACTLY ONCE (contract §7.2)[cite: 1].
+    """OWNER. Enter the password and submit -- EXACTLY ONCE (contract §7.2)[cite: 2].
     Page facts: contract §8 row 4[cite: 1]. Keep `password` out of logs, exceptions, and any
-    Runtime.evaluate expression string[cite: 1]."""
+    Runtime.evaluate expression string[cite: 2]."""
     pwd_input = 'input[type="password"][name="Passwd"]' #[cite: 1]
     if not is_rendered(page, pwd_input):
         raise Unrecognised("password input not rendered before submit")
 
-    # Safely focus using evaluate, but inject text using CDP to avoid leaking to eval string[cite: 1]
+    # Safely focus using evaluate, but inject text using CDP to avoid leaking to eval string
     page.evaluate(f"document.querySelector({json.dumps(pwd_input)}).focus()")
     page.send("Input.insertText", text=password)
 
@@ -289,43 +332,63 @@ def classify_after_submit(page):
     """OWNER. Wait up to SUBMIT_SETTLE_S for a state you can POSITIVELY identify, then return one
     of SIGNED_IN, CREDENTIAL_REJECTED, CHALLENGED. Anything else -> raise Unrecognised.
     Page facts: contract §8 rows 5 (success), 6 (rejection), 8 + §7.3 (hidden templates)[cite: 1].
-    Use live_href() and is_rendered()/rendered_text(); never test presence alone[cite: 1]."""
+    Use live_href() and is_rendered()/rendered_text(); never test presence alone[cite: 2]."""
+
+    last_debug = {}
 
     def state_settled():
-        host, path = _host_and_path(page.live_href())
+        nonlocal last_debug
+        try:
+            host, path = _host_and_path(page.live_href())
+            last_debug['host'] = host
+            last_debug['path'] = path
+            last_debug['visState'] = page.evaluate("document.visibilityState")
 
-        # 1. Success - Settled domain (Spike row 5)[cite: 1]
-        if host == "voice.google.com":
-            return SIGNED_IN
+            # 1. Success - Settled domain (Spike row 5)[cite: 1]
+            if host == "voice.google.com":
+                return SIGNED_IN
 
-        if host == "accounts.google.com" and path.startswith("/v3/signin/challenge/pwd"):
-            
-            # 2. Challenged - Must check FIRST before password rejection.
-            # Invisible captchas becoming visible (Spike §7.3 & row 8)[cite: 1]
-            if is_rendered(page, '#ca') or is_rendered(page, 'img#captchaimg'): #[cite: 1]
-                return CHALLENGED
+            if host == "accounts.google.com" and path.startswith("/v3/signin/challenge/pwd"):
+                
+                # 2. Challenged - Must check FIRST before password rejection.
+                # Invisible captchas becoming visible (Spike §7.3 & row 8)[cite: 1]
+                ca_rendered = is_rendered(page, '#ca')
+                img_rendered = is_rendered(page, 'img#captchaimg')
+                last_debug['ca_rendered'] = ca_rendered
+                last_debug['img_rendered'] = img_rendered
+                if ca_rendered or img_rendered: #[cite: 1]
+                    return CHALLENGED
 
-            # Check explicit "Too many failed attempts" lockout in aria-live="assertive"[cite: 1]
-            lockout_text = rendered_text(page, '[aria-live="assertive"]')
-            if lockout_text and "Too many failed attempts" in lockout_text:
-                return CHALLENGED
+                # Check explicit "Too many failed attempts" lockout in aria-live="assertive"
+                lockout_text = rendered_text(page, '[aria-live="assertive"]')
+                last_debug['lockout_match'] = bool(lockout_text and "Too many failed attempts" in lockout_text)
+                if lockout_text and "Too many failed attempts" in lockout_text:
+                    return CHALLENGED
 
-            # 3. Rejection - Wrong password state (Spike row 6)[cite: 1]
-            # Stricter evaluation checking BOTH aria-invalid and rendered #c0 text[cite: 1]
-            if is_rendered(page, 'input[name="Passwd"][aria-invalid="true"]'): #[cite: 1]
-                c0_text = rendered_text(page, '#c0')
-                if c0_text and "Wrong password" in c0_text:
-                    return CREDENTIAL_REJECTED
-
+                # 3. Rejection - Wrong password state (Spike row 6)[cite: 1]
+                # Stricter evaluation checking BOTH aria-invalid and rendered #c0 text
+                invalid_rendered = is_rendered(page, 'input[name="Passwd"][aria-invalid="true"]') #[cite: 1]
+                last_debug['invalid_rendered'] = invalid_rendered
+                if invalid_rendered:
+                    c0_text = rendered_text(page, '#c0')
+                    last_debug['c0_match'] = bool(c0_text and "Wrong password" in c0_text)
+                    if c0_text and "Wrong password" in c0_text:
+                        return CREDENTIAL_REJECTED
+        except Unrecognised:
+            pass  # context swapped mid-redirect; poll again within budget
         return None
 
-    return wait_until(state_settled, SUBMIT_SETTLE_S, "a recognised settled state after submit")
+    try:
+        return wait_until(state_settled, SUBMIT_SETTLE_S, "a recognised settled state after submit")
+    except Unrecognised:
+        log(f"classify_after_submit timeout debug: {last_debug}")
+        raise
 
 
 # --- main: contract plumbing ---------------------------------------------------------------
 def run(fields):
-    ws_url = find_target_ws_url(fields["cdp_port"], fields["target_id"])  # TRANSPORT-legal[cite: 1]
-    page = Page(ws_url)                                                     # TRANSPORT-legal[cite: 1]
+    ws_url = find_target_ws_url(fields["cdp_port"], fields["target_id"])  # TRANSPORT-legal[cite: 2]
+    page = Page(ws_url)                                                     # TRANSPORT-legal[cite: 2]
     try:
         try:
             state = open_entry(page)
@@ -337,7 +400,7 @@ def run(fields):
             submit_password_once(page, fields["password"])
             return classify_after_submit(page)
         except Transport:
-            # A Transport raised after the first send is not legal as TRANSPORT (§5.1)[cite: 1].
+            # A Transport raised after the first send is not legal as TRANSPORT (§5.1)[cite: 2].
             if page.touched:
                 raise Unrecognised("transport fault after first page interaction") from None
             raise
