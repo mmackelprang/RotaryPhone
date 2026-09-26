@@ -61,6 +61,16 @@ CHROME_ARGS+=(
   --disable-default-apps
   --disable-background-timer-throttling
   --disable-renderer-backgrounding
+  # The bridge window lives BEHIND Radio Console's fullscreen kiosk. Without this,
+  # Chrome may treat a fully covered window as hidden and throttle its rendering --
+  # the leading suspect for the 2026-09-25 auto-relogin failure, where the password
+  # field on accounts.google.com/v3/signin/challenge/pwd never became visible to
+  # the driver while covered but measured 348x52 when the window was in front.
+  # A HYPOTHESIS, not a measured cause; what the flag can and cannot do under
+  # Ozone/Wayland is recorded in docs/SETUP-GVBridge.md. The kiosk's own launcher
+  # already passes it. It changes nothing about stacking or focus -- the window
+  # stays behind the kiosk. Pinned by deploy/tests/check-bridge-chrome-flags.sh.
+  --disable-backgrounding-occluded-windows
   "--window-size=800,600"
   # A no-op under Wayland (the compositor places the window); retained because
   # the running process carries it. Off-screen placement is not what keeps this
