@@ -295,12 +295,13 @@ troubleshooting that actually applies.
 ### The bridge window is covered by the kiosk (`--disable-backgrounding-occluded-windows`)
 
 The bridge window sits **behind** Radio Console's fullscreen kiosk. That is how stacking works here;
-it is not placed off-screen. Since 2026-09-25, `gv-bridge-ensure.sh` launches Chrome with
-`--disable-backgrounding-occluded-windows`, the same flag the kiosk's own launcher passes. The aim is to
+it is not placed off-screen. Since 2026-09-25, the **repo** copy of `gv-bridge-ensure.sh` passes
+`--disable-backgrounding-occluded-windows`. It is not installed on the box, and the running bridge
+does not carry it until the runbook below is run. It is the same flag the kiosk's own launcher passes. The aim is to
 keep a covered window rendering. **On this Wayland box it probably does not achieve that on its own**
 (see below). The flag does not change stacking or focus, and the window is never raised.
 
-**Why:** the first unattended auto-relogin (2026-09-25 22:54 EDT, kiosk up) reached
+**Why:** the first unattended auto-relogin (2026-09-26 02:54Z, kiosk up) reached
 `accounts.google.com/v3/signin/challenge/pwd`. The driver's "password input is rendered" check
 (offsetParent, non-zero box, computed display and visibility) then stayed false for 15 s. In the
 attended spike, with the window in front of the owner, the same input measured 348×52.
@@ -375,7 +376,7 @@ Measured on the box 2026-09-25, read-only:
 
 | | Installed `~/bin` copy | Repo copy |
 |---|---|---|
-| `gv-bridge-ensure.sh` | sha256 `fd04f1ff…`, 1044 B, Aug 18, hardcoded paths | Same Chrome argv **plus the flag** (the shipped copy's `--print-config` matches the running process argv exactly). Adds a `flock` on `~/.config/gv-bridge-chrome.lock`, so a second launcher now exits 0 **without launching** (see below). Adds `--print-config`. Adds env overrides, whose defaults equal the box values. The exit code is still 0 on every path, and the log line is unchanged. |
+| `gv-bridge-ensure.sh` | sha256 `fd04f1ff…`, 1044 B, Aug 18, hardcoded paths | Same Chrome argv **plus the flag**. Measured: the pre-PR copy currently shipped to `/opt`, run with `--print-config`, reports exactly the running process's argv. Adds a `flock` on `~/.config/gv-bridge-chrome.lock`, so a second launcher now exits 0 **without launching** (see below). Adds `--print-config`. Adds env overrides, whose defaults equal the box values. The exit code is still 0 on every path, and the log line is unchanged. |
 | `gv-bridge-restart.sh` | sha256 `9221e814…`, Jul 16, **its own launch line, which LACKS `--remote-debugging-port`/`--remote-allow-origins`** | Kills, then **delegates to ensure**, so a relaunch gets the CDP flags. Waits up to 60 s for the lock and exits 1 if it cannot get it. Only the nightly timer runs it, and that timer is **disabled**. |
 
 The four `gv-bridge-{watchdog,restart}.{service,timer}` units are **byte-identical** to the repo copies.
@@ -444,8 +445,10 @@ nothing else. The watchdog does not need to be stopped. A rename is atomic, so a
 either the old file or the new one, never a partial one.
 
 ```bash
-cp -p ~/bin/gv-bridge-ensure.sh  ~/bin/gv-bridge-ensure.sh.bak
-cp -p ~/bin/gv-bridge-restart.sh ~/bin/gv-bridge-restart.sh.bak
+# Guarded: a re-run must never overwrite the backup with the NEW script.
+[ -e ~/bin/gv-bridge-ensure.sh.bak ]  || cp -p ~/bin/gv-bridge-ensure.sh  ~/bin/gv-bridge-ensure.sh.bak
+[ -e ~/bin/gv-bridge-restart.sh.bak ] || cp -p ~/bin/gv-bridge-restart.sh ~/bin/gv-bridge-restart.sh.bak
+sha256sum ~/bin/gv-bridge-*.sh.bak    # must be the step-1 hashes; if not, stop
 install -m 755 /opt/rotary-phone/deploy/gv-bridge-ensure.sh  ~/bin/gv-bridge-ensure.sh.new  && mv -f ~/bin/gv-bridge-ensure.sh.new  ~/bin/gv-bridge-ensure.sh
 install -m 755 /opt/rotary-phone/deploy/gv-bridge-restart.sh ~/bin/gv-bridge-restart.sh.new && mv -f ~/bin/gv-bridge-restart.sh.new ~/bin/gv-bridge-restart.sh
 bash /opt/rotary-phone/deploy/check-installed-drift.sh --group bridge   # "[drift-check] bridge: 2/2 installed files match", exit 0
@@ -495,9 +498,10 @@ pattern described above. Retry after one cron cycle (20 min) before concluding a
 `document.visibilityState` over CDP on port 9224, with the owner's driver or DevTools
 `Runtime.evaluate`. Source reading predicts `"visible"` **with or without the flag**, so this step alone
 cannot tell you whether the flag helped. Also evaluate
-`new Promise(r => { let n = 0; const t0 = performance.now(); (function f(){ n++; performance.now() - t0 < 2000 ? requestAnimationFrame(f) : r(n); })(); })`
-with `awaitPromise: true`. About 120 means frames are flowing. A single-digit count, or a call that
-times out, means the frame-callback limit applies and the flag cannot fix it. Then reset the auto-relogin
+`new Promise(r => { let n = 0; const t0 = performance.now(); setTimeout(() => r(n), 5000); (function f(){ n++; performance.now() - t0 < 2000 ? requestAnimationFrame(f) : r(n); })(); })`
+with `awaitPromise: true`. The `setTimeout` guard is required, because CDP's own `timeout` does not bound
+a promise wait, so without it a frame-starved page would never answer. About 120 means frames are
+flowing. A single-digit count (the guard fired at 5 s) means the frame-callback limit applies and the flag cannot fix it. Then reset the auto-relogin
 breaker (`gv-auto-relogin.sh --reset`) and re-run the attended sign-in with the kiosk in front. Pass
 criterion: the password input measures a non-zero box. If it fails, see the options listed above.
 

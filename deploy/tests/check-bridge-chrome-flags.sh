@@ -45,17 +45,28 @@ COMPANIONS=(
   "--disable-renderer-backgrounding"
   "--disable-background-timer-throttling"
   "--ozone-platform=wayland"
+  # The DEFAULT port: the test deliberately does not set GV_BRIDGE_CDP_PORT, so a
+  # drifted default in ensure.sh goes red here.
   "--remote-debugging-port=9224"
+  "--remote-allow-origins=*"
 )
 
 # --- stubs --------------------------------------------------------------------
 STUBS="${WORK}/stubs"
 mkdir -p "$STUBS"
-# systemd-run records the argv it was handed, one per line, and "succeeds".
+# systemd-run APPENDS the argv it was handed, one per line, then an end marker,
+# and "succeeds". Appending (not overwriting) is what lets a check see a SECOND
+# launch -- an extra flagless launch before the real one would otherwise vanish.
+# The browser binaries are stubbed the same way, so a launch that bypasses
+# systemd-run is recorded too (and can never start a real Chrome on a dev box).
+# Not coverable: a launch by absolute path (/opt/google/chrome/chrome).
 cat > "${STUBS}/systemd-run" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "${RECORD:?RECORD unset}"
+{ printf '%s\n' "$@"; echo '@@END-OF-CALL@@'; } >> "${RECORD:?RECORD unset}"
 EOF
+for b in google-chrome google-chrome-stable chrome chromium chromium-browser; do
+    cp "${STUBS}/systemd-run" "${STUBS}/${b}"
+done
 # pgrep: the bridge is never already running, so every run reaches the launch.
 # pkill: never reached (pgrep says nothing matches), stubbed so a mistake cannot
 # kill a real browser on the machine running this test.
@@ -72,8 +83,12 @@ say() { if [ "$1" = ok ]; then [ "$QUIET" = 1 ] || printf '  PASS %s\n' "$2"
 count_line() { grep -cxF -- "$1" "$2" 2>/dev/null || true; }
 
 assert_argv() {  # <label> <recorded-argv-file>
-    local label="$1" rec="$2"
-    if [ ! -s "$rec" ]; then say fail "${label}: systemd-run was never called"; return; fi
+    local label="$1" raw="$2" rec="${2}.argv"
+    if [ ! -s "$raw" ]; then say fail "${label}: systemd-run was never called"; return; fi
+    local calls; calls="$(count_line '@@END-OF-CALL@@' "$raw")"
+    [ "$calls" = 1 ] && say ok   "${label}: exactly one launch" \
+                     || say fail "${label}: ${calls} launches recorded (want 1)"
+    grep -vxF '@@END-OF-CALL@@' "$raw" > "$rec"
     local n; n="$(count_line "$FLAG" "$rec")"
     [ "$n" = 1 ] && say ok "${label}: ${FLAG} passed exactly once" \
                  || say fail "${label}: ${FLAG} passed ${n} times (want 1)"
@@ -95,8 +110,9 @@ check_all() {  # <ensure> <restart> <setup>
     install -m 755 "$restart" "${bin}/gv-bridge-restart.sh"
 
     local -a env_=( PATH="${STUBS}:${PATH}" GV_BRIDGE_PROFILE="$prof"
-                    GV_BRIDGE_LOG="${WORK}/bridge.log" GV_BRIDGE_LOCK="${WORK}/bridge.lock"
-                    GV_BRIDGE_CDP_PORT=9224 )
+                    GV_BRIDGE_LOG="${WORK}/bridge.log" GV_BRIDGE_LOCK="${WORK}/bridge.lock" )
+    # GV_BRIDGE_CDP_PORT is deliberately NOT set: the default is what the box runs.
+    unset GV_BRIDGE_CDP_PORT
 
     # Path 1, both branches of the --load-extension conditional: the array is built
     # in two appends around it, so a flag in the wrong half would vanish in one.
@@ -114,7 +130,7 @@ check_all() {  # <ensure> <restart> <setup>
     env "${env_[@]}" GV_BRIDGE_EXTENSION_DIR="$ext" bash "${bin}/gv-bridge-ensure.sh" --print-config \
         2>/dev/null | sed -n 's/^chrome_arg=//p' > "${WORK}/printed"
     # ensure's recorded argv is: --user --collect google-chrome <CHROME_ARGS...>
-    tail -n +4 "${WORK}/rec" > "${WORK}/launched"
+    tail -n +4 "${WORK}/rec.argv" > "${WORK}/launched"
     cmp -s "${WORK}/printed" "${WORK}/launched" \
         && say ok   "ensure: --print-config reports exactly the launched argv" \
         || say fail "ensure: --print-config and the launched argv differ"
@@ -189,12 +205,30 @@ systemd-run --user --collect google-chrome --user-data-dir="${GV_BRIDGE_PROFILE}
 EOF
 mutant "restart.sh launching Chrome itself without the flag (the box's installed shape)" "$E" "${M}/restart-own-launch" "$S"
 
+# The three below escaped the first version of this test (pre-merge review 2026-09-25).
+# An extra flagless launch BEFORE the handoff, spelled so the grep cannot see it.
+cat > "${M}/restart-extra-launch" <<'EOF'
+#!/usr/bin/env bash
+set -u
+sd=systemd
+"${sd}-run" --user --collect "google""-chrome" --user-data-dir="${GV_BRIDGE_PROFILE}" https://voice.google.com
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gv-bridge-ensure.sh"
+EOF
+mutant "restart.sh with an obfuscated extra launch before delegating" "$E" "${M}/restart-extra-launch" "$S"
+
+sed 's|^systemd-run --user --collect google-chrome "\${CHROME_ARGS\[@\]}"|systemd-run --user --collect google-chrome --mute-audio; &|' "$E" > "${M}/ensure-twice"
+mutant "ensure.sh launching twice, the first time without the flag" "${M}/ensure-twice" "$R" "$S"
+
+sed 's|GV_BRIDGE_CDP_PORT:-9224|GV_BRIDGE_CDP_PORT:-9225|' "$E" > "${M}/ensure-port"
+mutant "ensure.sh with its default CDP port drifted to 9225" "${M}/ensure-port" "$R" "$S"
+
 grep -vF -- "    ${FLAG} \\\\" "$S" > "${M}/setup-deleted"
 mutant "setup-gvbridge.sh legacy unit without the flag" "$E" "$R" "${M}/setup-deleted"
 
 # Sanity for the mutation harness itself: each mutant must actually differ from its source,
 # or a "caught" above could be a broken harness rather than a working check.
-for pair in "ensure-deleted:$E" "ensure-commented:$E" "ensure-printonly:$E" "setup-deleted:$S"; do
+for pair in "ensure-deleted:$E" "ensure-commented:$E" "ensure-printonly:$E" "ensure-twice:$E" \
+            "ensure-port:$E" "setup-deleted:$S"; do
     total=$((total + 1))
     if cmp -s "${M}/${pair%%:*}" "${pair#*:}"; then
         printf '  FAIL mutant %s is identical to its source -- the mutation did not apply\n' "${pair%%:*}"

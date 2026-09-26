@@ -32,7 +32,8 @@ gained since then, and one of those changes touches the contract you consume.
 | Path | `~/bin/gv-bridge-ensure.sh` | unchanged |
 
 The lock is held by the 2-minute watchdog while it launches, and by `gv-bridge-restart.sh` across its kill,
-which takes about 4 s plus one launch. The nightly restart timer is installed but **disabled**.
+which takes about 4 s. It releases the lock before handing off to ensure, and ensure then takes the lock
+itself for the launch. The nightly restart timer is installed but **disabled**.
 
 ## What we read on your side (installed launcher, measured 2026-09-25, read-only)
 
