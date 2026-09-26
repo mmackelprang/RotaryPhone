@@ -61,6 +61,27 @@ CHROME_ARGS+=(
   --disable-default-apps
   --disable-background-timer-throttling
   --disable-renderer-backgrounding
+  # The bridge window lives BEHIND Radio Console's fullscreen kiosk. This stops
+  # Chrome demoting a covered window's pages from VISIBLE to OCCLUDED. It was
+  # added for the 2026-09-25 auto-relogin failure, where the password field on
+  # accounts.google.com/v3/signin/challenge/pwd never rendered while the window
+  # was covered.
+  #
+  # ⛔ HARDENING, NOT THE FIX. A run on 2026-09-26 with the kiosk in front
+  # logged document.visibilityState = 'visible' throughout, so the page was not
+  # demoted, and the input was still 0x0. That failure is undiagnosed.
+  #
+  # ⚠ Probably NOT sufficient under --ozone-platform=wayland, and possibly a
+  # no-op there. Chromium's Wayland backend never reports OCCLUDED, which is the
+  # only state this flag rewrites. Separately, mutter stops sending frame
+  # callbacks to a fully covered surface, and no Chrome flag changes that.
+  # Sources and the check that settles it: docs/SETUP-GVBridge.md, "The bridge
+  # window is covered by the kiosk".
+  #
+  # Kept because it is harmless, the kiosk's own launcher passes it, and it does
+  # take effect under X11. It changes nothing about stacking or focus: the window
+  # stays behind the kiosk. Pinned by deploy/tests/check-bridge-chrome-flags.sh.
+  --disable-backgrounding-occluded-windows
   "--window-size=800,600"
   # A no-op under Wayland (the compositor places the window); retained because
   # the running process carries it. Off-screen placement is not what keeps this

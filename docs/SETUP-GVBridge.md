@@ -1,6 +1,6 @@
 # GV Bridge — Setup Guide
 
-**Last updated:** August 18, 2026
+**Last updated:** September 25, 2026
 
 This guide covers setting up the GV Bridge system on a fresh Ubuntu box. The GV Bridge enables incoming Google Voice calls to ring a physical rotary phone connected via a Grandstream HT801 ATA.
 
@@ -291,6 +291,241 @@ Incoming calls are signalled over SIP; the browser is not in the ring path at al
 so whether Google Voice rings *in the browser* has no bearing on whether the
 rotary phone rings. See [Phone doesn't ring](#phone-doesnt-ring) for the
 troubleshooting that actually applies.
+
+### The bridge window is covered by the kiosk (`--disable-backgrounding-occluded-windows`)
+
+The bridge window sits **behind** Radio Console's fullscreen kiosk. That is how stacking works here;
+it is not placed off-screen. Since 2026-09-25, the **repo** copy of `gv-bridge-ensure.sh` passes
+`--disable-backgrounding-occluded-windows`. It is not installed on the box, and the running bridge
+does not carry it until the runbook below is run. It is the same flag the kiosk's own launcher passes. The aim is to
+keep a covered window rendering. **On this Wayland box it probably does not achieve that on its own**
+(see below). The flag does not change stacking or focus, and the window is never raised.
+
+**Why:** the first unattended auto-relogin (2026-09-26 02:54Z, kiosk up) reached
+`accounts.google.com/v3/signin/challenge/pwd`. The driver's "password input is rendered" check
+(offsetParent, non-zero box, computed display and visibility) then stayed false for 15 s. In the
+attended spike, with the window in front of the owner, the same input measured 348×52.
+
+⛔ **The occlusion/backgrounding hypothesis is NOT supported. This flag is hardening, not the fix.** A
+second real run (2026-09-26 03:23Z) put the kiosk deliberately in front of the bridge. The driver's
+timeout log recorded `document.visibilityState = 'visible'` for the whole 16 s, with the URL on
+`/v3/signin/challenge/pwd` and the `Passwd` input present but **0×0**. The page was not hidden. This
+flag does only one thing, keep a page from being demoted out of `VISIBLE`, so it cannot address that
+failure. The research below predicted exactly this reading. One thing is still untested: whether a
+covered page that is *visible* is also *frame-starved* (the frame-callback limit below). The
+`requestAnimationFrame` count in runbook step 6 would test it. The auto-relogin failure itself remains
+**undiagnosed**.
+
+**⚠ What research says the flag can do under Ozone/Wayland: probably nothing here.** Chromium source
+was read at `main` in September 2026, not at the box's 153.0.8010.52 tag:
+
+- The switch is `kDisableBackgroundingOccludedWindowsForTesting` in
+  [`content_switches.cc`](https://github.com/chromium/chromium/blob/main/content/public/common/content_switches.cc).
+  Its only production reader is `WebContentsImpl::UpdateWebContentsVisibility`
+  ([`web_contents_impl.cc`](https://github.com/chromium/chromium/blob/main/content/browser/web_contents/web_contents_impl.cc),
+  about line 12718). It rewrites `OCCLUDED` to `VISIBLE` and never touches `HIDDEN`. *Spot-checked
+  directly.*
+- `OCCLUDED` comes from a native occlusion tracker. That is `NativeWindowOcclusionTrackerWin` on Windows,
+  and X11 `VisibilityNotify` on X11
+  ([`x11_window.cc`](https://github.com/chromium/chromium/blob/main/ui/ozone/platform/x11/x11_window.cc)).
+  **Nothing under `ui/ozone/platform/wayland` reports occlusion.** Wayland's `xdg_toplevel`
+  *suspended* state is parsed, but it is passed only to the frame manager
+  ([`wayland_toplevel_window.cc`](https://github.com/chromium/chromium/blob/main/ui/ozone/platform/wayland/host/wayland_toplevel_window.cc)
+  `OnWindowSuspensionChanged`, *spot-checked*), never to page visibility. So on this box a covered bridge
+  page is probably still `visibilityState === "visible"` **with or without the flag**. That is an
+  inference, and runbook step 6 checks it.
+- **The more likely limit is the compositor.** mutter (GNOME 46 on the box) does not send `wl_surface.frame`
+  callbacks to a surface that is fully obscured
+  ([mutter MR 918](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/918)). It also marks a window
+  covered for 3 s as *suspended* ([MR 3019](https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/3019)).
+  Chrome's Wayland frame manager waits for a callback before it commits the next frame
+  ([`wayland_frame_manager.cc`](https://github.com/chromium/chromium/blob/main/ui/ozone/platform/wayland/host/wayland_frame_manager.cc):
+  *"Frame callback hasn't been acked, need to wait"*). Its two bypasses are gated on
+  `video_capture_count_ > 0`, that is, on active tab or video capture (*spot-checked*). **No switch or
+  feature enables them.** The same interaction is recorded in
+  [mutter#3663](https://gitlab.gnome.org/GNOME/mutter/-/issues/3663).
+- `--disable-features=CalculateNativeWinOcclusion` is **Windows-only**, as the source comment says.
+  **There is no Linux/Wayland equivalent feature.** `--disable-renderer-backgrounding` (process priority)
+  and `--disable-background-timer-throttling` (timer throttling) do not touch frame callbacks either.
+- `offsetParent` and `getBoundingClientRect()` force a synchronous style and layout pass
+  ([CSSOM View](https://drafts.csswg.org/cssom-view/)). So a null or zero result means the element really
+  was `display:none` or detached. It was not stale layout. That fits the page's own transition never
+  advancing because frames stalled, but **it has not been shown that Google's sign-in page is
+  frame-driven.**
+
+**Not established:** behaviour at the exact 153 tag; whether a covered page's frames slow to about 1/s
+or stop entirely; whether CDP `Page.startScreencast` counts as capture and so turns on the bypass; how
+mutter paces an obscured **Xwayland** window; and any mechanism linking any of this to the post-reboot
+`Network.getCookies` timeouts described below. Cookie reads do not go through rendering.
+
+**If step 6 shows the flag did not help, these are the options, all untested and all the owner's call:**
+
+- Run the bridge under `--ozone-platform=x11` (Xwayland). There the flag *does* apply, but it is a
+  bigger change to a working browser.
+- Have the relogin driver hold a CDP screencast open during sign-in, if that counts as capture. Unknown.
+- Uncover the window briefly during an attended relogin. That changes the stacking the design deliberately
+  avoids.
+
+**Installing the flag needs an attended session.** The deploy ships `gv-bridge-ensure.sh` to
+`/opt/rotary-phone/deploy/`, but it never installs it into `~/bin`. The running Chrome also keeps its
+old command line until it is restarted.
+
+#### What installing the two scripts changes besides the flag
+
+Measured on the box 2026-09-25, read-only:
+
+| | Installed `~/bin` copy | Repo copy |
+|---|---|---|
+| `gv-bridge-ensure.sh` | sha256 `fd04f1ff…`, 1044 B, Aug 18, hardcoded paths | Same Chrome argv **plus the flag**. Measured: the pre-PR copy currently shipped to `/opt`, run with `--print-config`, reports exactly the running process's argv. Adds a `flock` on `~/.config/gv-bridge-chrome.lock`, so a second launcher now exits 0 **without launching** (see below). Adds `--print-config`. Adds env overrides, whose defaults equal the box values. The exit code is still 0 on every path, and the log line is unchanged. |
+| `gv-bridge-restart.sh` | sha256 `9221e814…`, Jul 16, **its own launch line, which LACKS `--remote-debugging-port`/`--remote-allow-origins`** | Kills, then **delegates to ensure**, so a relaunch gets the CDP flags. Waits up to 60 s for the lock and exits 1 if it cannot get it. Only the nightly timer runs it, and that timer is **disabled**. |
+
+The four `gv-bridge-{watchdog,restart}.{service,timer}` units are **byte-identical** to the repo copies.
+
+**Radio Console's exit-code dependency.** Their `KIOSK-2` launcher runs `~/bin/gv-bridge-ensure.sh` and
+reads its exit code. The new lock adds a third exit-0 outcome, "another launcher holds the lock". The
+cross-repo decision ADR `docs/architecture/decisions/2026-09-08-gv-bridge-ensure-exit-code.md` keeps
+the exit code at 0 permanently. Their installed launcher re-probes with `pgrep` after exit 0
+(`radio-console-open:414`, `:473`), which should make the new outcome harmless to them. **They have not
+confirmed that.** The question is drafted at
+`docs/handoffs/2026-09-25-radioconsole-ensure-install-exit-code-question-DRAFT.md`. **Do not run this
+runbook until Radio Console answers it.**
+
+**`--password-store` is not involved.** Neither the flag nor the scripts pass it. The deploy's hard gate
+and `deploy/tests/check-bridge-chrome-flags.sh` both assert that.
+
+#### Does the Google session survive a Chrome restart on this profile?
+
+The evidence says yes, but it is not conclusive:
+
+- Chrome has been relaunched on `~/.config/gv-bridge-chrome` at least 20 times since 2026-08-23
+  (`~/.local/state/gv-bridge-restart.log`), including after the weekly reboots of 2026-09-13 and
+  2026-09-20. After each of those two relaunches, cookie refresh later reported `validated against Google
+  and persisted`. The logs show no sign-in in between.
+- ⚠ Each relaunch was also followed by **5–6 hours** of `CDP: WebSocket cookie extraction failed` (a
+  10 s `Network.getCookies` timeout every 20 min). The bridge was behind the kiosk throughout. Recovery
+  came at 09:13 on 2026-09-13 and 08:14 on 2026-09-20, and **what triggered it is not known**. The user
+  journal for those mornings has been rotated away. A human sign-in at that moment cannot be ruled out.
+  An uncovered window is also possible, and would fit the occlusion hypothesis. **Expect the first
+  refresh after the restart to fail for the same reason, and do not read that failure as a lost session.**
+- `gv-bridge-restart.sh` sends SIGTERM and waits 3 s before SIGKILL, so Chrome gets a chance to flush
+  its cookie store.
+
+#### Attended runbook
+
+Run it on the box as `mmack`, with no call in progress. Each step lists what you should see; if you see
+something else, stop.
+
+**0. Preconditions.** Merge this change and deploy it with `Deploy-ToLinux.ps1`, then confirm the
+deploy shipped it. Check for the thing the fix *adds*:
+
+```bash
+bash /opt/rotary-phone/deploy/gv-bridge-ensure.sh --print-config | grep -cx -- 'chrome_arg=--disable-backgrounding-occluded-windows'   # 1
+bash /opt/rotary-phone/deploy/gv-bridge-ensure.sh --print-config | grep -c password-store                                          # 0
+```
+
+`--print-config` has no side effects: it starts nothing, takes no lock and writes no log.
+
+**1. Record the "before" state.**
+
+```bash
+sha256sum ~/bin/gv-bridge-ensure.sh ~/bin/gv-bridge-restart.sh      # fd04f1ff…, 9221e814… (or note what it is now)
+pgrep -af 'user-data-dir=/home/mmack/.config/gv-bridge-chrome' | grep -v -- --type= | grep -c -- --disable-backgrounding-occluded-windows   # 0
+curl -s http://localhost:9224/json/version | head -3                 # CDP answers
+curl -s http://localhost:5004/api/gvbridge/status                    # note browserRefreshOutcome
+```
+
+**1b. (Recommended) Get the "before" answer to the open question now, with nothing installed.** With the
+kiosk covering the bridge, run step 6's `requestAnimationFrame` count against the **current** Chrome. If
+it is about 120 while covered, frames are flowing, the covered window is not the cause of the relogin
+failure, and nothing in this runbook will help it. If it is near zero, the covered window is
+frame-starved. The research above says this flag cannot change that.
+
+**2. Install the two scripts: backup, then atomic rename.** This is the narrow path, and it installs
+nothing else. The watchdog does not need to be stopped. A rename is atomic, so a watchdog run sees
+either the old file or the new one, never a partial one.
+
+```bash
+# Guarded: a re-run must never overwrite the backup with the NEW script.
+[ -e ~/bin/gv-bridge-ensure.sh.bak ]  || cp -p ~/bin/gv-bridge-ensure.sh  ~/bin/gv-bridge-ensure.sh.bak
+[ -e ~/bin/gv-bridge-restart.sh.bak ] || cp -p ~/bin/gv-bridge-restart.sh ~/bin/gv-bridge-restart.sh.bak
+sha256sum ~/bin/gv-bridge-*.sh.bak    # must be the step-1 hashes; if not, stop
+install -m 755 /opt/rotary-phone/deploy/gv-bridge-ensure.sh  ~/bin/gv-bridge-ensure.sh.new  && mv -f ~/bin/gv-bridge-ensure.sh.new  ~/bin/gv-bridge-ensure.sh
+install -m 755 /opt/rotary-phone/deploy/gv-bridge-restart.sh ~/bin/gv-bridge-restart.sh.new && mv -f ~/bin/gv-bridge-restart.sh.new ~/bin/gv-bridge-restart.sh
+bash /opt/rotary-phone/deploy/check-installed-drift.sh --group bridge   # "[drift-check] bridge: 2/2 installed files match", exit 0
+bash ~/bin/gv-bridge-ensure.sh --print-config | grep -cx -- 'chrome_arg=--disable-backgrounding-occluded-windows'   # 1
+```
+
+The alternative is `bash /opt/rotary-phone/deploy/setup-gvbridge.sh`. It installs the same two scripts.
+Measured against the box, it would **also** rewrite the autostart entry's `Comment=` line (leaving a
+`.bak`), **create a new `~/Desktop/GV-Bridge.desktop` icon** on the kiosk's desktop (none exists today),
+and re-run `enable --now` on the watchdog, which is already enabled. The units are unchanged. Use it
+only if you want those extras.
+
+After step 2, **nothing has changed for the running Chrome.** The watchdog no-ops while the old process
+is alive.
+
+**3. Restart the bridge Chrome.** Go through the unit, so that it runs exactly the way the nightly
+recycle would:
+
+```bash
+systemctl --user start gv-bridge-restart.service
+tail -n 4 ~/.local/state/gv-bridge-restart.log
+#   … restart: killed existing
+#   Running as unit: run-….service; …
+#   … ensure: bridge was down -> launched
+#   … restart: handed off to ensure
+```
+
+**4. Confirm the new process carries the flag and CDP.**
+
+```bash
+pgrep -af 'user-data-dir=/home/mmack/.config/gv-bridge-chrome' | grep -v -- --type= | grep -c -- --disable-backgrounding-occluded-windows   # 1
+curl -s http://localhost:9224/json/version | head -3                                                                                       # answers within ~10 s
+```
+
+**5. Confirm the session.**
+
+```bash
+curl -s -X POST http://localhost:5004/api/gvbridge/cookies/refresh-from-browser -H 'Content-Type: application/json' -d '{}'
+```
+
+If the session was signed in at step 1, expect `200` and `{"refreshed":true,…}`. If it was already
+signed out (it was on 2026-09-25 at 23:00: `missing required SAPISID`), expect `502` with outcome
+`SignedOut`. A restart cannot have caused that. A **timeout or `Unreachable`** matches the post-reboot
+pattern described above. Retry after one cron cycle (20 min) before concluding anything.
+
+**6. The test the flag exists for.** With the kiosk up and covering the bridge, read the voice tab's
+`document.visibilityState` over CDP on port 9224, with the owner's driver or DevTools
+`Runtime.evaluate`. Source reading predicts `"visible"` **with or without the flag**, so this step alone
+cannot tell you whether the flag helped. Also evaluate
+`new Promise(r => { let n = 0; const t0 = performance.now(); setTimeout(() => r(n), 5000); (function f(){ n++; performance.now() - t0 < 2000 ? requestAnimationFrame(f) : r(n); })(); })`
+with `awaitPromise: true`. The `setTimeout` guard is required, because CDP's own `timeout` does not bound
+a promise wait, so without it a frame-starved page would never answer. About 120 means frames are
+flowing. A single-digit count (the guard fired at 5 s) means the frame-callback limit applies and the flag cannot fix it. Then reset the auto-relogin
+breaker (`gv-auto-relogin.sh --reset`) and re-run the attended sign-in with the kiosk in front. Pass
+criterion: the password input measures a non-zero box. If it fails, see the options listed above.
+
+**7. Measure the cost.** The baseline was measured 2026-09-25, with the bridge covered and without the
+flag: the bridge's 14 processes averaged **1.14 % of one core** (5738 CPU-s over 5.8 days) at **858 MB
+RSS**. After at least an hour, compare:
+
+```bash
+ps -o etimes=,times=,rss= -p $(pgrep -d, -f 'user-data-dir=/home/mmack/.config/gv-bridge-chrome') \
+  | awk '{t+=$2; r+=$3; if($1>e)e=$1} END {printf "avg_core_pct=%.2f rss_MB=%d\n", 100*t/e, r/1024}'
+```
+
+**Rollback.** Restore the scripts, then restart Chrome with the **old ensure** only:
+
+```bash
+mv -f ~/bin/gv-bridge-ensure.sh.bak  ~/bin/gv-bridge-ensure.sh
+mv -f ~/bin/gv-bridge-restart.sh.bak ~/bin/gv-bridge-restart.sh
+pkill -f 'user-data-dir=/home/mmack/.config/gv-bridge-chrome'; sleep 3
+~/bin/gv-bridge-ensure.sh        # or wait up to 2 min for the watchdog
+```
+
+⛔ **Do not roll back with the old `gv-bridge-restart.sh` or `gv-bridge-restart.service`.** The old
+restart script launches Chrome **without** `--remote-debugging-port`, and that silently breaks cookie
+refresh.
 
 ### After reboot
 
