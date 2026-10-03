@@ -37,6 +37,13 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private Timer? _cookieRefreshTimer;
 
     private string? _activeCallId;
+
+    // The inbound call WE answered on handset-lift (the deferred 200 OK). Its Ringing -> Active
+    // transition is our own answer, not "the far party answered on their cell": raising OnCallAnswered
+    // for it routes into CallManager.HandleCallAnsweredOnCellPhone, which — because the event can fire
+    // synchronously inside CallManager.AnswerCall, while the state is still Ringing — BYEs the HT801 and
+    // records the call as answered on the cell (UAT 2026-10-03 18:17:41; the PR #45 regression).
+    private string? _locallyAcceptedCallId;
     private bool _disposed;
     private bool _areCookiesValid;
 
@@ -1119,6 +1126,7 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
         // transport fires Completed to drive teardown instead) — see AcceptIncomingCallAsync.
         if (_sipTransport != null && _activeCallId != null)
         {
+            Volatile.Write(ref _locallyAcceptedCallId, _activeCallId);
             await _sipTransport.AcceptIncomingCallAsync(_activeCallId).ConfigureAwait(false);
         }
 
@@ -1178,9 +1186,21 @@ public class GVApiAdapter : ICallAdapter, IGvAuthenticatedClientProvider, IDispo
     private void HandleSipCallStatusChanged(object? sender, CallStatusChangedEventArgs e)
     {
         if (e.NewStatus == CallStatusType.Active)
+        {
+            if (e.CallId == Volatile.Read(ref _locallyAcceptedCallId))
+            {
+                _logger.LogInformation(
+                    "Call {CallId} became Active from our own handset-lift answer — not raising OnCallAnswered",
+                    e.CallId);
+                return;
+            }
             OnCallAnswered?.Invoke();
+        }
         else if (e.NewStatus == CallStatusType.Completed)
+        {
+            Interlocked.CompareExchange(ref _locallyAcceptedCallId, null, e.CallId);
             OnCallEnded?.Invoke();
+        }
     }
 
     /// <summary>

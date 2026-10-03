@@ -992,6 +992,11 @@ public sealed class GvSipTransport : IAsyncDisposable
         var refreshMs = (sessionExpiresSeconds / 2) * 1000;
         session.SessionTimer = new Timer(_ => SendSessionRefresh(callId), null, refreshMs, refreshMs);
 
+        // Diagnostic (2026-10-03): after a deferred answer GV ignored our later BYE. Log the full held
+        // 200 OK so its To-tag/Contact can be compared with the BYE's From-tag/Request-URI. SDP is
+        // headers-only noise here, so log the header block alone.
+        var heldOkHeaders = heldOk.Split("\r\n\r\n", 2)[0];
+        _logger.LogInformation("Held 200 OK headers for call {CallId}:\n{Headers}", callId, heldOkHeaders);
         await SendSipMessageAsync(heldOk, ct).ConfigureAwait(false);
         CallStatusChanged?.Invoke(this, new CallStatusChangedEventArgs(callId, oldStatus, CallStatusType.Active));
     }

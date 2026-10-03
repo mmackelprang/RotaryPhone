@@ -173,6 +173,23 @@ public class GVApiAdapterInboundAnswerIntegrationTests
             "OnCallAnsweredOnRotaryPhoneAsync -> AcceptIncomingCallAsync(_activeCallId) chain");
     }
 
+    // UAT 2026-10-03 18:17:41: our own deferred answer raised OnCallAnswered, which CallManager treats as
+    // "answered on the cell" — it BYE'd the HT801 and the later rotary hangup never ended the cell call.
+    [Fact]
+    public async Task RealPath_DeferredAnswer_DoesNotRaiseOnCallAnswered()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+        var answeredCount = 0;
+        adapter.OnCallAnswered += () => Interlocked.Increment(ref answeredCount);
+
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))));
+        await Task.Delay(100); // let any asynchronously raised event land
+
+        Assert.Equal(0, Volatile.Read(ref answeredCount));
+    }
+
     // THE v3 mandatory test (PR #45's regression): after a DEFERRED answer, the rotary hanging up
     // must send a BYE to GV — otherwise the caller's cell call lingers after the handset is replaced.
     [Fact]
