@@ -708,6 +708,50 @@ public sealed class GvSipTransport : IAsyncDisposable
 #pragma warning restore CA1031
     }
 
+    /// <summary>
+    /// Answers an in-dialog re-INVITE (GV's session-timer refresh). For a live call: 200 OK carrying the
+    /// SDP answer we already gave, so the session is refreshed and media is unchanged. For a dialog we no
+    /// longer hold (we already hung up): 481, which tells GV the call is gone.
+    /// </summary>
+    private void HandleInDialogReInvite(
+        string message, string callId, string invTo, string? invFrom, List<string> invVias, string? invCSeq)
+    {
+        var vias = string.Concat(invVias.Select(v => $"Via: {v}\r\n"));
+        var common =
+            vias +
+            $"To: {invTo}\r\n" +
+            $"From: {invFrom}\r\n" +
+            $"Call-ID: {callId}\r\n" +
+            $"CSeq: {invCSeq}\r\n";
+
+        if (_activeCalls.TryGetValue(callId, out var session)
+            && session.Status == CallStatusType.Active
+            && session.LocalSdpAnswer is { } sdp)
+        {
+            _logger.LogInformation("In-dialog re-INVITE (session refresh) for call {CallId} — answering 200 OK", callId);
+            var refreshOk =
+                "SIP/2.0 200 OK\r\n" + common +
+                $"Contact: <sip:{_regContactUser}@{_regWsHost};transport=wss>\r\n" +
+                $"Supported: timer\r\n" +
+                $"Session-Expires: 90;refresher=uac\r\n" +
+                $"User-Agent: {UserAgent}\r\n" +
+                $"Content-Type: application/sdp\r\n" +
+                $"Content-Length: {sdp.Length}\r\n" +
+                $"\r\n" +
+                sdp;
+            _ = SendSipMessageAsync(refreshOk);
+            return;
+        }
+
+        _logger.LogInformation(
+            "In-dialog re-INVITE for call {CallId} we no longer hold (status {Status}) — answering 481",
+            callId, session?.Status.ToString() ?? "none");
+        _ = SendSipMessageAsync(
+            "SIP/2.0 481 Call/Transaction Does Not Exist\r\n" + common +
+            $"User-Agent: {UserAgent}\r\n" +
+            "Content-Length: 0\r\n\r\n");
+    }
+
     private void HandleIncomingInvite(string message)
     {
         var invCallId = ExtractHeaderValue(message, "Call-ID");
@@ -735,6 +779,15 @@ public sealed class GvSipTransport : IAsyncDisposable
 
         if (invCallId is null || invVias.Count == 0 || _wsChannel is null)
             return;
+
+        // An INVITE whose To already carries a tag is IN-DIALOG (RFC 3261 §12.2) — e.g. GV's session-timer
+        // refresh, sent at Session-Expires/2 (45 s) once it has ACKed our 200. It is NOT a new call:
+        // treating it as one rang the rotary a second time (UAT 2026-10-03 18:34:20).
+        if (invTo is not null && invTo.Contains(";tag=", StringComparison.OrdinalIgnoreCase))
+        {
+            HandleInDialogReInvite(message, invCallId, invTo, invFrom, invVias, invCSeq);
+            return;
+        }
 
         // Generate a single To-tag for this dialog — must be consistent across 180 and 200
         var dialogTag = CallProperties.CreateNewTag();
@@ -873,7 +926,9 @@ public sealed class GvSipTransport : IAsyncDisposable
             InviteFromHeader = invFrom,
             InviteCSeqHeader = invCSeq,
         };
-        inSession.RouteSet.Reverse();
+        // UAS: the route set is the INVITE's Record-Route list IN ORDER (RFC 3261 §12.1.1). Reversing it
+        // (UAC behaviour) routes our BYE through GV's proxies backwards: the suspected reason GV has
+        // ignored our BYE since 2026-05 (KNOWN-ISSUES "GV BYE not terminating calls") -- verify on the box.
 
         // Pre-build the 200 OK with the SDP answer — same dialog To-tag as the 180 Ringing — but
         // HOLD it. AcceptIncomingCallAsync sends this exact message when the handset is lifted.
@@ -897,6 +952,7 @@ public sealed class GvSipTransport : IAsyncDisposable
             answer.sdp;
 
         inSession.PendingOkMessage = ok200;
+        inSession.LocalSdpAnswer = answer.sdp;
         _activeCalls[invCallId] = inSession;
 
 #pragma warning disable CA1848, CA1873
@@ -2338,6 +2394,9 @@ internal sealed class SipCallSession : IDisposable
     // pre-computed) but HELD until the handset is lifted. Storing it lets AcceptIncomingCallAsync
     // send the exact same answer the 180-Ringing dialog promised, with the consistent To-tag.
     public string? PendingOkMessage { get; set; }
+
+    /// <summary>Our SDP answer for this inbound call, kept to answer in-dialog refresh re-INVITEs.</summary>
+    public string? LocalSdpAnswer { get; set; }
 
     // The INVITE's Via headers + To/From/CSeq, captured so a deferred DECLINE (480) can echo them
     // per RFC 3261 §8.2.6 (a response MUST copy the request's To, From, Call-ID, CSeq, and Via).

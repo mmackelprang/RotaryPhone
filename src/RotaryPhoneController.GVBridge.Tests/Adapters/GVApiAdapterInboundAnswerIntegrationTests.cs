@@ -191,6 +191,71 @@ public class GVApiAdapterInboundAnswerIntegrationTests
         Assert.Contains(fake.Sends, s => IsOk200WithSdp(s, callId) && s.Contains(expected, StringComparison.Ordinal));
     }
 
+    // RFC 3261 §12.1.1: as UAS our route set is the Record-Route list IN ORDER (never reversed).
+    [Fact]
+    public async Task RealPath_ByeAfterDeferredAnswer_RoutesInRecordRouteOrder()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))));
+
+        await adapter.OnCallHungUpAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => s.StartsWith("BYE ", StringComparison.Ordinal))));
+        var bye = fake.Sends.First(s => s.StartsWith("BYE ", StringComparison.Ordinal));
+        Assert.Contains(
+            "Route: <sip:rr1.voice.google.com;lr;transport=wss>\r\n" +
+            "Route: <sip:rr2.voice.google.com;lr;transport=wss;uri-econt=X>\r\n", bye, StringComparison.Ordinal);
+    }
+
+    private static string InDialogReInvite(string callId, string ourToTag) =>
+        InboundInvite(callId)
+            .Replace("To: <sip:sip-token@web.c.pbx.voice.sip.google.com>",
+                $"To: <sip:sip-token@web.c.pbx.voice.sip.google.com>;tag={ourToTag}", StringComparison.Ordinal)
+            .Replace("CSeq: 1 INVITE", "CSeq: 2 INVITE", StringComparison.Ordinal);
+
+    private static string ToTagOf200(string ok) =>
+        ok.Split("\r\n").First(l => l.StartsWith("To:", StringComparison.Ordinal)).Split(";tag=")[1];
+
+    // UAT 2026-10-03 18:34:20: GV's 45 s session-timer re-INVITE was treated as a new call (rang again).
+    [Fact]
+    public async Task RealPath_SessionRefreshReInvite_DuringCall_Answers200_NotANewCall()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))));
+        var tag = ToTagOf200(fake.Sends.First(s => IsOk200WithSdp(s, callId)));
+        var incoming = 0;
+        adapter.OnIncomingCall += _ => Interlocked.Increment(ref incoming);
+
+        fake.FeedMessage(InDialogReInvite(callId, tag));
+
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s =>
+            IsOk200WithSdp(s, callId) && s.Contains("CSeq: 2 INVITE", StringComparison.Ordinal))),
+            "expected a 200 OK with SDP answering the refresh re-INVITE");
+        Assert.Equal(0, Volatile.Read(ref incoming));
+    }
+
+    [Fact]
+    public async Task RealPath_ReInvite_AfterHangup_Answers481_NotANewCall()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))));
+        var tag = ToTagOf200(fake.Sends.First(s => IsOk200WithSdp(s, callId)));
+        await adapter.OnCallHungUpAsync();
+        var incoming = 0;
+        adapter.OnIncomingCall += _ => Interlocked.Increment(ref incoming);
+
+        fake.FeedMessage(InDialogReInvite(callId, tag));
+
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s =>
+            s.StartsWith("SIP/2.0 481", StringComparison.Ordinal) && s.Contains($"Call-ID: {callId}", StringComparison.Ordinal))));
+        Assert.Equal(0, Volatile.Read(ref incoming));
+    }
+
     // UAT 2026-10-03 18:17:41: our own deferred answer raised OnCallAnswered, which CallManager treats as
     // "answered on the cell" — it BYE'd the HT801 and the later rotary hangup never ended the cell call.
     [Fact]
