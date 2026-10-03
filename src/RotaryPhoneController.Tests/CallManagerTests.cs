@@ -163,24 +163,28 @@ public class CallManagerTests
     }
 
     [Fact]
-    public async Task TryDeclineRinging_RacingAnswer_ExactlyOneWins()
+    public async Task TryDeclineRinging_WhileAnswerInProgress_WaitsThenRefuses()
     {
-        // Repeat the race many times: whichever of answer/decline takes the lock first must win
-        // outright. Never both, and never a decline that tears down an answered call.
-        for (var i = 0; i < 200; i++)
-        {
-            if (_callManager.CurrentState != CallState.Idle) _callManager.HangUp();
-            _callManager.SimulateIncomingCall();
+        // Deterministic: freeze AnswerCall mid-flight (state still Ringing) and prove a decline
+        // arriving then cannot act until the answer finishes, and then refuses. Without the lock
+        // the decline would see Ringing and tear down the call being answered.
+        var answerEntered = new ManualResetEventSlim();
+        var releaseAnswer = new ManualResetEventSlim();
+        _mockBluetoothAdapter.Setup(x => x.AnswerCallAsync(It.IsAny<AudioRoute>()))
+            .Returns(() => { answerEntered.Set(); releaseAnswer.Wait(); return Task.FromResult(true); });
+        _callManager.SimulateIncomingCall();
 
-            var declined = false;
-            var start = new ManualResetEventSlim();
-            var answer = Task.Run(() => { start.Wait(); _callManager.AnswerCall(); });
-            var decline = Task.Run(() => { start.Wait(); declined = _callManager.TryDeclineRinging(out _); });
-            start.Set();
-            await Task.WhenAll(answer, decline);
+        var answer = Task.Run(() => _callManager.AnswerCall());
+        Assert.True(answerEntered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Equal(CallState.Ringing, _callManager.CurrentState); // mid-answer
 
-            Assert.Equal(declined ? CallState.Idle : CallState.InCall, _callManager.CurrentState);
-        }
+        var decline = Task.Run(() => _callManager.TryDeclineRinging(out _));
+        Assert.False(decline.Wait(TimeSpan.FromMilliseconds(200)), "decline must block behind the answer");
+
+        releaseAnswer.Set();
+        await answer;
+        Assert.False(await decline);
+        Assert.Equal(CallState.InCall, _callManager.CurrentState);
     }
 
     [Fact]
