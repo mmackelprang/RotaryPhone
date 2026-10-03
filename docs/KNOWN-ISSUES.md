@@ -735,7 +735,7 @@ cold-send blip is gone (or, if present, a single benign blip). Inbound ring + an
 
 ## GV BYE not terminating calls (2026-05-25)
 
-**Status:** Workaround in place (SRTP media teardown forces Google timeout)
+**Status:** ✅ RESOLVED 2026-10-03 (PR #95). Root cause: as the UAS on inbound calls we REVERSED the Record-Route set, so our BYE traversed GV's proxies in the wrong order (RFC 3261 §12.1.1: the UAS keeps Record-Route order). With the order fixed GV answers our BYE `200 OK` and the cell ends in 2-3 s (UAT). The DTLS-close workaround below is kept as belt-and-braces. Original status: Workaround in place (SRTP media teardown forces Google timeout)
 **Impact:** When hanging up the rotary phone, the cell phone call ends after ~5-10 seconds (Google media timeout) instead of immediately.
 **Root cause:** Our SIP BYE over WebSocket is structurally correct but Google's SIP proxy silently ignores it. Likely a dialog state mismatch (From/To tags, Contact URI, or CSeq) that requires proper SIP tracing to diagnose.
 **Workaround:** On hangup, `GvSipTransport.HangupAsync()` now closes the DTLS-SRTP `RTCPeerConnection` immediately (sending `close_notify`) before sending the SIP BYE. This stops all media flow, and Google's RTP timeout detection terminates the far-end call within 5-10 seconds.
