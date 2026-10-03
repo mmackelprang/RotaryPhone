@@ -743,6 +743,11 @@ public sealed class GvSipTransport : IAsyncDisposable
         var ringing = "SIP/2.0 180 Ringing\r\n";
         foreach (var via in invVias)
             ringing += $"Via: {via}\r\n";
+        // RFC 3261 §12.1.1: a UAS copies Record-Route from the request into dialog-creating
+        // responses (18x/2xx), same order. Suspected cause of GV never ACKing our held 200 OK and
+        // ignoring the later hangup (UAT 2026-10-03) -- verify on the box.
+        foreach (var rr in recordRoutes)
+            ringing += $"Record-Route: {rr}\r\n";
         ringing +=
             $"To: {invTo};tag={dialogTag}\r\n" +
             $"From: {invFrom}\r\n" +
@@ -875,6 +880,8 @@ public sealed class GvSipTransport : IAsyncDisposable
         var ok200 = "SIP/2.0 200 OK\r\n";
         foreach (var via in invVias)
             ok200 += $"Via: {via}\r\n";
+        foreach (var rr in recordRoutes)
+            ok200 += $"Record-Route: {rr}\r\n";
         ok200 +=
             $"To: {invTo};tag={dialogTag}\r\n" +
             $"From: {invFrom}\r\n" +

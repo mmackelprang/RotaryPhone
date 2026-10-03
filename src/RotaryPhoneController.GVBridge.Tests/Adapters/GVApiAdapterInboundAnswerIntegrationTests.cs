@@ -55,6 +55,8 @@ public class GVApiAdapterInboundAnswerIntegrationTests
         $"INVITE sip:{Guid.NewGuid():N}@web.c.pbx.voice.sip.google.com SIP/2.0\r\n" +
         "Via: SIP/2.0/WSS proxy.voice.google.com;branch=z9hG4bK-invite-1\r\n" +
         "Via: SIP/2.0/WSS edge.voice.google.com;branch=z9hG4bK-edge-9\r\n" +
+        "Record-Route: <sip:rr1.voice.google.com;lr;transport=wss>\r\n" +
+        "Record-Route: <sip:rr2.voice.google.com;lr;transport=wss;uri-econt=X>\r\n" +
         "Max-Forwards: 70\r\n" +
         "To: <sip:sip-token@web.c.pbx.voice.sip.google.com>\r\n" +
         "From: \"Caller\" <sip:+15558675309@web.c.pbx.voice.sip.google.com>;tag=caller-tag\r\n" +
@@ -171,6 +173,22 @@ public class GVApiAdapterInboundAnswerIntegrationTests
         Assert.True(ok200,
             "REGRESSION: held 200 OK (with SDP) must be sent on handset-lift via the real " +
             "OnCallAnsweredOnRotaryPhoneAsync -> AcceptIncomingCallAsync(_activeCallId) chain");
+    }
+
+    // RFC 3261 §12.1.1: the 180 and the held 200 must echo the INVITE's Record-Route set, in order.
+    [Fact]
+    public async Task RealPath_180AndHeld200_EchoRecordRouteInOrder()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))));
+
+        const string expected =
+            "Record-Route: <sip:rr1.voice.google.com;lr;transport=wss>\r\n" +
+            "Record-Route: <sip:rr2.voice.google.com;lr;transport=wss;uri-econt=X>\r\n";
+        Assert.Contains(fake.Sends, s => s.StartsWith("SIP/2.0 180 Ringing", StringComparison.Ordinal) && s.Contains(expected, StringComparison.Ordinal));
+        Assert.Contains(fake.Sends, s => IsOk200WithSdp(s, callId) && s.Contains(expected, StringComparison.Ordinal));
     }
 
     // UAT 2026-10-03 18:17:41: our own deferred answer raised OnCallAnswered, which CallManager treats as
