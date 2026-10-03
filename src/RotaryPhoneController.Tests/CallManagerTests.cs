@@ -123,6 +123,67 @@ public class CallManagerTests
     }
 
     [Fact]
+    public void TryDeclineRinging_WhenRinging_TearsDownToIdle_NotAnswered()
+    {
+        _callManager.SimulateIncomingCall();
+
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.True(declined);
+        Assert.Equal(CallState.Ringing, state);
+        Assert.Equal(CallState.Idle, _callManager.CurrentState);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.AtLeastOnce);
+        _mockCallHistory.Verify(x => x.UpdateCallHistory(It.Is<CallHistoryEntry>(
+            e => e.AnsweredOn == CallAnsweredOn.NotAnswered && e.EndTime != null)), Times.Once);
+    }
+
+    [Fact]
+    public void TryDeclineRinging_WhenInCall_RefusesAndLeavesCallUp()
+    {
+        _callManager.SimulateIncomingCall();
+        _callManager.HandleHookChange(true); // handset lifted first
+
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.False(declined);
+        Assert.Equal(CallState.InCall, state);
+        Assert.Equal(CallState.InCall, _callManager.CurrentState);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.Never);
+        _mockBluetoothAdapter.Verify(x => x.TerminateCallAsync(), Times.Never);
+    }
+
+    [Fact]
+    public void TryDeclineRinging_WhenIdle_Refuses()
+    {
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.False(declined);
+        Assert.Equal(CallState.Idle, state);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.Never);
+    }
+
+    [Fact]
+    public async Task TryDeclineRinging_RacingAnswer_ExactlyOneWins()
+    {
+        // Repeat the race many times: whichever of answer/decline takes the lock first must win
+        // outright. Never both, and never a decline that tears down an answered call.
+        for (var i = 0; i < 200; i++)
+        {
+            if (_callManager.CurrentState != CallState.Idle) _callManager.HangUp();
+            _callManager.SimulateIncomingCall();
+
+            var declined = false;
+            var start = new ManualResetEventSlim();
+            var answer = Task.Run(() => { start.Wait(); _callManager.AnswerCall(); });
+            var decline = Task.Run(() => { start.Wait(); declined = _callManager.TryDeclineRinging(out _); });
+            start.Set();
+            await Task.WhenAll(answer, decline);
+
+            Assert.Equal(declined ? CallState.Idle : CallState.InCall, _callManager.CurrentState);
+        }
+    }
+
+    [Fact]
     public void Bluetooth_OnIncomingCall_ShouldTriggerRinging()
     {
         // Act

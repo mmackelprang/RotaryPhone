@@ -51,6 +51,12 @@ public class CallManager
     private bool TryClaimOutboundConnect() =>
         Interlocked.CompareExchange(ref _outboundConnectPending, 0, 1) == 1;
 
+    // Serialises the two ways a Ringing call can be resolved by a person: answering it (handset
+    // lifted -> AnswerCall) and declining it from Radio Console (TryDeclineRinging). Each checks for
+    // Ringing and then transitions INSIDE the lock, so a decline that lands just after the handset is
+    // lifted sees InCall and refuses, instead of hanging up a call the user just answered.
+    private readonly object _ringingResolutionLock = new();
+
     // RTP port details negotiated from HT801's 200 OK SDP response
     private int? _negotiatedRtpPort;
     private string? _negotiatedRtpIp;
@@ -552,6 +558,16 @@ public class CallManager
 
     private void HandleCallAnsweredOnCellPhone()
     {
+        // Same lock as AnswerCall/TryDeclineRinging: an inbound call answered on the cell must not
+        // be torn down by a decline that checked Ringing a moment earlier.
+        lock (_ringingResolutionLock)
+        {
+            HandleCallAnsweredOnCellPhoneCore();
+        }
+    }
+
+    private void HandleCallAnsweredOnCellPhoneCore()
+    {
         _logger.LogInformation("Call answered on cell phone device");
 
         // OUTBOUND (GV) answered: the cell we dialed picked up. The call has been sitting
@@ -684,6 +700,39 @@ public class CallManager
     #endregion
 
     public void AnswerCall()
+    {
+        lock (_ringingResolutionLock)
+        {
+            AnswerCallCore();
+        }
+    }
+
+    /// <summary>
+    /// Declines a RINGING inbound call (Radio Console's "Ignore" button). Only ever acts from
+    /// Ringing: the check and the teardown happen under the same lock as <see cref="AnswerCall"/>,
+    /// so a handset lifted a moment before the request wins and the call continues.
+    /// </summary>
+    /// <param name="stateAtDecision">The state observed when the decision was made.</param>
+    /// <returns>True if the call was declined and torn down; false if it was not Ringing.</returns>
+    public bool TryDeclineRinging(out CallState stateAtDecision)
+    {
+        lock (_ringingResolutionLock)
+        {
+            stateAtDecision = CurrentState;
+            if (stateAtDecision != CallState.Ringing)
+            {
+                _logger.LogInformation("Decline requested but phone is {State}, not Ringing — no action", stateAtDecision);
+                return false;
+            }
+
+            // Deliberately no number in this line. Call history keeps AnsweredOn = NotAnswered.
+            _logger.LogInformation("Incoming call declined from Radio Console");
+            HangUp();
+            return true;
+        }
+    }
+
+    private void AnswerCallCore()
     {
         _logger.LogInformation("Answering call");
 

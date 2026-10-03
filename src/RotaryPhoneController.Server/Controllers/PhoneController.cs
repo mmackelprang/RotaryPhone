@@ -157,6 +157,23 @@ public class PhoneController : ControllerBase
         return Ok(new { acknowledged = true });
     }
 
+    /// <summary>
+    /// Declines a RINGING inbound call (Radio Console's incoming-call banner "Ignore" button).
+    /// 200 {"declined": true} from Ringing; 409 {"declined": false, "state": "..."} from any other
+    /// state, with no effect (an InCall call is never hung up); 404 for an unknown phoneId.
+    /// </summary>
+    [HttpPost("decline")]
+    public IActionResult Decline([FromQuery] string phoneId = "default")
+    {
+        var manager = _phoneManager.GetPhone(phoneId);
+        if (manager == null) return NotFound();
+
+        if (manager.TryDeclineRinging(out var state))
+            return Ok(new { declined = true });
+
+        return Conflict(new { declined = false, state = state.ToString() });
+    }
+
     [HttpPost("simulate/incoming")]
     public IActionResult SimulateIncoming([FromQuery] string phoneId = "default")
     {
