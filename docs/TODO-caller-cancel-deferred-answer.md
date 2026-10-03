@@ -1,6 +1,8 @@
 # TODO — Caller-cancel-keeps-ringing (inbound) — future fix via deferred answer
 
-**Status:** OPEN (deferred). Logged 2026-06-13 per user request. Updated 2026-06-13 after PR #45/#46 (v2) — see "v2/v3 attempt" below.
+**Status:** ✅ RESOLVED 2026-10-03 by PR #95 (deferred answer v3), owner UAT green on the box. v3 kept v2 and fixed four more defects found live: our own answer raising `OnCallAnswered` (the real #45 regression -- the event fired synchronously inside `AnswerCall` while still Ringing), no Record-Route echo in the 180/200 (GV never ACKed), the inbound route set reversed (GV ignored our BYE), and in-dialog session-refresh re-INVITEs treated as new calls (plus our own colliding refresh timer). The history below is kept as the record of the earlier attempts.
+
+**Original status:** OPEN (deferred). Logged 2026-06-13 per user request. Updated 2026-06-13 after PR #45/#46 (v2) — see "v2/v3 attempt" below.
 **Severity:** minor — calls work both directions; only affects the case where the caller hangs up *before* the rotary handset is lifted.
 **Deployed state (stable):** `origin/main @ 89282e4` (revert of #45). Running = pre-#45 build (auto-answer + clean rotary-hangup) + #44 SQLite call-history + #39 dormant CANCEL handler. **Do NOT re-attempt without reading the v2/v3 landmine section first.**
 
