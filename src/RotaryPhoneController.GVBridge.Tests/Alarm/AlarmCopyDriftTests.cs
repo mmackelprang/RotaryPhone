@@ -36,6 +36,9 @@ public class AlarmCopyDriftTests
         "CHROME WAS UNREACHABLE on CDP port",
         "so the Google login was never tested.",
         "the browser was NEVER CONSULTED",
+        "the box's Chrome is SIGNED OUT",
+        "Chrome itself is fine; restarting it will not help.",
+        "ACTION: a human must sign in at voice.google.com in the box's Chrome.",
     ];
 
     [Fact]

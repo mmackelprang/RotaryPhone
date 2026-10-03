@@ -96,7 +96,7 @@ STATUS_URL="${GV_ALARM_STATUS_URL:-http://127.0.0.1:5004/api/gvbridge/status}"
 # ⛔ These are the alarm's BEST KNOWN VALUES, not authority. The service's config is
 # authoritative; if they ever disagree, the service wins and this is the bug.
 GV_CDP_PORT="${GV_ALARM_CDP_PORT:-9224}"
-# ⛔ THE THREE VERBATIM HEREDOCS BELOW KEEP THEIR LITERAL 9224, and that is correct:
+# ⛔ THE VERBATIM HEREDOCS BELOW KEEP THEIR LITERAL 9224, and that is correct:
 # the number is inside a QUOTATION of the service, and editing text inside a quotation
 # to make it agree with local config is how a quotation stops being one. Instead, a
 # disagreement is made LOUD here — the operator is told the advice they are about to
@@ -130,6 +130,20 @@ PENDING_POLLS=0
 # replying into nothing. A gateway that is down when an incident opens is a correlated
 # failure, not an exotic one. Found in pre-merge review 2026-09-09.
 THREAD_ROOT_DELIVERED=0
+# ⛔ "MIGHT the owner have seen ANY message from this incident?" — root OR alert, delivered
+# OR possibly delivered. Not derivable from the other fields: a root refused while its alert
+# is accepted leaves THREAD_ROOT_DELIVERED=0 and LAST_POSTED_CONDITION unmoved, identical to
+# an incident where nothing arrived at all. The two must end differently on recovery (see
+# the ok branch).
+# ⚠ "POSSIBLY" is load-bearing. A curl TIMEOUT (exit 28) — the very failure of 2026-09-20 —
+# does not prove nothing arrived: the gateway may have accepted the message and been slow to
+# answer. Only a refused connection or a non-2xx reply proves non-delivery. Guessing "not
+# delivered" on a timeout would retire an alert the owner may have SEEN without ever closing
+# it; guessing "delivered" costs at most one quiet RESOLVED. Pre-merge review 2026-09-25.
+# ⚠ Absent from a state file written by any deployed version, where it defaults to 0. THREAD_ROOT_DELIVERED
+# still counts, so the only state that loses is "root refused, alert accepted" written by
+# the OLD script — which that script would have stranded anyway.
+INCIDENT_MAY_HAVE_DELIVERED=0
 
 if [ -r "$STATE_FILE" ]; then
     # shellcheck disable=SC1090
@@ -150,6 +164,7 @@ write_state() {
         printf 'PENDING_CONDITION=%q\n'     "$PENDING_CONDITION"
         printf 'PENDING_POLLS=%q\n'         "$PENDING_POLLS"
         printf 'THREAD_ROOT_DELIVERED=%q\n' "$THREAD_ROOT_DELIVERED"
+        printf 'INCIDENT_MAY_HAVE_DELIVERED=%q\n' "$INCIDENT_MAY_HAVE_DELIVERED"
     } > "${STATE_FILE}.new" || { rm -f "${STATE_FILE}.new"; log "could not write ${STATE_FILE}.new"; return 1; }
     mv -f "${STATE_FILE}.new" "$STATE_FILE" || { rm -f "${STATE_FILE}.new"; log "could not replace ${STATE_FILE}"; return 1; }
     return 0
@@ -184,6 +199,7 @@ case "$outcome" in
     UNPOLLED)      condition="service_unreachable" ;;
     Stale)         condition="browser_stale" ;;
     Unreachable)   condition="browser_unreachable" ;;
+    SignedOut)     condition="browser_signed_out" ;;
     NotAttempted)  condition="not_attempted" ;;
     Succeeded)     condition="ok" ;;
     TornDown)      condition="ignore" ;;
@@ -228,6 +244,10 @@ ACTION_MAX="${GV_ALARM_ACTION_MAX:-200}"
 
 NOTIFY_ATTEMPTED=0
 NOTIFY_FAILED=0
+# Set by each post_notify: 1 when the call FAILED but the message may still have been
+# delivered (timeout / connection dropped after sending). See INCIDENT_MAY_HAVE_DELIVERED.
+LAST_NOTIFY_MAYBE_DELIVERED=0
+NOTIFY_MAX_TIME="${GV_ALARM_NOTIFY_MAX_TIME:-15}"
 
 # Truncate to (ACTION_MAX - 3) and append ASCII "...", NOT a one-character "…".
 # The measured cap is in characters, but we do not control what the gateway
@@ -245,6 +265,8 @@ truncate_action() {
 post_notify() {
     local severity="$1" title="$2" body="$3" action="$4" dedupe="$5" thread="$6"
     local payload resp rc http out
+    # First statement, before any early return, so no call can read a previous call's value.
+    LAST_NOTIFY_MAYBE_DELIVERED=0
 
     # MEASURED: `action` and `timestamp` are SILENTLY DROPPED on severity=info.
     # So anything whose action matters goes on `warning`, never `info` — and we
@@ -272,7 +294,7 @@ post_notify() {
     NOTIFY_ATTEMPTED=$((NOTIFY_ATTEMPTED + 1))
 
     resp="$(printf 'header = "Authorization: Bearer %s"\n' "$ROTARYPHONE_GATEWAY_TOKEN" \
-        | curl -sS --max-time 15 -X POST --config - \
+        | curl -sS --max-time "$NOTIFY_MAX_TIME" -X POST --config - \
         -H 'Content-Type: application/json' \
         -w $'\n%{http_code}' \
         --data-binary "$payload" \
@@ -283,7 +305,18 @@ post_notify() {
 
     if [ "$rc" -ne 0 ]; then
         NOTIFY_FAILED=$((NOTIFY_FAILED + 1))
-        log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. Transport error, nothing delivered. Detail: ${out}"
+        case "$rc" in
+            # 28 timeout, 52 empty reply, 55/56 send/receive failure, 8 weird reply, 18 partial
+            # reply, 16/92 HTTP/2 framing/stream error: the request may have reached the gateway
+            # and been delivered. Not proof of non-delivery. (28 also covers a connect-phase
+            # timeout where nothing was sent — which is why the ok branch re-posts the root
+            # before any RESOLVED, rather than trusting this flag to mean "a thread exists".)
+            8|16|18|28|52|55|56|92)
+                LAST_NOTIFY_MAYBE_DELIVERED=1
+                log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. No confirmation — the gateway MAY have delivered it. Detail: ${out}" ;;
+            *)
+                log "NOTIFY FAILED: curl exit ${rc} for severity=${severity} dedupe=${dedupe}. Transport error, nothing delivered. Detail: ${out}" ;;
+        esac
         return 1
     fi
 
@@ -321,6 +354,7 @@ post_notify() {
 # platform. If you edit one, edit both.
 #   browser_stale       <- GVApiAdapter.cs REJECTED-a-cookie-set line
 #   browser_unreachable <- GVApiAdapter.cs CHROME WAS UNREACHABLE case
+#   browser_signed_out  <- GVApiAdapter.cs SIGNED OUT case
 #   not_attempted       <- GVApiAdapter.cs NEVER CONSULTED default case
 
 body_for() {
@@ -343,6 +377,17 @@ Chrome could not be reached at all, so the Google login was **never tested**. Th
 
 ⚠ `browserSessionStale` reads **false** in this state, identically to a healthy one. That is why this
 alarm reads `browserRefreshOutcome` instead.
+QUOTE
+        ;;
+      browser_signed_out)
+        cat <<'QUOTE'
+Chrome is running and answered, but it is **signed out of Google** — a human has to sign in. The
+service's own words:
+
+> GVApi: all cookie-recovery rungs failed and the box's Chrome is SIGNED OUT — Chrome answered on CDP port 9224 but holds no Google session (it is on the Google sign-in page or the Voice landing page). Chrome itself is fine; restarting it will not help. ACTION: a human must sign in at voice.google.com in the box's Chrome.
+
+⚠ `browserSessionStale` reads **false** in this state too: Google never saw a cookie, so nothing was
+rejected. That is why this alarm reads `browserRefreshOutcome` instead.
 QUOTE
         ;;
       not_attempted)
@@ -388,6 +433,7 @@ title_for() {
     case "$1" in
       browser_stale)       echo "[${SOURCE_NAME}] GV session — signed out, re-login needed" ;;
       browser_unreachable) echo "[${SOURCE_NAME}] GV session — Chrome is gone, login untested" ;;
+      browser_signed_out)  echo "[${SOURCE_NAME}] GV session — signed out, needs a human sign-in" ;;
       not_attempted)       echo "[${SOURCE_NAME}] GV session — browser never consulted" ;;
       service_unreachable) echo "[${SOURCE_NAME}] GV session — the service is not answering" ;;
       field_missing)       echo "[${SOURCE_NAME}] GV session — the box is running an older build" ;;
@@ -402,6 +448,7 @@ action_for() {
     case "$1" in
       browser_stale)       echo "re-login at voice.google.com in the box's Chrome (CDP 9224)" ;;
       browser_unreachable) echo 'pgrep -f "user-data-dir=$HOME/.config/gv-bridge-chrome"; if absent: ~/bin/gv-bridge-ensure.sh' ;;
+      browser_signed_out)  echo "a human must sign in at voice.google.com in the box's Chrome (CDP 9224). Chrome is up; do not restart it." ;;
       not_attempted)       echo "check the CDP wiring and that Chrome answers on port 9224" ;;
       service_unreachable) echo "systemctl status rotary-phone on radio" ;;
       # ⛔ NOT `sha256sum …/RotaryPhoneController.Server`, which is what this line
@@ -424,7 +471,7 @@ action_for() {
 
 severity_for() {
     case "$1" in
-      browser_stale|browser_unreachable|service_unreachable) echo "alert" ;;
+      browser_stale|browser_unreachable|browser_signed_out|service_unreachable) echo "alert" ;;
       not_attempted|field_missing|unknown_outcome)           echo "warning" ;;
       ok)                                                    echo "info" ;;
     esac
@@ -461,6 +508,10 @@ Identifiers: thread \`${INCIDENT_THREAD_KEY}\`, status \`${STATUS_URL}\`, opened
         "$INCIDENT_THREAD_KEY"
     then
         THREAD_ROOT_DELIVERED=1
+    elif [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ]; then
+        # Still re-attempted next cycle (its dedupe_key collapses a duplicate), but the
+        # incident can no longer be retired silently: the owner may have seen this root.
+        INCIDENT_MAY_HAVE_DELIVERED=1
     fi
 }
 
@@ -479,27 +530,58 @@ if [ "$condition" = "ignore" ]; then
     # the gateway dead-man covers a service that never returns. Raised in pre-merge
     # review 2026-09-09; recorded rather than guessed at.
     log "outcome=TornDown — service teardown, not a fault. Nothing posted."
-elif [ "$condition" = "$LAST_POSTED_CONDITION" ]; then
+elif [ "$condition" = "$LAST_POSTED_CONDITION" ] && { [ "$condition" != "ok" ] || [ -z "$INCIDENT_THREAD_KEY" ]; }; then
+    # ⛔ ok WITH AN OPEN KEY IS NEVER "UNCHANGED". An incident that never delivered anything
+    # leaves LAST_POSTED_CONDITION at `ok`, so its recovery looks like a repeat — and on
+    # 2026-09-20 this branch swallowed exactly that, stranding the key for five days until
+    # an unrelated alert on 2026-09-25 re-rooted under it. It falls through to the ok branch.
     log "condition unchanged since the last post (${condition}); nothing posted."
 elif [ "$PENDING_POLLS" -lt "$MIN_POLLS_TO_POST" ]; then
     log "condition=${condition} seen ${PENDING_POLLS}/${MIN_POLLS_TO_POST} consecutive polls; not posting yet."
 elif [ "$condition" = "ok" ]; then
-    if [ -n "$INCIDENT_THREAD_KEY" ]; then
+    if [ -n "$INCIDENT_THREAD_KEY" ] && [ "$THREAD_ROOT_DELIVERED" != "1" ] && [ "$INCIDENT_MAY_HAVE_DELIVERED" != "1" ]; then
+        # RETIRED, SILENTLY. Nothing from this incident reached the owner — every attempt was
+        # PROVABLY refused (connection refused, or a non-2xx reply; a timeout does not count,
+        # see INCIDENT_MAY_HAVE_DELIVERED) — so there is no alert for a RESOLVED to close, and a RESOLVED here
+        # would be an all-clear for an alarm nobody raised. Posting one would also root a
+        # new thread with a RESOLVED, which the chat policy forbids. So: journal it, and
+        # clear the key so the NEXT incident opens its own thread. The gateway's dead-man
+        # already covered the window, because the refused cycles did not refresh it.
+        log "incident ${INCIDENT_THREAD_KEY} (opened ${INCIDENT_OPENED_AT}) recovered with NOTHING delivered — every root and alert attempt was refused. Nothing to close, so nothing posted; retired ${INCIDENT_THREAD_KEY} so the next incident opens its own thread."
+        LAST_POSTED_CONDITION="ok"
+        INCIDENT_THREAD_KEY=""
+        INCIDENT_OPENED_AT=""
+        THREAD_ROOT_DELIVERED=0
+        INCIDENT_MAY_HAVE_DELIVERED=0
+    elif [ -n "$INCIDENT_THREAD_KEY" ]; then
         # RESOLVED — quiet, and it MUST reply into the open thread.
-        post_notify "info" \
-            "$(title_for ok)" \
-            "$(now_utc) · RESOLVED
+        # ⛔ NEVER THE FIRST MESSAGE IN ITS THREAD. If the root never provably landed (e.g. every
+        # post timed out — which may or may not have delivered), re-post the root FIRST; its
+        # dedupe_key embeds the incident key, so a root that did land collapses. Only with a
+        # root in place is the RESOLVED posted, so a RESOLVED can never start a thread, whatever
+        # the transport did. A root refused again leaves everything for the next cycle.
+        # (Pre-merge re-review 2026-09-25: a connect-phase timeout is curl 28 too, and nothing
+        # was sent — without this, that RESOLVED would have rooted its own thread.)
+        [ "$THREAD_ROOT_DELIVERED" = "1" ] || open_incident_thread
+        if [ "$THREAD_ROOT_DELIVERED" = "1" ]; then
+            post_notify "info" \
+                "$(title_for ok)" \
+                "$(now_utc) · RESOLVED
 \`browserRefreshOutcome\` is **Succeeded**: cookies pulled from the box's Chrome passed a live probe against
 Google. The session opened at ${INCIDENT_OPENED_AT} is closed.
 Action: none." \
-            "" \
-            "${SOURCE_NAME}-gv-session-resolved-${INCIDENT_THREAD_KEY}" \
-            "$INCIDENT_THREAD_KEY"
-        if [ "$NOTIFY_FAILED" -eq 0 ]; then
-            LAST_POSTED_CONDITION="ok"
-            INCIDENT_THREAD_KEY=""
-            INCIDENT_OPENED_AT=""
-            THREAD_ROOT_DELIVERED=0
+                "" \
+                "${SOURCE_NAME}-gv-session-resolved-${INCIDENT_THREAD_KEY}" \
+                "$INCIDENT_THREAD_KEY"
+            if [ "$NOTIFY_FAILED" -eq 0 ]; then
+                LAST_POSTED_CONDITION="ok"
+                INCIDENT_THREAD_KEY=""
+                INCIDENT_OPENED_AT=""
+                THREAD_ROOT_DELIVERED=0
+                INCIDENT_MAY_HAVE_DELIVERED=0
+            fi
+        else
+            log "RESOLVED WITHHELD for ${INCIDENT_THREAD_KEY}: its thread root could not be delivered, and a RESOLVED must never start a thread. Retrying next cycle."
         fi
     else
         # Healthy, and no incident was ever open. Post nothing at all.
@@ -525,7 +607,9 @@ else
 $(body_for "$condition")" \
         "$(action_for "$condition")" \
         "${SOURCE_NAME}-gv-session-${condition}" \
-        "$INCIDENT_THREAD_KEY"
+        "$INCIDENT_THREAD_KEY" \
+        && INCIDENT_MAY_HAVE_DELIVERED=1
+    [ "$LAST_NOTIFY_MAYBE_DELIVERED" = "1" ] && INCIDENT_MAY_HAVE_DELIVERED=1
     [ "$NOTIFY_FAILED" -eq 0 ] && LAST_POSTED_CONDITION="$condition"
 fi
 

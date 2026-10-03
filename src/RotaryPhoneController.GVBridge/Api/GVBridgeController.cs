@@ -172,11 +172,26 @@ public class GVBridgeController : ControllerBase
         [FromBody] RefreshFromBrowserRequest? request = null)
     {
         var cdpPort = request?.CdpPort ?? _config.ChromeCdpPort;
-        var targetUrl = request?.TargetUrl ?? "voice.google.com";
+        var targetUrl = request?.TargetUrl ?? GVApiAdapter.BridgeChromeTargetUrl;
+
+        var isBridgeChrome = cdpPort == _config.ChromeCdpPort
+            && string.Equals(targetUrl, GVApiAdapter.BridgeChromeTargetUrl, StringComparison.OrdinalIgnoreCase);
 
         var extraction = await _cdpExtractor.ExtractAsync(cdpPort, targetUrl);
+        if (extraction.Success && isBridgeChrome)
+            _adapter.NoteBrowserExtractionSucceeded();
+
         if (!extraction.Success)
         {
+            // ⛔ RECORD IT (2026-09-25). This used to return the error and write nothing, so /status kept
+            // an old "Succeeded" through a browser-only sign-out and neither the alarm nor auto-relogin
+            // ever saw it — the cron that POSTs here every 20 minutes could not move the field.
+            // Only for the BRIDGE Chrome's Voice tab: browserRefreshOutcome describes that session, and a
+            // probe of another port or tab has learned nothing about it. Status write only — no recovery.
+            // Unreachable is debounced (see RecordFailedBrowserExtraction): this is the periodic caller.
+            if (isBridgeChrome)
+                _adapter.RecordFailedBrowserExtraction(extraction, "refresh-from-browser", debounceUnreachable: true);
+
             return extraction.Status switch
             {
                 CdpExtractionStatus.NoMatchingTab => NotFound(new { error = extraction.Error }),

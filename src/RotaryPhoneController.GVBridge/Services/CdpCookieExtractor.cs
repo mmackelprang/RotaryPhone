@@ -24,6 +24,18 @@ public record CdpExtractionResult(CdpExtractionStatus Status, GvCookieSet? Cooki
 {
     public bool Success => Status == CdpExtractionStatus.Success;
 
+    /// <summary>
+    /// The page URLs Chrome reported, set only on <see cref="CdpExtractionStatus.NoMatchingTab"/>. Lets a
+    /// caller tell "Chrome is parked on a signed-out page" from "Chrome is on something unrelated"
+    /// without a second CDP round trip.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ These are the CACHED <c>/json</c> URLs, which can lag the live page. That is the same source the
+    /// extractor used to decide there was no matching tab, so a classification made from them is at
+    /// least consistent with the failure it explains.
+    /// </remarks>
+    public IReadOnlyList<string> TabUrls { get; init; } = [];
+
     public static CdpExtractionResult Fail(CdpExtractionStatus status, string error) =>
         new(status, null, 0, error);
 }
@@ -90,7 +102,13 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
 
         if (tab is null)
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoMatchingTab,
-                $"No tab found with URL containing \"{targetUrl}\". Open voice.google.com in Chrome first.");
+                $"No tab found with URL containing \"{targetUrl}\". Open voice.google.com in Chrome first.")
+                // PAGE targets only: /json also lists iframes, service workers and background pages,
+                // whose URLs say nothing about what the user-visible page is showing. A target with no
+                // type is kept (older Chrome, and fixtures), since it cannot be ruled out.
+                with { TabUrls = tabs
+                    .Where(t => t.Type is null || t.Type.Equals("page", StringComparison.OrdinalIgnoreCase))
+                    .Select(t => t.Url ?? "").ToList() };
 
         if (string.IsNullOrEmpty(tab.WebSocketDebuggerUrl))
             return CdpExtractionResult.Fail(CdpExtractionStatus.NoDebuggerUrl,
@@ -173,14 +191,30 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
 
         await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
 
-        var responseJson = responseBuilder.ToString();
+        return ParseGetCookiesReply(responseBuilder.ToString());
+    }
+
+    /// <summary>
+    /// Turn a CDP <c>Network.getCookies</c> reply into a cookie header. Throws on an error reply or a
+    /// malformed one, which <see cref="ExtractAsync"/> reports as <c>ExtractionFailed</c>.
+    /// </summary>
+    internal static (string RawCookieHeader, int CookieCount) ParseGetCookiesReply(string responseJson)
+    {
         using var doc = JsonDocument.Parse(responseJson);
         var root = doc.RootElement;
 
+        // ⚠ A CDP ERROR REPLY IS NOT "NO COOKIES". Returning ("", 0) here would surface as NoCookies,
+        // which the adapter now reads as SignedOut — a protocol fault reported as a sign-out. Throwing
+        // lands in ExtractAsync's catch as ExtractionFailed instead.
+        if (root.TryGetProperty("error", out var cdpError))
+            throw new InvalidOperationException($"CDP Network.getCookies returned an error: {cdpError}");
+
+        // A reply with no result.cookies at all is malformed, not "an empty jar": same rule as above.
         if (!root.TryGetProperty("result", out var resultProp) ||
             !resultProp.TryGetProperty("cookies", out var cookiesArray))
         {
-            return ("", 0);
+            throw new InvalidOperationException(
+                "CDP Network.getCookies reply carried no result.cookies — a protocol fault, not a signed-out jar.");
         }
 
         var cookieParts = new List<string>();
@@ -220,6 +254,7 @@ public sealed class CdpCookieExtractor : ICdpCookieExtractor
     internal record CdpTab
     {
         public string? Url { get; init; }
+        public string? Type { get; init; }
         public string? WebSocketDebuggerUrl { get; init; }
     }
 }
