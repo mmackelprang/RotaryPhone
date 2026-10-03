@@ -1049,11 +1049,9 @@ public sealed class GvSipTransport : IAsyncDisposable
         session.Status = CallStatusType.Active;
         session.PendingOkMessage = null;
 
-        // Session timer: refresh at half the negotiated Session-Expires (90s -> re-INVITE every 45s).
-        // We offered Session-Expires: 90;refresher=uac in the 200 OK, so we own the refresh.
-        const int sessionExpiresSeconds = 90;
-        var refreshMs = (sessionExpiresSeconds / 2) * 1000;
-        session.SessionTimer = new Timer(_ => SendSessionRefresh(callId), null, refreshMs, refreshMs);
+        // No session timer of our own: the 200 OK says `refresher=uac`, and on an INBOUND call the UAC
+        // is GV, which refreshes at 45 s (handled by HandleInDialogReInvite). Refreshing from this side
+        // as well collided with GV's refresh — GV answered ours `491 Request Pending` (UAT 2026-10-03).
 
         // Diagnostic (2026-10-03): after a deferred answer GV ignored our later BYE. Log the full held
         // 200 OK so its To-tag/Contact can be compared with the BYE's From-tag/Request-URI. SDP is
