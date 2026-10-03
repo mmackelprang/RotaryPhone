@@ -173,6 +173,29 @@ public class GVApiAdapterInboundAnswerIntegrationTests
             "OnCallAnsweredOnRotaryPhoneAsync -> AcceptIncomingCallAsync(_activeCallId) chain");
     }
 
+    // THE v3 mandatory test (PR #45's regression): after a DEFERRED answer, the rotary hanging up
+    // must send a BYE to GV — otherwise the caller's cell call lingers after the handset is replaced.
+    [Fact]
+    public async Task RealPath_DeferredAnswer_ThenRotaryHangup_SendsByeToGv()
+    {
+        var (adapter, transport, fake, callId) = await SetUpRingingInboundCallAsync();
+        await using var _ = transport;
+
+        await adapter.OnCallAnsweredOnRotaryPhoneAsync();
+        Assert.True(await WaitForAsync(() => fake.Sends.Any(s => IsOk200WithSdp(s, callId))),
+            "precondition: held 200 OK sent on handset-lift");
+
+        // Handset back on hook: CallManager.HangUp -> _boundAdapter.OnCallHungUpAsync.
+        await adapter.OnCallHungUpAsync();
+
+        var bye = await WaitForAsync(() => fake.Sends.Any(s =>
+            s.StartsWith("BYE ", StringComparison.Ordinal) &&
+            s.Contains($"Call-ID: {callId}", StringComparison.Ordinal)));
+        Assert.True(bye,
+            "REGRESSION (#45): a rotary hangup after a deferred answer must send BYE to GV. Sends were:\n" +
+            string.Join("\n---\n", fake.Sends.Select(s => s.Split("\r\n")[0])));
+    }
+
     // Cancel-race: a CANCEL during the ring then a handset-lift must NOT send a 200 OK, and the
     // teardown (OnCallEnded) must fire — answer-vs-cancelled correctly distinguished, and crucially
     // the session lookup STILL WORKS after the cancel (the #40 bug evicted it).
