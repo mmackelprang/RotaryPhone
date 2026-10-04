@@ -1,0 +1,20 @@
+[Unit]
+Description=Run GV auto-relogin every 5 minutes (installed DISABLED; enabling it is the owner's act)
+
+[Timer]
+# ⚠ 5 minutes is the ALARM'S cadence, reused rather than newly chosen. The effective latency
+# is dominated by something else: browserRefreshOutcome only turns Stale/SignedOut when the
+# 20-minute cron or the recovery ladder attempts a refresh, so polling faster buys nothing.
+# The breaker, not this timer, bounds how often a sign-in can happen (1/hour, 3/day).
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+# ⚠ Persistent=false. A missed window must NOT fire a burst of catch-up runs at boot: each
+# would consult the breaker, and a burst is precisely the traffic pattern it bounds.
+Persistent=false
+
+Unit=gv-auto-relogin.service
+
+[Install]
+WantedBy=timers.target

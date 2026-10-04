@@ -198,6 +198,58 @@ The GVBridge section (update IPs for your network):
 | `~/.local/state/gv-bridge-restart.log` | Launch / restart log |
 | `/opt/rotary-phone/refresh-gv-cookies.sh` | Cron `*/20` — refreshes cookies, mutes the tab |
 | `/opt/rotary-phone/ChromeExtension/` | Extension source. Passed to Chrome but **not loaded** |
+| `/opt/rotary-phone/gv-account.conf` | Auto-relogin credential, **mode 600**, owner-populated. Read only by `gv-auto-relogin.sh` — see below |
+| `~/bin/gv-auto-relogin.sh`, `gv-auto-relogin-breaker.sh`, `gv-cdp.py` | Auto-relogin actuator, circuit breaker, CDP helper (`install-gv-auto-relogin.sh`) |
+| `~/bin/gv-relogin-signin.py` | The **owner-written** sign-in driver. Until it exists, auto-relogin does nothing |
+| `~/.local/state/gv-auto-relogin.state` | Breaker state. Inspect with `gv-auto-relogin.sh --status`; only `--reset` (a human) arms it |
+
+### Auto-relogin (built on PR #88; inert until the owner's driver and the owner's `--enable`)
+
+> ⚠ **Merged ≠ deployed ≠ INSTALLED ≠ ENABLED ≠ ARMED.** The deploy runs `install-gv-auto-relogin.sh`, which
+> installs the files and a **disabled** timer and never arms the breaker. Without `~/bin/gv-relogin-signin.py`
+> every cycle logs "not installed" and changes nothing. Interface the driver must meet:
+> [`docs/gv-relogin-driver-contract.md`](gv-relogin-driver-contract.md). Design:
+> `docs/superpowers/specs/2026-09-09-gv-auto-relogin-design.md`; plan: `docs/plans/gv-auto-relogin.md`.
+
+```bash
+~/bin/gv-auto-relogin.sh --status          # breaker state, today's counts, driver installed or not
+~/bin/gv-auto-relogin.sh --print-config    # resolved paths; never a credential value
+~/bin/gv-auto-relogin.sh --reset           # a HUMAN arms the breaker (counters are kept)
+bash /opt/rotary-phone/deploy/install-gv-auto-relogin.sh --enable   # the owner's act; refuses without
+                                           # gv-account.conf (600, ours), the alarm, and the driver
+bash /opt/rotary-phone/deploy/check-installed-drift.sh --group relogin
+```
+
+### gv-account.conf (auto-relogin credential)
+
+Read by `gv-auto-relogin.sh` **as data**: `KEY=value` lines, the value being everything after the first `=`,
+verbatim (no quotes removed, no whitespace trimmed); `#` lines and blank lines ignored; exactly the two keys
+below, once each; **LF line endings** (a CR would become part of the password). A malformed file stops the
+breaker without any sign-in attempt.
+
+```
+# /opt/rotary-phone/gv-account.conf — mode 600, owner mmack.
+#
+# ⛔ POPULATED BY THE OWNER, ON THE BOX, BY HAND. No part of the RotaryPhone repo,
+# no deploy, no agent and no script ever writes, reads back, echoes or transports
+# these values. They exist in exactly one place.
+#
+# This file is read by the actuator (never exported, so the password does not reach
+# /proc/<pid>/environ) and the password is handed to the sign-in driver ON STDIN. It is never an argv parameter: /proc/<pid>/cmdline
+# is mode 0444 on this box (measured 2026-09-09) and `radio` is shared — beszel,
+# avahi, colord and polkitd all run here, plus Radio Console under the same uid.
+#
+GV_ACCOUNT_EMAIL=
+GV_ACCOUNT_PASSWORD=
+```
+
+- **Mode 600, owner `mmack`.** Never group- or world-readable.
+- **Protected from the deploy in both branches** of `deploy/Deploy-ToLinux.ps1`: the tar branch excludes it from
+  the archive (so it is never *overwritten*), and the rsync branch excludes it from `--delete` (so it is never
+  *deleted*). `deploy/tests/repro-tar-clobber.sh` proves both, including a negative control that shows rsync
+  deleting the file when the exclusion is absent.
+- ⛔ **No template is committed and nothing in the repo creates this file.** A template in the publish tree would
+  be a file the deploy could ship — the failure the exclusions exist to prevent.
 
 **.desktop files must be mode 755, never 775.** GNOME silently refuses to launch a
 group-writable `.desktop` file, which is exactly why the previously shipped

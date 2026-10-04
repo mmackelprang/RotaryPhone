@@ -137,6 +137,52 @@ check "a 2 followed by a 1 still exits 2" "2" "$rc"
 check "…and BOTH are reported, not just the last" "2" \
       "$(grep -c '⚠ \[drift-check\]' "$WORK/out.txt")"
 
+echo "=== group relogin (docs/plans/gv-auto-relogin.md Task 15): the same matrix ==="
+RELOGIN_FILES=(gv-auto-relogin.sh gv-auto-relogin-breaker.sh gv-cdp.py systemd/gv-auto-relogin.service systemd/gv-auto-relogin.timer)
+dest_of() { case "$1" in systemd/*) echo "$HOME/.config/systemd/user/${1#systemd/}" ;; *) echo "$HOME/bin/$1" ;; esac; }
+build_relogin() { # build_relogin [--with-driver]
+    rm -rf "$HOME" "$SHIP"
+    mkdir -p "$SHIP/systemd" "$HOME/bin" "$HOME/.config/systemd/user"
+    local f files=("${RELOGIN_FILES[@]}")
+    if [ "${1:-}" = "--with-driver" ]; then
+        cp "$HERE/gv-relogin-driver-stub.py" "$WORK/driver-src.py"
+        files+=(gv-relogin-signin.py)
+    fi
+    : > "$MAN"
+    for f in "${files[@]}"; do
+        if [ "$f" = gv-relogin-signin.py ]; then cp "$WORK/driver-src.py" "$SHIP/$f"; else cp "$SRC/$f" "$SHIP/$f"; fi
+        printf '%s  %s\n' "$(sha256sum "$SHIP/$f" | cut -d' ' -f1)" "$f" >> "$MAN"
+        install -m 644 "$SHIP/$f" "$(dest_of "$f")"
+    done
+}
+rrun() { bash "$CHECK" --group relogin --ship-dir "$SHIP" > "$WORK/out.txt" 2>&1; echo "$?"; }
+
+build_relogin
+check "relogin row 1: in sync, no driver anywhere -> exit 0" "0" "$(rrun)"
+check "…one summary line saying 5/5, plus one line that the optional driver is absent everywhere" "1:1:2" \
+      "$(grep -c '5/5 installed files match' "$WORK/out.txt"):$(grep -c 'optional, and absent everywhere' "$WORK/out.txt"):$(wc -l < "$WORK/out.txt")"
+check "…and NO warning marker" "0" "$(grep -c '⚠' "$WORK/out.txt")"
+build_relogin; rm -f "$HOME/bin/gv-auto-relogin.sh"
+check "relogin row 2: not installed -> exit 1, names install-gv-auto-relogin.sh" "1:1" \
+      "$(rrun):$(grep -c 'ACTION: bash .*install-gv-auto-relogin.sh' "$WORK/out.txt")"
+build_relogin; echo "# tampered" >> "$HOME/bin/gv-cdp.py"
+check "relogin row 3: installed differs -> exit 1" "1:1" "$(rrun):$(grep -c 'DIFFERS from the shipped copy' "$WORK/out.txt")"
+build_relogin; echo "# stale" >> "$SHIP/gv-auto-relogin-breaker.sh"; install -m 644 "$SHIP/gv-auto-relogin-breaker.sh" "$HOME/bin/gv-auto-relogin-breaker.sh"
+check "⛔ relogin row 4: shipped stale, installed faithfully (a two-link check passes this) -> exit 1" "1:1" \
+      "$(rrun):$(grep -c 'SHIPPED COPY IS STALE' "$WORK/out.txt")"
+build_relogin; rm -f "$MAN"
+check "relogin row 5: no manifest -> exit 2" "2" "$(rrun)"
+build_relogin; rm -f "$SHIP/gv-auto-relogin.sh"
+check "relogin row 6: shipped file missing -> exit 2" "2" "$(rrun)"
+build_relogin --with-driver
+check "driver shipped and installed in sync -> exit 0, 6/6" "0:1" "$(rrun):$(grep -c '6/6 installed files match' "$WORK/out.txt")"
+build_relogin --with-driver; rm -f "$HOME/bin/gv-relogin-signin.py"
+check "driver shipped but NOT installed -> exit 1 (optional is not a licence to skip)" "1:1" \
+      "$(rrun):$(grep -c 'gv-relogin-signin.py is NOT INSTALLED' "$WORK/out.txt")"
+build_relogin; install -m 644 "$HERE/gv-relogin-driver-stub.py" "$HOME/bin/gv-relogin-signin.py"
+check "⛔ driver INSTALLED but never shipped -> exit 2 (the box runs a file the repo does not know)" "2:1" \
+      "$(rrun):$(grep -c 'gv-relogin-signin.py is not in the manifest' "$WORK/out.txt")"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL ${cases} CASES PASSED"; else echo "FAILURES PRESENT (${cases} cases run)"; fi
 exit "$fail"

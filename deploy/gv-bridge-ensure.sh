@@ -6,8 +6,8 @@
 #   - gv-bridge-watchdog.timer                      every 2 minutes (liveness)
 #   - ~/.config/autostart/gv-bridge-chrome.desktop  at GNOME login
 #   - gv-bridge-restart.sh                          after the nightly kill
-#   - NOT WIRED YET: the deploy's post-install gate --print-config, side-effect free
-#     (the flag works; nothing calls it today -- see the Self-report note below)
+#   - install-gv-bridge.sh (every deploy): --print-config, side-effect free, as the
+#     flag-match safety gate before it installs this script into ~/bin
 #
 # Idempotent by contract: the watchdog runs this every 2 minutes, so an
 # invocation made while the bridge is already up does nothing and exits 0.
@@ -82,6 +82,10 @@ CHROME_ARGS+=(
   # take effect under X11. It changes nothing about stacking or focus: the window
   # stays behind the kiosk. Pinned by deploy/tests/check-bridge-chrome-flags.sh.
   --disable-backgrounding-occluded-windows
+  # The nightly restart kills Chrome and a reboot SIGTERMs it, so every launch
+  # looked like crash recovery and showed a "Restore pages?" dialog. The bridge
+  # always opens BRIDGE_URL fresh, so there is nothing to restore (2026-10-04).
+  --hide-crash-restore-bubble
   "--window-size=800,600"
   # A no-op under Wayland (the compositor places the window); retained because
   # the running process carries it. Off-screen placement is not what keeps this
@@ -100,14 +104,11 @@ CHROME_ARGS+=(
 )
 
 # --- Self-report -------------------------------------------------------------
-# NOT CALLED BY THE DEPLOY TODAY. --print-config exists and is genuinely
-# side-effect free, but nothing invokes it: the string "--print-config" appears
-# nowhere in Deploy-ToLinux.ps1, which says as much itself ("Today setup-gvbridge.sh
-# is shipped but never executed by the deploy"). Wiring it is plan Task 10, not
-# started. Do not read the paragraph below as a description of current behaviour.
-#
-# THE INTENT, once Task 10 lands: the deploy calls this on the INSTALLED copy after
-# setup-gvbridge.sh runs, so the gate tests what the installed thing DOES rather
+# Called by install-gv-bridge.sh, which Deploy-ToLinux.ps1 runs on every deploy:
+# BEFORE install, on the shipped copy, its chrome_arg lines must match the running
+# bridge Chrome's command line or nothing is installed; AFTER install, on the
+# INSTALLED copy, its output must match the shipped copy's. The second call is what
+# tests what the installed thing DOES rather
 # than what a file contains -- a checksum cannot catch a bad mode, a partial copy,
 # or the wrong file under the right name.
 #
@@ -154,8 +155,13 @@ fi
 # `pkill -9` can land on a Chrome the watchdog started a moment earlier and
 # leave a half-initialised profile behind. Both scripts take the same lock.
 #
-# Failing to take it is not an error here: whoever holds it is already bringing
-# the bridge up or recycling it, which is exactly the outcome this script wants.
+# A held lock means someone else is bringing the bridge up or recycling it, so WAIT
+# for them (up to 60s) and then fall through to the normal liveness check below.
+# Deliberately NOT `flock -n || exit 0`: Radio Console's KIOSK-2 launcher reads this
+# script's exit code, and "someone else holds the lock" would be a THIRD outcome
+# arriving as 0 (session-alarm spec §8, decision 4, owner ruling 2026-10-04). Waiting
+# keeps exactly today's two: already up (0) and launched (0). On a 60s timeout the
+# script carries on unlocked, the same as the no-flock path below.
 LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
 
 # Only lock if the lock is actually obtainable. If flock is missing or the file
@@ -164,7 +170,7 @@ LOCK="${GV_BRIDGE_LOCK:-${PROFILE}.lock}"
 # mean never launching the bridge at all, which is far worse.
 if command -v flock >/dev/null 2>&1 && : >>"${LOCK}" 2>/dev/null; then
   exec 9>>"${LOCK}"
-  flock -n 9 || exit 0
+  flock -w 60 9 || echo "$(ts) ensure: lock still held after 60s -> continuing unlocked" >> "${LOG}"
 fi
 
 # Checked under the lock, so the answer cannot go stale between here and launch.
@@ -177,6 +183,18 @@ mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
 # Chrome refuses to open a profile whose Singleton* lock files survive a crash
 # or a kill -9, so clear them before every launch attempt.
 rm -f "${PROFILE}"/Singleton* 2>/dev/null || true
+
+# Auto-login never types a password, so the login keyring (which holds Chrome's cookie key) stays
+# locked and Chrome blocks on an unlock prompt. Unlock it from the TPM-bound credential
+# /etc/credstore.encrypted/radio-keyring.cred (systemd-creds, root-only to decrypt). Best effort:
+# any failure leaves the keyring as it was and Chrome prompts exactly as before.
+KEYRING_CRED="/etc/credstore.encrypted/radio-keyring.cred"
+KEYRING_UNLOCK="${KEYRING_UNLOCK:-${HOME}/bin/gv-keyring-unlock.py}"
+if [ -r "${KEYRING_UNLOCK}" ] && sudo -n test -f "${KEYRING_CRED}" 2>/dev/null; then
+  sudo -n systemd-creds decrypt --name=radio-keyring "${KEYRING_CRED}" - 2>>"${LOG}" \
+    | timeout 20 python3 "${KEYRING_UNLOCK}" >> "${LOG}" 2>&1 \
+    || echo "$(ts) ensure: keyring unlock failed (Chrome may prompt)" >> "${LOG}"
+fi
 
 # --collect reaps the transient unit once Chrome reparents itself away from it,
 # so repeated launches do not accumulate failed scopes.
