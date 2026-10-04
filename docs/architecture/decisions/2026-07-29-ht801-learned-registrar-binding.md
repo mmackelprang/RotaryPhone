@@ -3,7 +3,7 @@
 - **Status:** Accepted (implemented in PR2, branch `feat/ht801-registrar-binding`)
 - **Date:** 2026-07-29
 - **Author:** Architect (PR2)
-- **Plan:** `docs/plans/ht801-address-resolution-and-config-binder-fix.md` (decisions **D3**, **D4**, **D5**)
+- **Plan:** `docs/archive/ht801/ht801-address-resolution-and-config-binder-fix.md` (decisions **D3**, **D4**, **D5**)
 - **Precedes / relates to:** PR1 (`fix/ht801-invite-target`, #67) — the config-binder fix that restored
   the bell. This ADR covers the durable half.
 - **Operator-facing companion:** `docs/HT801-ADDRESS.md` — where the address lives, how to change it,
@@ -171,7 +171,7 @@ engaged in production — the self-healing would have been decorative.
 - **D7** (test fixtures moved to RFC 5737 `192.0.2.x`) — so a grep for a production address returns only
   real configuration.
 - **D8** (UI honesty about a failed bell INVITE; the `Ringing`-before-INVITE race is deliberately
-  unchanged) — see `docs/handoffs/radioconsole-bell-failure-reply.md`.
+  unchanged) — see `docs/archive/radio-console/radioconsole-bell-failure-reply.md`.
 
 ## 8. Open questions
 

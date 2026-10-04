@@ -11,7 +11,7 @@ SAPISIDHASH + rotating-cookie auth (the same scheme Gemini / Bard web clients us
 Last updated 2026-06-13.
 
 > TL;DR for PR1: There is already a detailed, ready-for-Builder plan at
-> `docs/plans/gv-websocket-keepalive-reconnect.md`. This research **confirms** its
+> `docs/archive/gv-call-path/gv-websocket-keepalive-reconnect.md`. This research **confirms** its
 > keep-alive design and **sharpens** its auth-recovery design. The two changes worth
 > making before Builder starts are in the "Summary / impact on the PR1 plan" section
 > at the bottom.
@@ -360,7 +360,7 @@ signaling — explicitly PR2, out of scope here. Nothing in this research change
 
 ## Summary / impact on the PR1 plan
 
-The existing plan (`docs/plans/gv-websocket-keepalive-reconnect.md`) is sound and this research
+The existing plan (`docs/archive/gv-call-path/gv-websocket-keepalive-reconnect.md`) is sound and this research
 **confirms** its keep-alive + reconnect + honest-status design. Two things should change/confirm
 before Builder starts:
 

@@ -16,7 +16,7 @@ namespace RotaryPhoneController.Tests;
 /// it. A single-phone config therefore produced TWO phones, and first-wins registration kept the
 /// hardcoded one — so every INVITE went to a stale address that no config edit could change.
 ///
-/// See docs/plans/ht801-address-resolution-and-config-binder-fix.md.
+/// See docs/archive/ht801/ht801-address-resolution-and-config-binder-fix.md.
 /// </summary>
 public class ConfigurationBindingTests
 {

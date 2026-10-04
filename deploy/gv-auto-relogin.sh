@@ -56,7 +56,7 @@ DRIVER="${GV_RELOGIN_SIGNIN_DRIVER:-${HERE}/gv-relogin-signin.py}"
 # While it says a HUMAN is mid sign-in, this actuator stands down.
 ASSIST_STATE_FILE="${GV_RELOGIN_ASSIST_STATE_FILE:-${HOME}/.local/state/gv-reauth-assist.state}"
 # ⚠ DERIVED FROM THE SPIKE, NOT CHOSEN: 15 s per navigation x2 (sign-in page, chooser ->
-# password page) + 30 s submit -> settled, from docs/spikes/2026-09-09-gv-signin-cdp-recording.md
+# password page) + 30 s submit -> settled, from docs/archive/gv-auth/2026-09-09-gv-signin-cdp-recording.md
 # "Timings", is 60 s of budget the driver may legitimately spend. This doubles it for
 # process start and CDP round trips. A driver still running at the limit is killed and
 # its outcome is UNRECOGNISED — a TRIP, never a retry.

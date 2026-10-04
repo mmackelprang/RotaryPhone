@@ -2,9 +2,9 @@
 
 > **Resumed 2026-09-25 under an owner-written sign-in driver.** See PR #88 and `docs/gv-relogin-driver-contract.md`
 > (being written on #88). The human fallback when auto-relogin cannot recover is
-> [`gv-reachable-reauth.md`](gv-reachable-reauth.md).
+> [`gv-reachable-reauth.md`](../../plans/gv-reachable-reauth.md).
 
-**Spec:** [`../superpowers/specs/2026-09-09-gv-auto-relogin-design.md`](../superpowers/specs/2026-09-09-gv-auto-relogin-design.md) —
+**Spec:** [`2026-09-09-gv-auto-relogin-design.md`](2026-09-09-gv-auto-relogin-design.md) —
 read it first. Its §2 prerequisites (no 2FA, dedicated account) and its §5 placement rationale are settled and
 are **not** re-opened here.
 **Depends on:** the GV session alarm ([`gv-session-alarm.md`](gv-session-alarm.md), merged as PR #85) and the
@@ -2544,7 +2544,7 @@ the alarm's ACTION name `gv-auto-relogin.sh --reset` — until the actuator exis
 ⛔ **Owner decision, 2026-09-25.** The owner writes the sign-in driver themselves. That is Task 10a,
 `deploy/gv-relogin-signin.py`, the one component that fills in and submits Google's password. This branch
 contains **no code that types into or submits Google's sign-in form.** It builds everything around the driver
-and specifies the driver's interface in [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md).
+and specifies the driver's interface in [`docs/gv-relogin-driver-contract.md`](../../gv-relogin-driver-contract.md).
 Task 10b, the hand-off, is built into the actuator.
 
 ⚠ **Edited in this session: this §7.4 only.** The spec and the rest of this plan are untouched, because PR #89
@@ -2658,7 +2658,7 @@ real `printf %q`, in C and UTF-8 locales for both writer and reader, with 0 mism
 
 #### 7.4.4 What remains, in order, and who does it
 
-1. **The owner writes `deploy/gv-relogin-signin.py`** to [`../gv-relogin-driver-contract.md`](../gv-relogin-driver-contract.md),
+1. **The owner writes `deploy/gv-relogin-signin.py`** to [`docs/gv-relogin-driver-contract.md`](../../gv-relogin-driver-contract.md),
    and runs `bash deploy/tests/check-relogin-driver.sh` (Linux/WSL) until it passes.
 2. **Task 16, deploy and prove it is installed**, not gated on G2. Run a normal deploy, then on the box:
    `list-unit-files 'gv-auto-relogin.*'` should show both units **disabled**; `--print-config`; `--status`

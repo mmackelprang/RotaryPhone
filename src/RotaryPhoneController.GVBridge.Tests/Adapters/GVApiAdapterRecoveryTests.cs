@@ -14,7 +14,7 @@ using Xunit;
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
 
 /// <summary>
-/// Covers the B2 auth-blackout fix (docs/plans/gv-auth-blackout-b2-design.md):
+/// Covers the B2 auth-blackout fix (docs/archive/gv-auth/gv-auth-blackout-b2-design.md):
 ///  - Task 1: the recovery ladder is awaitable, single-flight via a SHARED task, reports its
 ///    outcome, arms a failure-only cooldown, and marks the adapter available again on success.
 ///

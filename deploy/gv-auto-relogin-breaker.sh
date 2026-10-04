@@ -35,7 +35,7 @@
 # --reset. (The harness counts that literal assignment and requires exactly one, so
 # this comment deliberately does not spell it out.)
 #
-# ⚠ VOCABULARY IS ASSERTED. docs/plans/gv-auto-relogin.md Task 5 requires this file
+# ⚠ VOCABULARY IS ASSERTED. docs/archive/gv-auth/gv-auto-relogin.md Task 5 requires this file
 # to contain none of the usual words for doing something a second time, and the
 # harness greps for them. The comments above are phrased around that on purpose; a
 # future edit that "clarifies" one of them with the forbidden word fails the harness.

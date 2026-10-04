@@ -54,7 +54,7 @@ went to read it. The HFP session on `hci0` died on its own.
 ```
 
 This is a **deliberate reversal of your own architecture's mitigation.**
-`docs/superpowers/specs/2026-03-13-rotaryphone-standalone-architecture-design.md:58` says:
+`docs/archive/bluetooth/2026-03-13-rotaryphone-standalone-architecture-design.md:58` says:
 
 > **Adapter isolation note:** `ProfileManager1.RegisterProfile` is BlueZ daemon-wide (not
 > per-adapter). Adapter isolation is achieved by: (a) only running discovery on hci1, (b) only

@@ -43,7 +43,7 @@ set on RotaryPhone, an `X-RotaryPhone-Auth: <key>` header becomes **required** o
 
 > ⚠ **Withdrawn 2026-09-09.** That exemption is gone — **every** `/api/gvbridge/*` path is now gated
 > uniformly. The path had no controller route and had not had one since March 2026. Full notice:
-> `docs/handoffs/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
+> `docs/archive/radio-console/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
 
 **As-built contract — how to send the key (do this so the key can be flipped on later):**
 - **REST:** read the key from RadioConsole's own config/secret mechanism (not hard-coded). When

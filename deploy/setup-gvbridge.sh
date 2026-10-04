@@ -252,7 +252,7 @@ fi
 #     that configuration: /api/diagnostics/audio-bridge reported
 #     inboundFramesSent 345, outboundFramesReceived 341, bidirectionalAudio true,
 #     zero errors. Audio therefore runs on the SIPSorcery DTLS-SRTP path from
-#     docs/superpowers/specs/2026-03-27-gv-api-migration-design.md, not on the
+#     docs/archive/gv-call-path/2026-03-27-gv-api-migration-design.md, not on the
 #     extension's tabCapture relay, and answer/hangup go over SIP rather than DOM
 #     clicking.
 #   * The browser's only remaining job is holding a session CDP can read cookies

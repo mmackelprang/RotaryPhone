@@ -3,7 +3,7 @@ using RotaryPhoneController.Core.Bell;
 namespace RotaryPhoneController.Tests;
 
 /// <summary>
-/// docs/handoffs/radioconsole-bell-failure-reply.md §5 tells RadioConsole the acknowledged flag
+/// docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 tells RadioConsole the acknowledged flag
 /// "survives a service restart", and that their Q4 concern — a kiosk that restarts nightly
 /// resurrecting a note the operator already dismissed — "is addressed". The tracker was in-memory
 /// when that was written, so it was not true. These tests are what make it true and keep it true.
@@ -59,7 +59,7 @@ public class BellFailurePersistenceTests : IDisposable
     [Fact]
     public void RepeatAcknowledge_RepairsAnAckWriteThatNeverLanded()
     {
-        // docs/handoffs/radioconsole-bell-failure-reply.md §5 invites Radio Console in those words to
+        // docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 invites Radio Console in those words to
         // "retry freely on a flaky network". A dropped response is exactly when a client takes that
         // invitation up — and the failure most likely to accompany one is the write that also did not
         // land, because Persist is best-effort by design (it swallows I/O errors so that a full disk

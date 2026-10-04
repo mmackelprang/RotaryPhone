@@ -180,7 +180,7 @@ hardcoded one. Every INVITE went to `.22`. **No edit to any configuration file c
 `/api/phone/system-status` reported the correct address throughout, which is why it went undiagnosed
 for months. Fixed in PR1 (#67, empty seed list + fail-fast on duplicates) and hardened in PR2
 (no site IPs in source, fail-fast validation, learned registrar bindings). Full analysis:
-[`docs/plans/ht801-address-resolution-and-config-binder-fix.md`](plans/ht801-address-resolution-and-config-binder-fix.md).
+[`docs/archive/ht801/ht801-address-resolution-and-config-binder-fix.md`](archive/ht801/ht801-address-resolution-and-config-binder-fix.md).
 
 The device has held **three** addresses over the project's life — `192.168.86.250` (Raspberry Pi
 era), `192.168.86.22`, and now `192.168.86.240` — and **every one of them was at some point compiled

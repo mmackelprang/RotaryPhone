@@ -717,7 +717,7 @@ check "grace=30M -> journal names the lower-case rule" "yes" \
 check "grace=30M -> the check was NEVER REGISTERED (404)" "404" \
       "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099/v1/heartbeat/rotaryphone")"
 
-echo "=== auto-relogin track (docs/plans/gv-auto-relogin.md Task 13) ==="
+echo "=== auto-relogin track (docs/archive/gv-auth/gv-auto-relogin.md Task 13) ==="
 # ⛔ The breaker state is written by the REAL breaker library, not by a hand-made
 # fixture, so the file-format coupling between the two scripts is what gets tested.
 # That is how the %q finding below was made: a hand-written fixture in the plan's

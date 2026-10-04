@@ -365,7 +365,7 @@ A call is currently active. Hang up first, then switch modes.
 
 ### HT801 not ringing
 
-This is the HT801 INVITE issue documented in `docs/TODO-remaining-work.md`. After HT801 factory reset, reconfigure:
+This is the HT801 INVITE issue documented in `docs/archive/gv-call-path/TODO-remaining-work.md`. After HT801 factory reset, reconfigure:
 - SIP Server: radio box IP (e.g., `192.168.86.50`)
 - SIP User ID: `1000`
 

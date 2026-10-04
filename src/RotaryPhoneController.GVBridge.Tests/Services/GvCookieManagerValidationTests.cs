@@ -11,7 +11,7 @@ using Xunit;
 namespace RotaryPhoneController.GVBridge.Tests.Services;
 
 /// <summary>
-/// Task 5 of docs/plans/gv-auth-first-refresh-anchor-and-cookie-lineage.md — the cron path.
+/// Task 5 of docs/archive/gv-auth/gv-auth-first-refresh-anchor-and-cookie-lineage.md — the cron path.
 ///
 /// The box-side cron POSTs /api/gvbridge/cookies/refresh-from-browser every 20 minutes, landing in
 /// <see cref="GvCookieManager.SetCookiesAsync"/>. That method used to save unconditionally on its

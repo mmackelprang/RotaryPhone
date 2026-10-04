@@ -85,7 +85,7 @@ live box on 2026-09-08.
 ### Facts established on the box, 2026-09-08
 
 - Production port is **5004** (`deploy/rotary-phone.service:12`, `ASPNETCORE_URLS`), not 5555 (dev,
-  `launchSettings.json:8`). ⚠ `docs/plans/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md:683-686`
+  `launchSettings.json:8`). ⚠ `docs/archive/gv-auth/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md:683-686`
   asserts the opposite; it is wrong for the deployed service. Verification must poll 5004.
 - The service binds `0.0.0.0:5004`, so Radio Console can reach the endpoint at
   `http://192.168.86.50:5004` **without ssh**, which is requirement 4.

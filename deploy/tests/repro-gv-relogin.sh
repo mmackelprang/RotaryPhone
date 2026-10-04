@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The auto-relogin ACTUATOR, tested against stubs. docs/plans/gv-auto-relogin.md Tasks 9-12.
+# The auto-relogin ACTUATOR, tested against stubs. docs/archive/gv-auth/gv-auto-relogin.md Tasks 9-12.
 # Lane L: Linux only (the /proc and mode-600 cases are meaningless elsewhere). No box, no
 # browser, no Google, no real credential.
 #

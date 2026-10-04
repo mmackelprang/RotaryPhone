@@ -5,7 +5,7 @@ using Xunit;
 namespace RotaryPhoneController.GVBridge.Tests.Auth;
 
 /// <summary>
-/// Task 1 of docs/plans/gv-auth-first-refresh-anchor-and-cookie-lineage.md: the cookie lineage
+/// Task 1 of docs/archive/gv-auth/gv-auth-first-refresh-anchor-and-cookie-lineage.md: the cookie lineage
 /// timestamps travel WITH the cookies, so they survive SaveAsync -> restart -> LoadAsync. Without
 /// that, a fresh process cannot know the age of the credential it inherited — which is the
 /// 2026-09-08 outage.

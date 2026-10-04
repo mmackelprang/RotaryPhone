@@ -205,7 +205,7 @@ and the HT801 address, in addition to the BT keys above.
 > `chmod`'s, so it reports **0** while tar has failed. The comment at `Deploy-ToLinux.ps1:113-114`
 > claiming the exit-code check prevents a silent stale deploy is therefore **false on the tar path** —
 > the check is real but structurally blind. Tracked as Defect 4 in
-> [`docs/plans/deploy-tooling-honest-deploy-plan.md`](plans/deploy-tooling-honest-deploy-plan.md).
+> [`docs/archive/deploy/deploy-tooling-honest-deploy-plan.md`](archive/deploy/deploy-tooling-honest-deploy-plan.md).
 >
 > ⚠ **And this is not a rare path.** `rsync` is absent from the deploying machine's PowerShell `PATH`, so
 > `Get-Command rsync` finds nothing and **every deploy from that machine takes the tar path.** Installing
@@ -291,7 +291,7 @@ that PR rather than fixed in an unrelated change.
 - `Program.cs:395-412` — a bespoke CORS block that answers its `OPTIONS` preflight with `204`.
 - `GvBridgeAuthMiddleware.cs:38-40` — an **auth-gate exemption**, so the path is deliberately open.
 
-`docs/superpowers/specs/2026-03-27-gv-api-migration-design.md:222` lists *"Service worker HTTP relay
+`docs/archive/gv-call-path/2026-03-27-gv-api-migration-design.md:222` lists *"Service worker HTTP relay
 for call events — no longer needed (signaler handles detection)"* under **What Gets Deleted**, and
 there is no extension source (no `manifest.json`) in the repo. So this is vestigial wiring for a
 relay that was removed by design; the middleware carve-outs outlived the endpoint.
@@ -336,7 +336,7 @@ that pin its removal.
 ⚠ **The published contract changed.** The boundary doc's Inter-service auth row previously promised
 Radio Console that this path *"stays open — never gated"*. That sentence is withdrawn, with a dated
 Change Log entry and a notice at
-`docs/handoffs/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
+`docs/archive/radio-console/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
 
 **The lesson worth keeping:** the carve-outs had been reviewed, hardened, documented, and published as
 a cross-repo contract — and nobody checked whether the endpoint they protected still existed. It had
@@ -375,12 +375,12 @@ has no SPA fallback and never had one — `git log -S "MapFallback" --all -- src
 there. Both incidents were on `:5004`, and the route under test (`/api/gvbridge/sms/threads/...`)
 only exists here. **Neither session re-derived which server sent the bytes**; the refuting evidence
 sat in Radio Console's own archive the whole time. Full retraction and the corrected records:
-`docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md`, plus annotations in
+`docs/archive/radio-console/2026-09-09-radioconsole-ui11-was-never-ours.md`, plus annotations in
 `docs/handoffs/2026-09-08-radioconsole-{bell-persistence-and-404,incident-and-corrections}.md` and
-`docs/prompts/2026-09-08-radioconsole-ack-2-and-three-rows.md`.
+`docs/archive/radio-console/2026-09-08-radioconsole-ack-2-and-three-rows.md`.
 
 ⚠️ **Two pre-existing verification steps changed meaning** and were annotated in place:
-`docs/plans/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md` A7 (now expects `404 application/json`,
+`docs/archive/gv-auth/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md` A7 (now expects `404 application/json`,
 not `200 text/html`) and `docs/plans/build-stamp-and-deploy-verification.md` P2, **which this fix
 silently weakened** — it detected an unregistered route by content-type alone, and a missing route
 now answers `404 application/json`, satisfying its PASS condition. It now asserts the status line.
@@ -449,7 +449,7 @@ lie rather than a frequent one by the time it was fixed. It was still a real cor
 **Still open, deliberately out of scope:** the surviving 404 on `GetAudio` conflates *"no such
 voicemail"* with *"found, but no media"*. Splitting them would change a response body Radio Console
 matches on, so it was raised with them for a decision rather than changed unilaterally. See
-`docs/handoffs/radioconsole-gv-voicemail-blackout-404-reply.md`.
+`docs/archive/radio-console/radioconsole-gv-voicemail-blackout-404-reply.md`.
 
 **Provenance.** Found by Radio Console by reading our source, filed as their punch-list `XR-6` on
 2026-09-03, and **never sent to us** through the boundary doc's inbound lane — so it sat unknown on
@@ -661,9 +661,9 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   >   behaviour until the owner deploys. Anything reading `/api/gvbridge/status` on `radio:5004` *today*
   >   still sees `psidtsAgeSeconds`, and it is still lying.
 
-**See:** [`docs/plans/gv-auth-blackout-b2-design.md`](plans/gv-auth-blackout-b2-design.md) (findings
-F1-F7, design, owner decisions), [`docs/plans/gv-auth-blackout-b2-plan.md`](plans/gv-auth-blackout-b2-plan.md)
-(task breakdown + test plan), [`docs/handoffs/radioconsole-gv-auth-blackout-reply.md`](handoffs/radioconsole-gv-auth-blackout-reply.md)
+**See:** [`docs/archive/gv-auth/gv-auth-blackout-b2-design.md`](archive/gv-auth/gv-auth-blackout-b2-design.md) (findings
+F1-F7, design, owner decisions), [`docs/archive/gv-auth/gv-auth-blackout-b2-plan.md`](archive/gv-auth/gv-auth-blackout-b2-plan.md)
+(task breakdown + test plan), [`docs/archive/radio-console/radioconsole-gv-auth-blackout-reply.md`](archive/radio-console/radioconsole-gv-auth-blackout-reply.md)
 (cross-repo reply, including the `available` vs `degraded` ask).
 
 
@@ -707,7 +707,7 @@ so it now agrees with the three signals above. Two caveats keep it second-choice
 ~30 s old) and it is `null` until the first probe completes, where `null` means *unknown*, not
 *offline*.
 **See:** [`docs/HT801-ADDRESS.md`](HT801-ADDRESS.md) (address locations, change procedure, verification),
-[`docs/plans/ht801-address-resolution-and-config-binder-fix.md`](plans/ht801-address-resolution-and-config-binder-fix.md)
+[`docs/archive/ht801/ht801-address-resolution-and-config-binder-fix.md`](archive/ht801/ht801-address-resolution-and-config-binder-fix.md)
 (full analysis, including the empirical binder repro).
 
 ## Outbound: bridge started at placement → errno-101 blip + early-audio clipping (RESOLVED 2026-06-13)

@@ -1,6 +1,6 @@
 [Unit]
 Description=GV auto-relogin — one breaker-bounded attempt to restore a signed-out bridge session
-Documentation=file:///opt/rotary-phone/docs/plans/gv-auto-relogin.md
+Documentation=file:///opt/rotary-phone/docs/archive/gv-auth/gv-auto-relogin.md
 
 [Service]
 Type=oneshot

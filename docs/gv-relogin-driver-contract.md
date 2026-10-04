@@ -226,7 +226,7 @@ than where the sign-in settled.
 
 ## 8. The page, as the spike recorded it
 
-Source: `docs/spikes/2026-09-09-gv-signin-cdp-recording.md`, run 2026-09-25 11:04–11:13 EDT on `radio` with the
+Source: `docs/archive/gv-auth/2026-09-09-gv-signin-cdp-recording.md`, run 2026-09-25 11:04–11:13 EDT on `radio` with the
 owner at the box. That was **one** observation on one day. The artefacts are private, in the owner's Rig task
 `GV-SIGNIN-SPIKE_cdp_recording/artefacts/`, and are cited by filename. **These are facts about the page, not a
 procedure.**

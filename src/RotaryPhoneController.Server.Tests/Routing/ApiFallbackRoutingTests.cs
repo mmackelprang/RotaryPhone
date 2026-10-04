@@ -17,7 +17,7 @@ namespace RotaryPhoneController.Server.Tests.Routing;
 /// Background: a bare <c>MapFallbackToFile("index.html")</c> answered every unmatched <c>/api/*</c>
 /// request with HTTP 200 and text/html. A JSON caller probing a wrong path got a success code and
 /// concluded the route existed — a day of cross-repo debugging, twice, on two different sessions.
-/// See docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md.
+/// See docs/archive/radio-console/2026-09-09-radioconsole-ui11-was-never-ours.md.
 ///
 /// ⚠ SCOPE — read before trusting this file. It builds its OWN minimal WebApplication and registers
 /// a COPY of the two fallback patterns from Program.cs. It does NOT execute Program.cs, which is

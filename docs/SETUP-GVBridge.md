@@ -209,7 +209,7 @@ The GVBridge section (update IPs for your network):
 > installs the files and a **disabled** timer and never arms the breaker. Without `~/bin/gv-relogin-signin.py`
 > every cycle logs "not installed" and changes nothing. Interface the driver must meet:
 > [`docs/gv-relogin-driver-contract.md`](gv-relogin-driver-contract.md). Design:
-> `docs/superpowers/specs/2026-09-09-gv-auto-relogin-design.md`; plan: `docs/plans/gv-auto-relogin.md`.
+> `docs/archive/gv-auth/2026-09-09-gv-auto-relogin-design.md`; plan: `docs/archive/gv-auth/gv-auto-relogin.md`.
 
 ```bash
 ~/bin/gv-auto-relogin.sh --status          # breaker state, today's counts, driver installed or not
@@ -330,7 +330,7 @@ extension is absent (verified 2026-08-18).
 Calls work regardless. A live test call under exactly that configuration reported
 `inboundFramesSent: 345`, `outboundFramesReceived: 341`, `bidirectionalAudio: true` and
 zero errors, because audio runs on the SIPSorcery DTLS-SRTP path
-(`docs/superpowers/specs/2026-03-27-gv-api-migration-design.md`) rather than the
+(`docs/archive/gv-call-path/2026-03-27-gv-api-migration-design.md`) rather than the
 extension's tabCapture relay, and answer/hangup go over SIP rather than DOM clicking.
 
 The flag is still passed so the command line matches the process the box runs today, but
@@ -439,7 +439,7 @@ cross-repo decision ADR `docs/architecture/decisions/2026-09-08-gv-bridge-ensure
 the exit code at 0 permanently. Their installed launcher re-probes with `pgrep` after exit 0
 (`radio-console-open:414`, `:473`), which should make the new outcome harmless to them. **They have not
 confirmed that.** The question is drafted at
-`docs/handoffs/2026-09-25-radioconsole-ensure-install-exit-code-question-DRAFT.md`. **Do not run this
+`docs/archive/radio-console/2026-09-25-radioconsole-ensure-install-exit-code-question-DRAFT.md`. **Do not run this
 runbook until Radio Console answers it.**
 
 **`--password-store` is not involved.** Neither the flag nor the scripts pass it. The deploy's hard gate

@@ -2,7 +2,7 @@
 """GV auto-relogin sign-in driver -- OWNER-WRITTEN. Skeleton to flesh out.
 
 Contract: docs/gv-relogin-driver-contract.md (read it in full; section numbers below refer to it).
-Page facts: docs/spikes/2026-09-09-gv-signin-cdp-recording.md (contract §8 summarises them).
+Page facts: docs/archive/gv-auth/2026-09-09-gv-signin-cdp-recording.md (contract §8 summarises them).
 
 How to use this skeleton
 ------------------------

@@ -2,7 +2,7 @@
 
 **Spec:** [`../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md`](../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md).
 Read it first. §5.1 (precedence: who acts when) is the heart of this plan.
-**Works beside:** [`gv-auto-relogin.md`](gv-auto-relogin.md) / PR #88, the primary path, resumed 2026-09-25 under an
+**Works beside:** [`gv-auto-relogin.md`](../archive/gv-auth/gv-auto-relogin.md) / PR #88, the primary path, resumed 2026-09-25 under an
 owner-written sign-in driver. **Builds on:** PR #90 (merged, `54d77ca`): `SignedOut` / `browser_signed_out`.
 **Date:** 2026-09-25 (revised the same day after owner decisions O1, O2 and O6). **Status:** planned, not started.
 

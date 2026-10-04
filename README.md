@@ -83,7 +83,7 @@ Edit `src/RotaryPhoneController.WebUI/appsettings.json` to configure your setup.
 
 ## Future Roadmap (2026)
 
-See `2026_PROJECT_PLAN.md` for the detailed migration roadmap to Windows NUC and TypeScript UI.
+See `docs/archive/project-history/2026_PROJECT_PLAN.md` for the detailed migration roadmap to Windows NUC and TypeScript UI.
 
 ## HT801 Configuration
 

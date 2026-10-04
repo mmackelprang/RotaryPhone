@@ -139,7 +139,7 @@ public class PhoneController : ControllerBase
         // The response reports the POST-CONDITION — the failure is acknowledged — NOT whether this
         // particular call was the one that changed it. So a repeat ack and an ack of an absent
         // failure are both 200 {"acknowledged": true}, because
-        // docs/handoffs/radioconsole-bell-failure-reply.md §5 told Radio Console exactly that and
+        // docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 told Radio Console exactly that and
         // invited them to "retry freely on a flaky network". The delta is still worth knowing, but it
         // belongs in the log, not on a wire contract a consumer was told is a post-condition.
         var stateChanged = _bellFailureTracker.Acknowledge(phoneId);

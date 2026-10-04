@@ -135,7 +135,7 @@ THREAD_ROOT_DELIVERED=0
 # breaker's state competed in that same case, then once it tripped the condition would
 # stop changing and a genuine session death that followed would produce NO MESSAGE —
 # the alarm going mute in the state it exists for, correlated with the automation
-# breaking. See docs/plans/gv-auto-relogin.md §0.9.
+# breaking. See docs/archive/gv-auth/gv-auto-relogin.md §0.9.
 LAST_POSTED_RELOGIN_STATE=""
 # Which trip was posted. A human --reset followed by a fresh trip inside one 5-minute
 # poll never shows this script an ARMED state, so "still TRIPPED" alone would swallow

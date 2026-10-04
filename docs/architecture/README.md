@@ -17,9 +17,9 @@ System-design records for cross-PR / cross-service decisions. Single-PR feature 
 
 - `docs/HT801-ADDRESS.md` — the HT801 address: every location it can appear, the change procedure, and
   which verification signals are trustworthy (read alongside the 2026-07-29 ADR).
-- `docs/api-research/` — GV signaler protocol + remaining-work notes.
+- `docs/api-research/` — GV signaler protocol notes (the March remaining-work list moved to `docs/archive/gv-call-path/remaining-work.md`).
 - `docs/research/gv-protocol-notes.md` — GV SIP-over-WebSocket + SAPISIDHASH/PSIDTS auth reference.
-- `docs/superpowers/specs/2026-03-27-gv-api-migration-design.md` — the GV API migration design (note: its
+- `docs/archive/gv-call-path/2026-03-27-gv-api-migration-design.md` — the GV API migration design (note: its
   `GvSmsClient`/`GvThreadClient` file list was aspirational; those were never built — see the ADR above).
 - `docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md` — RotaryPhone ↔ RadioConsole boundary contract
   (BT/audio ownership + the shared REST/SignalR integration surface).

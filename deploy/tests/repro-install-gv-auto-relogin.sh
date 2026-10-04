@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-gv-auto-relogin.sh against a fake HOME and a fake shipped tree. No box, no
 # systemd: `systemctl` is a stub on PATH that records its arguments, so "the timer was not
-# enabled" is an observed absence, not an inference. docs/plans/gv-auto-relogin.md Task 15.
+# enabled" is an observed absence, not an inference. docs/archive/gv-auth/gv-auto-relogin.md Task 15.
 #
 # ⭐ Negative controls at the end: mutants of the installer, each caught by a named case.
 set -uo pipefail

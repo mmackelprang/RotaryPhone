@@ -1,6 +1,6 @@
 # Plan — GV session alarm: transport an existing, already-correct signal to a human
 
-**Spec:** [`../superpowers/specs/2026-09-09-gv-session-alarm-design.md`](../superpowers/specs/2026-09-09-gv-session-alarm-design.md) —
+**Spec:** [`2026-09-09-gv-session-alarm-design.md`](2026-09-09-gv-session-alarm-design.md) —
 read it first. Its §3 "Verified foundations" table and its §2 non-goals are settled and are **not** re-opened here.
 **Date:** 2026-09-09. **Status:** planned, not started.
 **Branch:** `feat/gv-session-alarm`.

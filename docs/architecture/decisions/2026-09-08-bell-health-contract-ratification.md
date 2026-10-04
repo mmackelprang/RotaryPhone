@@ -6,7 +6,7 @@
 - **Author:** Architect
 - **Request being answered:** RadioConsole `docs/design-handoffs/HANDOFF-bell-failure-surfacing.md` §6,
   tracked by them as punch-list **`XR-5`** and as `design/FUTURE-WORK.md` §13.
-- **Reply already produced:** `docs/handoffs/radioconsole-bell-failure-reply.md` (commit `654a1a8`).
+- **Reply already produced:** `docs/archive/radio-console/radioconsole-bell-failure-reply.md` (commit `654a1a8`).
 - **Related ADR:** `docs/architecture/decisions/2026-07-29-ht801-learned-registrar-binding.md` — the
   addressing half. This ADR depends on it heavily (§4).
 - **Baseline:** `main` @ `3c2c892`. All code citations are as-built on that commit.
@@ -380,7 +380,7 @@ where a ~5 s window remains and their §7f handling (record the sticky note, no 
   machinery §4.4 converges onto.
 - `docs/architecture/decisions/2026-06-20-gv-markread-readstate-contract.md` — the cross-service contract
   convention this ADR follows.
-- `docs/handoffs/radioconsole-bell-failure-reply.md` — the delivered reply, to be amended per §4/§6/§7.
+- `docs/archive/radio-console/radioconsole-bell-failure-reply.md` — the delivered reply, to be amended per §4/§6/§7.
 - `docs/HT801-ADDRESS.md` — why the configured address is not a trustworthy verification signal.
 - `docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md` — **no Change Log row needed for this ADR.** It is
   not a BT/audio ownership change and it changes no wire shape. If §4.4 ships, one row is warranted

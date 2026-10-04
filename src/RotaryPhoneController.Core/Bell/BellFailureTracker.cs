@@ -71,7 +71,7 @@ public interface IBellFailureTracker
 ///
 /// <para>
 /// <b>The overriding reason, though, is that we already promised this in writing.</b>
-/// docs/handoffs/radioconsole-bell-failure-reply.md §5 tells RadioConsole the acknowledged flag
+/// docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 tells RadioConsole the acknowledged flag
 /// "survives a service restart" and that their Q4 concern — a nightly-restarting kiosk resurrecting
 /// a note the operator already dismissed — "is addressed". It was not; the tracker was in-memory.
 /// Given the choice between retracting the claim and making it true, the owner chose to make it
@@ -199,7 +199,7 @@ public sealed class BellFailureTracker : IBellFailureTracker
                 // best-effort by design (it swallows I/O errors so a bell-failure recording can never
                 // be broken by a full disk), so the flip below can succeed in memory while the write
                 // never lands. A repeat ack is exactly the retry the published contract invites —
-                // docs/handoffs/radioconsole-bell-failure-reply.md §5 tells Radio Console to "retry
+                // docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 tells Radio Console to "retry
                 // freely on a flaky network" — and the failure most likely to accompany a dropped
                 // response is the one that also lost the write. Re-persisting here is what lets that
                 // retry REPAIR it, instead of no-opping and leaving a restart to resurrect a note the
