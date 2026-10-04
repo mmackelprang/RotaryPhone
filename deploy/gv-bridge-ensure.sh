@@ -82,6 +82,10 @@ CHROME_ARGS+=(
   # take effect under X11. It changes nothing about stacking or focus: the window
   # stays behind the kiosk. Pinned by deploy/tests/check-bridge-chrome-flags.sh.
   --disable-backgrounding-occluded-windows
+  # The nightly restart kills Chrome and a reboot SIGTERMs it, so every launch
+  # looked like crash recovery and showed a "Restore pages?" dialog. The bridge
+  # always opens BRIDGE_URL fresh, so there is nothing to restore (2026-10-04).
+  --hide-crash-restore-bubble
   "--window-size=800,600"
   # A no-op under Wayland (the compositor places the window); retained because
   # the running process carries it. Off-screen placement is not what keeps this

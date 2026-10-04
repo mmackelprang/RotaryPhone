@@ -111,6 +111,14 @@ if [ -d "$EXT_SRC" ]; then
         fi
     done
     if command -v gsettings >/dev/null 2>&1; then
+        # With disable-user-extensions=true GNOME loads NO user extension, this one included
+        # (it was true on radio, origin unknown; owner ruling 2026-10-04: keep it false,
+        # announced in the boundary doc). Today this is the only user extension on the box.
+        if [ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" = "true" ]; then
+            gsettings set org.gnome.shell disable-user-extensions false \
+                && log "set disable-user-extensions=false (was true) -- takes effect at next login" \
+                || log "⚠ could not set disable-user-extensions=false -- the extension will not load"
+        fi
         enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo '@as []')"
         case "$enabled" in
             *"'${EXT_UUID}'"*) log "extension already enabled" ;;
