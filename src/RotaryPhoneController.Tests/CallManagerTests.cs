@@ -123,6 +123,71 @@ public class CallManagerTests
     }
 
     [Fact]
+    public void TryDeclineRinging_WhenRinging_TearsDownToIdle_NotAnswered()
+    {
+        _callManager.SimulateIncomingCall();
+
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.True(declined);
+        Assert.Equal(CallState.Ringing, state);
+        Assert.Equal(CallState.Idle, _callManager.CurrentState);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.AtLeastOnce);
+        _mockCallHistory.Verify(x => x.UpdateCallHistory(It.Is<CallHistoryEntry>(
+            e => e.AnsweredOn == CallAnsweredOn.NotAnswered && e.EndTime != null)), Times.Once);
+    }
+
+    [Fact]
+    public void TryDeclineRinging_WhenInCall_RefusesAndLeavesCallUp()
+    {
+        _callManager.SimulateIncomingCall();
+        _callManager.HandleHookChange(true); // handset lifted first
+
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.False(declined);
+        Assert.Equal(CallState.InCall, state);
+        Assert.Equal(CallState.InCall, _callManager.CurrentState);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.Never);
+        _mockBluetoothAdapter.Verify(x => x.TerminateCallAsync(), Times.Never);
+    }
+
+    [Fact]
+    public void TryDeclineRinging_WhenIdle_Refuses()
+    {
+        var declined = _callManager.TryDeclineRinging(out var state);
+
+        Assert.False(declined);
+        Assert.Equal(CallState.Idle, state);
+        _mockSipAdapter.Verify(x => x.CancelPendingInvite(), Times.Never);
+    }
+
+    [Fact]
+    public async Task TryDeclineRinging_WhileAnswerInProgress_WaitsThenRefuses()
+    {
+        // Deterministic: freeze AnswerCall mid-flight (state still Ringing) and prove a decline
+        // arriving then cannot act until the answer finishes, and then refuses. Without the lock
+        // the decline would see Ringing and tear down the call being answered.
+        var answerEntered = new ManualResetEventSlim();
+        var releaseAnswer = new ManualResetEventSlim();
+        _mockBluetoothAdapter.Setup(x => x.AnswerCallAsync(It.IsAny<AudioRoute>()))
+            .Returns(() => { answerEntered.Set(); releaseAnswer.Wait(); return Task.FromResult(true); });
+        _callManager.SimulateIncomingCall();
+
+        var answer = Task.Run(() => _callManager.AnswerCall());
+        Assert.True(answerEntered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Equal(CallState.Ringing, _callManager.CurrentState); // mid-answer
+
+        var decline = Task.Run(() => _callManager.TryDeclineRinging(out _));
+        Assert.False(decline.Wait(TimeSpan.FromMilliseconds(200)), "decline must block behind the answer");
+
+        releaseAnswer.Set();
+        await answer;
+        Assert.False(await decline);
+        Assert.Equal(CallState.InCall, _callManager.CurrentState);
+    }
+
+    [Fact]
     public void Bluetooth_OnIncomingCall_ShouldTriggerRinging()
     {
         // Act

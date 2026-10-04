@@ -354,6 +354,8 @@ Each names an outcome and how it is observed. None is satisfied by "the componen
 
 ## 10. Phase 2 — remote re-auth (scoped, not designed)
 
+> **Designed 2026-09-25:** [`2026-09-25-gv-reachable-reauth-design.md`](2026-09-25-gv-reachable-reauth-design.md).
+
 Today's outage measured two friction points that together turned a 2-minute fix into 2h10m:
 
 1. **The bridge window sits behind the console window** (stacking order, not off-screen — the

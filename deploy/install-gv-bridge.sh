@@ -14,8 +14,8 @@
 # SAFETY GATE: before installing anything, the new ensure script's --print-config Chrome flags
 # must match the command line of the bridge Chrome running now. A mismatch means the new script
 # would launch Chrome differently, so the install is refused and ~/bin is left untouched.
-# If no bridge Chrome is running there is nothing to compare against; the install is refused
-# unless --skip-flag-check is given.
+# --skip-flag-check overrides the gate (after reviewing the printed diff), and is also required
+# when no bridge Chrome is running, since there is then nothing to compare against.
 #
 # Every replaced file is backed up as <name>.bak-<timestamp>. Rollback: copy those back.
 #
@@ -61,9 +61,14 @@ if [ -n "$pid" ]; then
     if [ "$want" != "$have" ]; then
         echo "[gv-bridge] new script's Chrome flags differ from the running bridge (pid ${pid}):" >&2
         diff <(echo "$have") <(echo "$want") | sed 's/^/[gv-bridge]   /' >&2 || true
-        fail "REFUSING to install: the new ensure script would launch Chrome differently. ~/bin untouched."
+        if [ "$SKIP_FLAG_CHECK" -eq 1 ]; then
+            log "flag check OVERRIDDEN (--skip-flag-check): installing despite the difference above"
+        else
+            fail "REFUSING to install: the new ensure script would launch Chrome differently. Review the diff; rerun with --skip-flag-check to accept it. ~/bin untouched."
+        fi
+    else
+        log "flag check: new ensure script launches Chrome with the running bridge's exact flags"
     fi
-    log "flag check: new ensure script launches Chrome with the running bridge's exact flags"
 elif [ "$SKIP_FLAG_CHECK" -eq 1 ]; then
     log "flag check SKIPPED (--skip-flag-check): no running bridge to compare against"
 else

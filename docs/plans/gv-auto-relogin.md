@@ -1,5 +1,9 @@
 # Plan — GV auto-relogin: automate the routine case, and stop hard when it stops being routine
 
+> **Resumed 2026-09-25 under an owner-written sign-in driver.** See PR #88 and `docs/gv-relogin-driver-contract.md`
+> (being written on #88). The human fallback when auto-relogin cannot recover is
+> [`gv-reachable-reauth.md`](gv-reachable-reauth.md).
+
 **Spec:** [`../superpowers/specs/2026-09-09-gv-auto-relogin-design.md`](../superpowers/specs/2026-09-09-gv-auto-relogin-design.md) —
 read it first. Its §2 prerequisites (no 2FA, dedicated account) and its §5 placement rationale are settled and
 are **not** re-opened here.
