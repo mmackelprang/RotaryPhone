@@ -971,13 +971,18 @@ $alarmDriftExit = $LASTEXITCODE
 if ($alarmInstallExit -ne 0) { throw "the GV session alarm installer failed (exit $alarmInstallExit) -- the drift report above states what is actually on the box" }
 if ($alarmDriftExit -ne 0) { throw "the alarm's installed state does not match what was shipped (exit $alarmDriftExit) -- see the drift report above" }
 
+# --- GV bridge launch scripts: install into ~/bin, then report ---
+# Decision 4 (spec §8, owner ruling 2026-10-04): gv-bridge-ensure.sh WAITS on a held lock
+# rather than exiting 0, so Radio Console's KIOSK-2 launcher still sees only today's two
+# outcomes. install-gv-bridge.sh refuses (leaving ~/bin untouched) unless the new script
+# launches Chrome with the running bridge's exact flags. NOT fatal, like the relogin group:
+# a refusal must be LOUD without aborting a deploy that is otherwise fine.
+ssh $SshTarget "bash ${TargetPath}/deploy/install-gv-bridge.sh"
+$bridgeInstallExit = $LASTEXITCODE
 ssh $SshTarget "bash ${TargetPath}/deploy/check-installed-drift.sh --group bridge --ship-dir '${TargetPath}/deploy'"
 $bridgeDriftExit = $LASTEXITCODE
-# ⛔ NOT a throw. ~/bin/gv-bridge-ensure.sh's staleness is real -- measured 2026-09-09, the
-# installed copy is from Aug 18 -- but it is not this deploy's to fix, and fixing it is
-# blocked on a cross-repo exit-code decision (spec §8, §11 decision 4). Aborting here would
-# block every deploy on that decision. It must be LOUD and it must not be fatal.
-if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal; blocked on the gv-bridge-ensure.sh exit-code decision, spec §11 decision 4.)" -ForegroundColor Yellow }
+if ($bridgeInstallExit -ne 0) { Write-Host "  the GV bridge installer FAILED or REFUSED (exit $bridgeInstallExit) -- see above; ~/bin was left as it was. Not fatal." -ForegroundColor Red }
+if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal.)" -ForegroundColor Yellow }
 
 # --- GV auto-relogin: install (timer DISABLED, breaker never armed) and report ---
 # docs/plans/gv-auto-relogin.md Task 15. Safe on every deploy: the installer never enables

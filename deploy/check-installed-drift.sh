@@ -77,6 +77,7 @@ case "$GROUP" in
     PAIRS=(
       "gv-bridge-ensure.sh|${HOME}/bin/gv-bridge-ensure.sh"
       "gv-bridge-restart.sh|${HOME}/bin/gv-bridge-restart.sh"
+      "gv-keyring-unlock.py|${HOME}/bin/gv-keyring-unlock.py"
     ) ;;
   relogin)
     PAIRS=(
