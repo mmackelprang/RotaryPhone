@@ -73,8 +73,9 @@ extension bridge, a real Bluetooth HFP voice path) are described in [docs/archiv
 **Bluetooth (HFP and PBAP)**
 
 - BlueZ HFP support, PBAP caller-name resolution, multi-phone pairing UI and an SCO audio bridge
-  (#8, #10, #11). On the production box the Bluetooth adapter runs as a mock
-  (`UseActualBluetoothHfp: false`); calls go over Google Voice.
+  (#8, #10, #11). On the production box the Bluetooth stack runs, but no phone is
+  connected over HFP on RotaryPhone's adapter (`hci1`): the phone is paired with Radio
+  Console's adapter, and the cross-adapter guard refuses it. Calls go over Google Voice.
 
 **Deploy and operations**
 
