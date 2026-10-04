@@ -19,6 +19,9 @@ recordings, list/read SMS threads, real-time push of new messages). **SMS send i
 yet** (held for owner review) — so build send/reply behind a feature flag and stub the call.
 You can build the full read experience today.
 
+> **Correction 2026-10-04:** SMS send has since shipped (PR #60, disabled by default). See the
+> correction under "What is NOT built yet" below.
+
 Develop on a branch and open a PR (per the repo's workflow). Coordinate on the contract:
 if anything below is ambiguous against live responses, flag it rather than guessing — some
 GV field *values* are still being verified (see "Provisional data" below), though the DTO
@@ -158,6 +161,22 @@ hub.On<VoicemailItemDto>("VoicemailReceived", OnVoicemailReceived); // new voice
 ---
 
 ## What is NOT built yet — stub/flag these
+
+> **Correction 2026-10-04.** Items 1 and 2 below are out of date; the text is kept as originally
+> delivered. Both endpoints now exist, and both ship **disabled by default**:
+>
+> - **SMS send** shipped in RotaryPhone PR #60: `POST /api/gvbridge/sms/send`
+>   (`src/RotaryPhoneController.GVBridge/Api/GvSmsController.cs`). Request body
+>   `{ "toNumber": "...", "text": "...", "threadId": "..." | null, "clientCorrelationId": "..." | null }`;
+>   response `{ queued, code, threadId, error, message }`. While `GVBridge:EnableSmsSend` is `false`
+>   (the default) it returns **409** with `code: "send_disabled"` and makes no Google call. Other codes:
+>   `rate_limited` (429), `invalid_text` and `invalid_number` (400), `queued` (200).
+> - **Mark-read** shipped in PR #64 (Path A of
+>   [the mark-read reply](radioconsole-gv-markread-reply.md)):
+>   `POST /api/gvbridge/voicemail/{id}/read` and `POST /api/gvbridge/sms/threads/{threadId}/read`, body
+>   `{ "isRead": true }`. While `GVBridge:EnableMarkRead` is `false` (the default) both return **409**
+>   `markread_disabled`. Delete is still not built.
+> - Item 3 (the inter-service auth gate, PR #61) is unchanged.
 
 1. **SMS send/reply.** No `POST /api/gvbridge/sms/send` endpoint exists yet (it's specified but
    held for owner review). **Build the compose/reply/Retry UI behind a feature flag**, and put
