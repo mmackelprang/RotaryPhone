@@ -57,6 +57,16 @@ see [the resolved entry below](#caller-hang-up-while-ringing-was-not-noticed-res
 closing reply has been sent to Radio Console, whose board still cites the defect as a live risk. The
 hourly WebSocket exception from the same report is still open (above), so a reply should say so.
 
+### One GVTrunk test fails on Windows only (open, pre-existing)
+
+**Status:** Open. Test environment only; the deployed Linux build is unaffected.
+
+`GVTrunkAdapterTests.StartListening_SetsIsListeningTrue` fails under the Windows .NET 10 SDK with
+`Unable to bind socket using end point 127.0.0.1:15061`. It passes on Linux (`net10.0`). Observed
+2026-10-04 during the release verification, and it **fails on unmodified `main` too**, so no release
+change caused it. Port 15061 is not in Windows' excluded port ranges, and no process held it after the run.
+Not yet diagnosed.
+
 ## Open work
 
 - **Print the post-deploy `BluetoothAdapter` value** (deploy-tooling plan Task 6, never started). After
