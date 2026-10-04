@@ -52,12 +52,14 @@ profile="$(bash "${DEPLOY_DIR}/gv-bridge-ensure.sh" --print-config | sed -n 's/^
 # The browser process carries the profile marker and no --type= (renderers/helpers do).
 pid=""
 for p in $(pgrep -f "user-data-dir=${profile}" || true); do
-    if [ -r "/proc/${p}/cmdline" ] && ! tr '\0' '\n' < "/proc/${p}/cmdline" | grep -q '^--type='; then
+    if [ -r "/proc/${p}/cmdline" ] && ! tr '\0' ' ' < "/proc/${p}/cmdline" | tr -s ' ' '\n' | grep -q '^--type='; then
         pid="$p"; break
     fi
 done
 if [ -n "$pid" ]; then
-    have="$(tr '\0' '\n' < "/proc/${pid}/cmdline" | tail -n +2 | sed '/^$/d' | sort)"
+    # Chrome rewrites its process title, so cmdline is usually ONE space-joined string
+    # rather than NUL-separated argv. Split on both; no bridge flag contains a space.
+    have="$(tr '\0' ' ' < "/proc/${pid}/cmdline" | tr -s ' ' '\n' | tail -n +2 | sed '/^$/d' | sort)"
     if [ "$want" != "$have" ]; then
         echo "[gv-bridge] new script's Chrome flags differ from the running bridge (pid ${pid}):" >&2
         diff <(echo "$have") <(echo "$want") | sed 's/^/[gv-bridge]   /' >&2 || true
