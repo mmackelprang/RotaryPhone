@@ -11,7 +11,7 @@ namespace RotaryPhoneController.GVBridge.Tests.Sip;
 /// (<see cref="GvSipTransport.AcceptIncomingCallAsync"/>). Holding the 200 OK is what makes Google
 /// Voice send a proper SIP CANCEL when the cell caller hangs up during the ring (auto-answering
 /// suppressed that CANCEL). The held 200 OK is sent only on handset-lift; a pre-200 hangup declines
-/// with a 480, never a BYE.
+/// with a 603 Decline, never a BYE.
 ///
 /// PR #40 REGRESSION GUARD: a pre-200 CANCEL (or BYE) during the ring marks the session Cancelled IN
 /// PLACE — it is NOT removed from _activeCalls. A slightly-late AcceptIncomingCallAsync therefore
@@ -206,9 +206,9 @@ public class GvSipTransportInboundDeferredAnswerTests
         Assert.Null(terminated);
     }
 
-    // 5) HangupAsync on a Ringing session -> 480 sent, NOT a BYE (no confirmed dialog to BYE).
+    // 5) HangupAsync on a Ringing session -> 603 sent, NOT a BYE (no confirmed dialog to BYE).
     [Fact]
-    public async Task HangupAsync_OnRingingSession_Sends480_NotBye()
+    public async Task HangupAsync_OnRingingSession_Sends603_NotBye()
     {
         var fake = new FakeSipWebSocketChannel { OnSend = RegisterAutoResponder() };
         await using var transport = await RegisteredTransportWithRingingCallAsync(fake);
@@ -216,14 +216,14 @@ public class GvSipTransportInboundDeferredAnswerTests
         await transport.HangupAsync(TestCallId);
 
         var decline = await WaitForAsync(() => fake.Sends.Any(s =>
-            s.StartsWith("SIP/2.0 480 Temporarily Unavailable", StringComparison.Ordinal) &&
+            s.StartsWith("SIP/2.0 603 Decline", StringComparison.Ordinal) &&
             s.Contains($"Call-ID: {TestCallId}", StringComparison.Ordinal)));
-        Assert.True(decline, "expected a 480 Temporarily Unavailable for the declined ringing call");
+        Assert.True(decline, "expected a 603 Decline for the declined ringing call");
 
-        // The 480 must echo the INVITE's Via stack (both Via headers) and carry the mandatory
+        // The 603 must echo the INVITE's Via stack (both Via headers) and carry the mandatory
         // To/From/CSeq per RFC 3261 §8.2.6 (so GV accepts it and clears the transaction).
         var declineMsg = fake.Sends.First(s =>
-            s.StartsWith("SIP/2.0 480 Temporarily Unavailable", StringComparison.Ordinal) &&
+            s.StartsWith("SIP/2.0 603 Decline", StringComparison.Ordinal) &&
             s.Contains($"Call-ID: {TestCallId}", StringComparison.Ordinal));
         Assert.Contains("Via: SIP/2.0/WSS proxy.voice.google.com;branch=z9hG4bK-invite-1", declineMsg, StringComparison.Ordinal);
         Assert.Contains("Via: SIP/2.0/WSS edge.voice.google.com;branch=z9hG4bK-edge-9", declineMsg, StringComparison.Ordinal);
