@@ -1,9 +1,110 @@
 # Known Issues
 
-## 🔴 ACTIVE OUTAGE — the box's Chrome Google Voice session is signed out (2026-08-01 19:36 EDT)
+**Last updated:** October 4, 2026
 
-**Status:** 🔴 **OPEN — needs a human.** Nothing in the service can fix this; it needs an **owner re-login
-at `voice.google.com` in the box's Chrome**. Discovered while deploying the canonical post-merge B2 build.
+Open issues and open work come first. Resolved entries follow and are kept as a record of what went
+wrong and why; they describe the system as it was at the time.
+
+For operating the box (deploy, bridge, keyring, diagnostics), see
+[docs/SETUP-GVBridge.md](SETUP-GVBridge.md).
+
+## Open issues
+
+### Declining a call stops the rotary ringer, but the cell phone keeps ringing (accepted 2026-10-04)
+
+**Status:** Accepted limitation (owner decision, 2026-10-04).
+
+`POST /api/phone/decline` stops the HT801 ringing (a `CANCEL` to the HT801), rejects RotaryPhone's
+Google Voice leg with `603 Decline` (PR #96; it was `480` before), and returns the call to `Idle`.
+Google Voice rings the rotary phone and the linked cell phone as separate legs, and a real-call test
+(2026-10-04) showed that GV acknowledges the `603` but **keeps ringing the cell** until its own
+no-answer timer sends the caller to voicemail. Nothing RotaryPhone can send on its own leg has been shown
+to stop the cell. `declined: true` therefore means "the rotary stopped ringing", not "the call was
+rejected everywhere".
+
+Not pursued: capturing what Google Voice's own web client sends when it declines, to see whether that
+stops the cell. See
+[`docs/prompts/2026-10-04-radioconsole-decline-on-cell-reply.md`](prompts/2026-10-04-radioconsole-decline-on-cell-reply.md).
+
+### HT801 admin password in git history (accepted risk, 2026-10-04)
+
+**Status:** Accepted risk (owner decision, 2026-10-04).
+
+The HT801's admin password was committed to this public repository and stayed in the tracked files until
+2026-10-04, when it was removed. It remains in the git history. The owner chose not to rotate the
+password and not to rewrite history. The HT801 is reachable only from the box, over its point-to-point
+link (see [HT801-ADDRESS.md](HT801-ADDRESS.md)). The box keeps its real value in its own
+`appsettings.Production.json`, which the deploy never ships.
+
+### The GV SIP WebSocket receive loop throws about once an hour (open, no fix recorded)
+
+**Status:** Open. Reported by Radio Console on 2026-09-11; no investigation or fix recorded.
+
+`GvSipWebSocketChannel.ReceiveLoopAsync` threw seven times in six hours on 2026-09-10, mostly on the
+:21 minute (16:21, 17:21, 18:21, 19:21, 20:21, then 20:25 and 21:25). Radio Console's reading, from the
+journal only, was that it did not cause the missed caller hang-up reported the same day: the socket was
+working during that call. The reconnect logic should recover each drop, but whether these are clean
+reconnects has not been established, and no commit since has touched the channel. See
+[`docs/prompts/2026-09-11-radioconsole-inbound-hangup-never-arrives.md`](prompts/2026-09-11-radioconsole-inbound-hangup-never-arrives.md).
+
+### Radio Console was never told the 2026-09-11 inbound-hangup defect is fixed
+
+**Status:** Open (communication only).
+
+Radio Console's 2026-09-11 report (a caller who hangs up while the rotary phone is ringing is not
+noticed; the phone rings until the handset is lifted) was fixed by PR #95 (owner UAT green 2026-10-03;
+see [the resolved entry below](#caller-hang-up-while-ringing-was-not-noticed-resolved-2026-10-03)). No
+closing reply has been sent to Radio Console, whose board still cites the defect as a live risk. The
+hourly WebSocket exception from the same report is still open (above), so a reply should say so.
+
+## Open work
+
+- **Print the post-deploy `BluetoothAdapter` value** (deploy-tooling plan Task 6, never started). After
+  the restart, `Deploy-ToLinux.ps1` should print the `BluetoothAdapter` and `UseActualBluetoothHfp`
+  lines from the box's `appsettings.Production.json`, which should read `hci1`, so a config change that
+  crosses the Radio Console audio boundary shows in the deploy output. Plan:
+  [`docs/archive/deploy/deploy-tooling-honest-deploy-plan.md`](archive/deploy/deploy-tooling-honest-deploy-plan.md).
+- **Comment the watchdog-timer decision in `setup-gvbridge.sh`** (plan Task 11, never started). The
+  decision is made (option B: leave `gv-bridge-watchdog.timer` running while the units are reinstalled,
+  because `gv-bridge-ensure.sh` is idempotent and locked). Only the comment above
+  `systemctl --user daemon-reload` explaining it is missing.
+- **`gv-bridge-ensure.sh` exits 0 when a launch fails.** Recorded as still open in the 2026-10-04
+  boundary Change Log row. Changing it is a cross-repo contract change (see the exit-code ADR).
+- **Voicemail lookups only see the 100 most recent voicemails** (paging unverified), so a `404` from the
+  per-id voicemail routes means "not in the 100 most recent". Separately, a `404` from the voicemail
+  audio route does not distinguish "no such voicemail" from "found, but no media"; splitting them is a
+  Radio Console decision. See the 2026-09-08 voicemail entry below.
+- **The `RotateCookies` request shape is unconfirmed** for the voice.google.com origin. See the
+  2026-06-13 WebSocket entry below and `docs/research/gv-protocol-notes.md`.
+- **Auto-relogin has not yet signed in unattended.** The 2026-09-26 attempts failed on Google's password
+  page with the kiosk in front; the cause is undiagnosed. See
+  [SETUP-GVBridge.md](SETUP-GVBridge.md#rendering-a-covered-window-what-the-occlusion-flag-does-and-does-not-do).
+
+## Caller hang-up while ringing was not noticed (RESOLVED 2026-10-03)
+
+**Status:** Resolved by PR #95 (deferred answer v3), owner UAT green on the box 2026-10-03.
+
+**Symptom (was):** on an inbound Google Voice call, if the caller hung up before the rotary handset was
+lifted, the HT801 kept ringing.
+**Root cause:** the server answered the Google Voice leg (`200 OK`) as soon as the INVITE arrived, so GV
+treated the call as connected and never sent a `CANCEL` when the caller gave up.
+**Fix:** the server now sends `180 Ringing`, holds the `200 OK` until the handset is lifted, and answers a
+pre-answer `CANCEL` with `200` and `487`, which stops the HT801 promptly. v3 also fixed defects found
+live: the deferred answer triggering the "answered on the cell" path (which broke rotary hang-up),
+missing Record-Route echo in the `180` and `200`, the inbound route set in the wrong order, and in-dialog
+session-refresh re-INVITEs treated as new calls. Two earlier attempts (PR #40, PR #45) were reverted.
+Full history:
+[`docs/archive/gv-call-path/TODO-caller-cancel-deferred-answer.md`](archive/gv-call-path/TODO-caller-cancel-deferred-answer.md).
+
+## The box's Chrome Google Voice session was signed out (2026-08-01, RESOLVED)
+
+**Status:** Resolved. The owner signed in again, and SMS, voicemail and cookie extraction were verified
+working on 2026-08-18. The defect that turned it into a full outage (a refresh adopting dead cookies over
+a working set) was fixed on 2026-09-08 and deployed 2026-09-09 (see "Proposed hardening" below). Current
+recovery steps are in [SETUP-GVBridge.md](SETUP-GVBridge.md#when-the-google-session-is-signed-out).
+
+Original report: nothing in the service could fix this; it needed an owner re-login at
+`voice.google.com` in the box's Chrome. Discovered while deploying the canonical post-merge B2 build.
 
 **Impact is wider than SMS/voicemail.** SIP registration resolves its credentials through the same
 authenticated GV client, so a dead GV session takes the **whole phone** down, not just the data plane:
@@ -64,13 +165,13 @@ path**, and the box-side cron fires it **every 20 minutes**.
 > expired; the cron is now the mechanism most likely to *destroy* working credentials. Retiring it should
 > be prioritized accordingly. It remains a box-side change needing its own rollback story.
 
-> ⛔ **SUPERSEDED 2026-09-09 — DO NOT ACT ON THE PARAGRAPH ABOVE. Retiring the cron today would remove
+> **SUPERSEDED 2026-09-09 — DO NOT ACT ON THE PARAGRAPH ABOVE. Retiring the cron today would remove
 > the only mechanism ever observed doing this job.** Kept visible rather than deleted, because it was
 > correct when written and the reason it stopped being correct is the point.
 >
 > **Two things changed on 2026-09-09, both measured:**
 >
-> 1. **The hardening deployed.** The "✅ IMPLEMENTED 2026-09-08" gate below went live on the box at
+> 1. **The hardening deployed.** The "IMPLEMENTED 2026-09-08" gate below went live on the box at
 >    **15:28:50Z**. `refresh-from-browser` now validates the candidate against Google *before* adopting:
 >    on refusal it logs *"REJECTED a cookie set from {Source} — Google refused it. The working on-disk
 >    set was NOT overwritten"* (`GVApiAdapter.cs:900`) and returns without touching the good set.
@@ -83,11 +184,11 @@ path**, and the box-side cron fires it **every 20 minutes**.
 >    15:40:02Z event that cleared a `browserSessionStale: true` was **that cron slot** — not the
 >    in-process recovery ladder, and not the operator restart that coincided with it.
 >
-> ⚠ **The recovery ladder that is supposed to replace the cron has still NEVER been observed
+> **The recovery ladder that is supposed to replace the cron has still NEVER been observed
 > revalidating a stale browser session unattended.** Removing the cron would swap a mechanism proven to
 > work for one proven only to exist.
 >
-> ⚠ **And note what the 19 pre-deploy cron runs actually were.** Between 05:40 and 11:20 the box ran the
+> **And note what the 19 pre-deploy cron runs actually were.** Between 05:40 and 11:20 the box ran the
 > *unhardened* build, so each of those adoptions was the blind downgrade path. None caused harm because
 > Chrome's session stayed healthy — **that is luck, not design**, and it is the strongest argument for
 > the hardening rather than against the cron.
@@ -96,21 +197,21 @@ path**, and the box-side cron fires it **every 20 minutes**.
 > revalidating a stale session unattended** — which is a thing to *measure*, not assume. Until then the
 > cron is a validated, load-bearing mechanism, and this entry's original framing is stale.
 
-**Proposed hardening — ✅ IMPLEMENTED 2026-09-08**, five weeks after it was proposed here and **one day
+**Proposed hardening — IMPLEMENTED 2026-09-08**, five weeks after it was proposed here and **one day
 after the delay cost an 83-minute guest-facing outage.** All three rules below now hold, in both of the
 two places that persist cookies:
 
-- ✅ **Validate before adopting.** `GVApiAdapter.TryValidateCandidateAsync` adopts a candidate in memory,
+- **Validate before adopting.** `GVApiAdapter.TryValidateCandidateAsync` adopts a candidate in memory,
   probes it against Google, and persists **only** on success. It writes nothing itself — the caller does,
   and only on `true`.
-- ✅ **Keep a last-known-good set and roll back.** A failed probe restores the previous cookie set and the
+- **Keep a last-known-good set and roll back.** A failed probe restores the previous cookie set and the
   previous `_areCookiesValid`, so the adapter is never left holding credentials already proven bad.
-- ✅ **Never let an unvalidated refresh overwrite a validated set.** Both write paths are covered:
+- **Never let an unvalidated refresh overwrite a validated set.** Both write paths are covered:
   recovery rung 3 (`TryCdpRefreshAsync`) and — the one that actually ran for two days — the 20-minute
   cron's `GvCookieManager.SetCookiesAsync`, which used to save on its **first statement** and return
   `true` whenever `SwitchModeAsync` merely failed to throw.
 
-> ⚠ **Read this before deferring a LOW again.** This block was written on 2026-08-01 with the mechanism
+> **Read this before deferring a LOW again.** This block was written on 2026-08-01 with the mechanism
 > correctly diagnosed and the fix correctly specified, and was not built. On 2026-09-06 the same path
 > silently overwrote working credentials with dead ones every 20 minutes for two days; on 2026-09-08 it
 > combined with finding **L2** below to produce the outage. The cost of writing the fix was about a day.
@@ -119,7 +220,7 @@ two places that persist cookies:
 `CdpRefresh_WhenExtractedCookiesAreRejected_LeavesTheStoredGoodSetIntact` and
 `SetCookiesAsync_GoodCookiesHeld_DeadOnesOffered_ReturnsFalseAndKeepsTheGoodSet`.
 
-⚠ **Behaviour change for operators:** `POST /api/gvbridge/cookies/refresh-from-browser` now answers
+**Behaviour change for operators:** `POST /api/gvbridge/cookies/refresh-from-browser` now answers
 **502** (was **200**) when the browser session is stale, and the recovery procedure below therefore
 reports honestly instead of silently destroying the working set.
 
@@ -136,11 +237,18 @@ do **not** re-login. **500** means the disk, not Google.
 Verify `sipRegistered:true` and `/api/gvbridge/sms/threads` → 200.
 
 
-## ⚠️ OPEN — Deploying clobbers the box's `appsettings.Production.json`, including BT adapter config
+## Deploying clobbered the box's `appsettings.Production.json` (RESOLVED 2026-09-09)
 
-**Status:** 🔴 **OPEN** — recurs on **every** deploy that falls back to the tar path. Found during PR #72
-UAT (finding **L3**); the tester caught it and restored the file by hand.
-**Why this is the most dangerous item on the list:** the clobbered values include
+**Status:** Resolved by PR #84 (`fix/deploy-honest-status`), merged 2026-09-09. The tar path now
+excludes the file from the archive (`--exclude=./appsettings.Production.json` in
+`deploy/Deploy-ToLinux.ps1`), the rsync path already excluded it, and the Server project no longer
+copies it to the publish output (`CopyToPublishDirectory="Never"`). The deploy no longer touches the
+box's copy, so the manual backup-and-verify step is no longer needed. The one follow-up never
+built, printing the post-deploy `BluetoothAdapter` value, is listed under [Open work](#open-work).
+
+Original report: recurred on every deploy that fell back to the tar path. Found during PR #72 UAT
+(finding **L3**); the tester caught it and restored the file by hand.
+**Why this was considered the most dangerous item on the list (later corrected, see below):** the clobbered values include
 **`BluetoothAdapter: hci1`** and `UseActualBluetoothHfp`. **This crosses the Radio Console audio boundary**
 (`docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`) — a silent BT-config change on this side can break the
 *other* service's audio, and nothing in the deploy surfaces that it happened. It will happen again on the
@@ -163,7 +271,7 @@ The box's copy is **authoritative** (see `docs/HT801-ADDRESS.md`) and carries va
 does not: `EnableMarkRead`, the GV number (`GvPhoneNumber: +1XXXXXXXXXX` — redacted; this repo is public),
 and the HT801 address, in addition to the BT keys above.
 
-> ### ⛔ Correction 2026-09-09 — step 3's mechanism is wrong; the defect is not. Entry stays OPEN.
+> ### Correction 2026-09-09 — step 3's mechanism is wrong; the defect is not. (The entry stayed open until PR #84.)
 >
 > **Falsified twice: locally** (`deploy/tests/repro-tar-clobber.sh` case A) **and by a live deploy on the
 > box.** Step 3 above says `set -e -o pipefail` aborts the chain before the restore `mv` runs. That
@@ -185,7 +293,7 @@ and the HT801 address, in addition to the BT keys above.
 > - **Backup-side failure** (`repro-tar-clobber.sh` case **B1**). `cp -f … /tmp/rp-prod.bak` fails — no
 >   config on the box yet on a first deploy, `/tmp` unwritable, disk full — and is swallowed. The
 >   `[ -f ]` guard is nonetheless **true**, because a `rp-prod.bak` from an earlier run is still sitting
->   in `/tmp`, and the restore installs that **stale** content. ⛔ **This is the worst case:** the box
+>   in `/tmp`, and the restore installs that **stale** content. **This is the worst case:** the box
 >   does not get the repo template, which is at least a reviewable file in version control — it gets
 >   arbitrary config from a previous deploy, and the chain exits 0.
 > - **Restore-side failure** (case **B2**). The backup **succeeds**, and the restore `mv` is what fails —
@@ -193,7 +301,7 @@ and the HT801 address, in addition to the BT keys above.
 >   on the box and the backup is stranded in `/tmp`. **This is exactly the state PR #72 UAT found**
 >   (finding L3): clobbered config, backup still present.
 >
-> ⚠ **A note on how nearly this correction repeated the original error.** The implementation plan for
+> **A note on how nearly this correction repeated the original error.** The implementation plan for
 > this fix proposed a single case B, using a read-only parent directory, and attributed it to the
 > **backup** side. Measured, that fixture's `cp -f` exits **0** and it is the `mv` that fails — writing
 > to an already-existing writable file needs no write permission on the containing directory, only
@@ -207,18 +315,18 @@ and the HT801 address, in addition to the BT keys above.
 > the check is real but structurally blind. Tracked as Defect 4 in
 > [`docs/archive/deploy/deploy-tooling-honest-deploy-plan.md`](archive/deploy/deploy-tooling-honest-deploy-plan.md).
 >
-> ⚠ **And this is not a rare path.** `rsync` is absent from the deploying machine's PowerShell `PATH`, so
+> **And this is not a rare path.** `rsync` is absent from the deploying machine's PowerShell `PATH`, so
 > `Get-Command rsync` finds nothing and **every deploy from that machine takes the tar path.** Installing
 > rsync changes the default; it does not fix the fallback.
 >
-> ⭐ **The lesson, which is the part worth keeping.** The recorded explanation was written after the
+> **The lesson, which is the part worth keeping.** The recorded explanation was written after the
 > defect was correctly observed, and it was wrong. It stayed plausible for five weeks because it named a
 > real flag (`set -e`) doing a real thing (aborting a chain) in the wrong shell. Fixing what it described
 > — making the restore unconditional, or wrapping it in a `trap` — would have changed nothing and looked
 > like a fix. The chosen fix instead removes the file from the tar stream, so the property holds
 > whichever way the dance fails.
 >
-> ### ⛔ Second correction, same date — the BLAST RADIUS above is also wrong now
+> ### Second correction, same date — the BLAST RADIUS above is also wrong now
 >
 > This entry's headline, and the sentence *"the clobbered values include **`BluetoothAdapter: hci1`**
 > and `UseActualBluetoothHfp` … **This crosses the Radio Console audio boundary**"*, is **no longer
@@ -238,47 +346,39 @@ and the HT801 address, in addition to the BT keys above.
 > `MockBluetoothHfpAdapter` — a dead phone reported as a healthy deploy, which is harder to diagnose,
 > not easier.
 >
-> ⚠ **Kept as a correction rather than an edit, because the failure mode is the point:** anyone triaging
+> **Kept as a correction rather than an edit, because the failure mode is the point:** anyone triaging
 > a future clobber from the text above would go looking at BlueZ and WirePlumber and find nothing wrong.
 > The fix is right either way — the file must stay box-owned because the template **can** drift back to
 > `hci0`, not because it currently has.
 >
-> ### 📌 On merge: flip this entry
->
-> The status line below stays `🔴 OPEN` on the branch, deliberately — the defect is real until the fix
-> lands. **When `fix/deploy-honest-status` merges, this entry should move to RESOLVED and the "mandatory
-> manual step on every deploy" instruction must go with it**, since the deploy no longer touches the
-> file. Nothing automates that; it is a merge-checklist item.
-
-**Proposed fix (not done in PR #72 — deploy tooling, needs its own change + rollback story):**
+**Fix (scoped in PR #72, built in PR #84):**
 
 - **Primary:** add `--exclude=./appsettings.Production.json` to the `tar -C … -czf -` invocation in
   `deploy/Deploy-ToLinux.ps1`, matching what the rsync path already does. Then the file is never in the
   stream and the fragile backup/restore dance stops being load-bearing.
-  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 3. The dance is deleted, not repaired.
+  > **Adopted** — `fix/deploy-honest-status`, Task 3. The dance is deleted, not repaired.
 - **Belt and braces:** drop it from the publish output entirely — in
   `src/RotaryPhoneController.Server/RotaryPhoneController.Server.csproj`, exclude
   `appsettings.Production.json` from `Content` (or set `CopyToPublishDirectory=Never`), so no artifact
   can carry a config that only the box should own.
-  > ✅ **Adopted** — `fix/deploy-honest-status`, Task 5.
+  > **Adopted** — `fix/deploy-honest-status`, Task 5.
 - **Either way:** make the restore unconditional (run it in a `trap`/`||` rather than after a `set -e`
   command that can abort), and have the deploy **print** the post-deploy `BluetoothAdapter` value so a
   clobber is loud instead of silent.
-  > ⛔ **First half superseded** — the restore already runs; see the correction above. Making it
+  > **First half superseded** — the restore already runs; see the correction above. Making it
   > unconditional would have changed nothing, because in case B2 the `mv` runs and *fails*, and in case
   > B1 it runs and installs the wrong file. There is no version of "run the restore harder" that fixes
   > either.
-  > 📌 **Second half still open** — printing the post-deploy `BluetoothAdapter` value is Task 6 of the
+  > **Second half still open** — printing the post-deploy `BluetoothAdapter` value is Task 6 of the
   > plan and is **not** in `fix/deploy-honest-status`; its acceptance needs a live deploy to demonstrate.
 
-**Until it is fixed — mandatory manual step on every deploy:** back up
-`/opt/rotary-phone/appsettings.Production.json` **before** the sync and verify it **after**, explicitly
-confirming `BluetoothAdapter` is still `hci1`. Restore it by hand if it changed.
+**Before the fix (no longer needed):** the workaround was to back up
+`/opt/rotary-phone/appsettings.Production.json` before each deploy and verify it after.
 
 
 ## `/api/gvbridge/event` had no route, but two middlewares still special-cased it (RESOLVED 2026-09-09)
 
-**Status:** ✅ **Resolved by `fix/remove-gvbridge-event-carveouts`.** The owner's decision was to
+**Status:** **Resolved by `fix/remove-gvbridge-event-carveouts`.** The owner's decision was to
 **remove both carve-outs**. Recorded below as found, then the resolution — the finding's reasoning is
 kept intact rather than rewritten, because *why* it stayed invisible is the reusable part.
 
@@ -333,7 +433,7 @@ Pinned by four tests in `GvBridgeAuthMiddlewareTests` — `/api/gvbridge/event` 
 ungated when no key is set. Negative control: restoring the exemption fails exactly the two tests
 that pin its removal.
 
-⚠ **The published contract changed.** The boundary doc's Inter-service auth row previously promised
+**The published contract changed.** The boundary doc's Inter-service auth row previously promised
 Radio Console that this path *"stays open — never gated"*. That sentence is withdrawn, with a dated
 Change Log entry and a notice at
 `docs/archive/radio-console/2026-09-09-radioconsole-gvbridge-event-carveouts-removed.md`.
@@ -345,7 +445,7 @@ not have been there.
 
 ## Unmatched `/api/*` returned HTTP 200 with `index.html` instead of a 404 (RESOLVED 2026-09-09)
 
-**Status:** ✅ Resolved by `fix/api-404-not-spa-fallback`.
+**Status:** Resolved by `fix/api-404-not-spa-fallback`.
 **Symptom (was):** `Program.cs` ended in a bare `app.MapFallbackToFile("index.html")`, so **any**
 unmatched `/api/*` path returned **`200 text/html`** — the React SPA shell — to a caller that asked
 for JSON. A typo'd or wrong-shaped API path looked like a success.
@@ -364,7 +464,7 @@ GET /settings/audio      → 200 text/html         (SPA shell, unchanged)
 GET /api/contacts        → 200 application/json  (real routes unaffected)
 ```
 
-⚠️ **Do NOT "modernise" this to `UseStatusCodePagesWithReExecute("/not-found")`.** The .NET 10
+**Do NOT "modernise" this to `UseStatusCodePagesWithReExecute("/not-found")`.** The .NET 10
 template ships it and current Microsoft docs steer you toward it, but it re-executes into the SPA
 pipeline and gives every `/api/*` 404 an **HTML body** — this same defect back through the front
 door, **with every test still green.** Flagged by Radio Console's own investigation before we hit it.
@@ -379,7 +479,7 @@ sat in Radio Console's own archive the whole time. Full retraction and the corre
 `docs/handoffs/2026-09-08-radioconsole-{bell-persistence-and-404,incident-and-corrections}.md` and
 `docs/archive/radio-console/2026-09-08-radioconsole-ack-2-and-three-rows.md`.
 
-⚠️ **Two pre-existing verification steps changed meaning** and were annotated in place:
+**Two pre-existing verification steps changed meaning** and were annotated in place:
 `docs/archive/gv-auth/gv-crossrepo-xr2-verify-and-xr6-blackout-404.md` A7 (now expects `404 application/json`,
 not `200 text/html`) and `docs/plans/build-stamp-and-deploy-verification.md` P2, **which this fix
 silently weakened** — it detected an unregistered route by content-type alone, and a missing route
@@ -387,7 +487,7 @@ now answers `404 application/json`, satisfying its PASS condition. It now assert
 
 ## Voicemail routes 404 a recording that exists, during a GV auth blackout (RESOLVED 2026-09-08)
 
-**Status:** ✅ Resolved by the XR-6 PR (`fix/gv-voicemail-blackout-404`).
+**Status:** Resolved by the XR-6 PR (`fix/gv-voicemail-blackout-404`).
 **Symptom (was):** During an auth blackout, `GET /api/gvbridge/voicemail/{id}/audio` answered
 **`404 "Voicemail {id} has no recording"`** for a recording that exists and plays fine minutes later.
 `GET /api/gvbridge/voicemail/{id}` and `POST /api/gvbridge/voicemail/{id}/read` had the same defect.
@@ -421,11 +521,11 @@ all want the same treatment:**
 | `GetItem` | **502** on `!Succeeded` | Same defect, same remedy |
 | `GetAudio` | **502** on `!Succeeded` | The reported bug |
 | `MarkRead` step 2 (pre-write lookup) | **502** on `!Succeeded` | Same defect; 404s before any write is attempted |
-| `MarkRead` step 5 (post-write re-read) | **deliberately still 200** | ⚠️ The write to Google **already succeeded**. A 502 here would tell Radio Console a real state change did not happen, and they would reconcile away a change that is real — a worse lie than a marginally stale DTO. The `with { IsRead = … }` already carries the applied truth. **This is the one call site where `!Succeeded` must NOT become a 502**; it has a pinning test and an in-source comment so it is not "fixed" later. |
+| `MarkRead` step 5 (post-write re-read) | **deliberately still 200** | The write to Google **already succeeded**. A 502 here would tell Radio Console a real state change did not happen, and they would reconcile away a change that is real — a worse lie than a marginally stale DTO. The `with { IsRead = … }` already carries the applied truth. **This is the one call site where `!Succeeded` must NOT become a 502**; it has a pinning test and an in-source comment so it is not "fixed" later. |
 
 **Resulting contract:** `502` = *"we could not look."* `404` = *"we looked and it is not there."*
 
-⚠️ **The 404 half is bounded at the 100 most recent voicemails, and this is still open.**
+**The 404 half is bounded at the 100 most recent voicemails, and this is still open.**
 `FindNodeAsync` requests `count: 100` with no page token, and `GvThreadClient.ListRawAsync`
 **deliberately ignores** a page token because the paging field position is UNVERIFIED (it logs a
 warning rather than guess and silently re-read page 1 forever). So a voicemail older than the 100th
@@ -460,7 +560,7 @@ gap that caused it.
 
 ## GV SMS/voicemail 502s in a repeating ~9-minute dead window (RESOLVED 2026-08-01)
 
-**Status:** ✅ Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`), merged 2026-08-01.
+**Status:** Resolved by the B2 auth-blackout PR (**#72**, `fix/gv-auth-blackout`), merged 2026-08-01.
 **Live on-box soak PASSED** — 932 HTTP requests over ~88 minutes, **zero 502s, zero non-200s**, against a
 pre-fix baseline of 15/49 (31%) 502s for the same shape. 6 of 7 acceptance criteria verified by
 measurement, 1 partial, 0 failed. See "Verified live" and "Open verification items" below.
@@ -557,7 +657,7 @@ after a variable cooldown. This was an **auth-freshness** defect. Google's rotat
   of the old "test inside a healthy window" discipline *is* the acceptance criterion.
 - `proactive PSIDTS refresh succeeded` should appear at ~8-minute intervals.
 - `POST /api/gvbridge/cookies/refresh-from-browser` twice should leave **one** health-check timer and
-  **one** `GvSipTransport` (the F6/F7 gate). **⚠️ The log line to expect is inverted from the original
+  **one** `GvSipTransport` (the F6/F7 gate). **The log line to expect is inverted from the original
   plan text.** With SIP registered, expect
   `re-activation adopting new credentials — SIP transport is healthy, keeping it` (or
   `re-activation is a no-op …`), and `sipRegistered` must stay **true** across both refreshes with
@@ -572,13 +672,13 @@ after a variable cooldown. This was an **auth-freshness** defect. Google's rotat
 
 | # | Acceptance criterion | Result |
 |---|---|---|
-| 1 | `CookieRefreshIntervalMinutes` governs a real cadence; `0` disables it | ✅ 7 ticks exactly 8m00s apart; `0` produced zero proactive lines in 25 min while reactive recovery still worked |
-| 2 | One shared recovery, exactly one replay, caller gets 200 | ✅ full ladder captured live at 17:32:53 — rung 1 401 → rung 2 fail → rung 3 CDP → replay 200 |
-| 3 | Honest status during a 401; `available` stays true | ⚠️ **PARTIAL** — see Open verification items |
-| 4 | Window-blind 30-min soak, 0 × 502 | ✅ 932 requests, **0** non-200 |
-| 5 | `api2thread/list returned Unauthorized` drops toward 0 | ✅ **33/hr → 0/hr** |
-| 6 | F6/F7 leak gate: one health timer, one `GvSipTransport` | ✅ stronger than asked — one transport across **6** re-activations, and the health timer ticked twice exactly 30 min apart on its original anchor (**F7 fixed, measured**) |
-| 7 | Existing status-contract tests pass unchanged | ✅ |
+| 1 | `CookieRefreshIntervalMinutes` governs a real cadence; `0` disables it | 7 ticks exactly 8m00s apart; `0` produced zero proactive lines in 25 min while reactive recovery still worked |
+| 2 | One shared recovery, exactly one replay, caller gets 200 | full ladder captured live at 17:32:53 — rung 1 401 → rung 2 fail → rung 3 CDP → replay 200 |
+| 3 | Honest status during a 401; `available` stays true | **PARTIAL** — see Open verification items |
+| 4 | Window-blind 30-min soak, 0 × 502 | 932 requests, **0** non-200 |
+| 5 | `api2thread/list returned Unauthorized` drops toward 0 | **33/hr → 0/hr** |
+| 6 | F6/F7 leak gate: one health timer, one `GvSipTransport` | stronger than asked — one transport across **6** re-activations, and the health timer ticked twice exactly 30 min apart on its original anchor (**F7 fixed, measured**) |
+| 7 | Existing status-contract tests pass unchanged | |
 
 `RotateCookies` (rung 1) is **not inert** — it rotated for real 5 times — but its usefulness splits by
 cookie freshness: it works **proactively** (fresh cookies), and returns 401 **reactively** (already-stale
@@ -587,7 +687,7 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
 
 **Open verification items (not defects — merged knowingly):**
 
-- ⛔ **Inbound call ringing was never tested for this change.** The tester had no way to originate a call
+- **Inbound call ringing was never tested for this change.** The tester had no way to originate a call
   to the GV number, so test-plan step 8 did not run. This matters because **Task 3 touches `_sipTransport`
   teardown**, and because conditional reuse makes teardown *rare*, any ringing regression would be
   **intermittent and hard to trace** — it would only surface on the path where the transport was absent or
@@ -595,14 +695,14 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   true across 411 samples, one transport surviving six re-activations, and a server-side WebSocket close at
   17:07 that auto-recovered within the same second), but an actual ring is unverified. **Action: ring the
   phone once and confirm two-way audio.**
-- ⚠️ **AC-3 is partial: `authBlackout:true` was never observed live.** Zero `authBlackout:true` samples
+- **AC-3 is partial: `authBlackout:true` was never observed live.** Zero `authBlackout:true` samples
   across 411 status polls — not because the flag is broken, but because **recovery is faster than any
   practical sampling rate**: the one live blackout lasted **920 ms** (`lastApiAuthFailureAt 21:32:53.529`
   → `lastApiSuccessAt 21:32:54.449`) against a 4-second sampling floor. What *is* verified live:
   `available` never went false, and `lastApiAuthFailureAt` latched from a genuine data-plane 401. What
   remains **unit-test-only**: the derived `authBlackout` / `cookiesValid:false` / `degraded:true` trio
   during a *sustained* blackout.
-  **⚠️ Radio Console must be told: `authBlackout` may be true for well under a second.** A reconnecting
+  **Radio Console must be told: `authBlackout` may be true for well under a second.** A reconnecting
   banner bound naively to it will effectively never appear. Bind to it only with a minimum-display or
   debounce window, or drive the UI from a sustained-failure signal instead. This is in the handoff reply.
 
@@ -617,7 +717,7 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   gracefully (warns, returns `NotRotated`, backstop intact, no 502s resulted), so this is not urgent.
   **This is a box-side change and needs its own rollback story** — retire the cron (or raise its interval),
   then re-measure the 429 rate. (Finding **M1**, PR #72 UAT.)
-  > 🔴 **ESCALATED the same day — see the ACTIVE OUTAGE entry at the top of this file.** The cron is not
+  > **ESCALATED the same day — see the 2026-08-01 signed-out session entry above.** The cron is not
   > merely redundant now. Because B2's in-process refresh keeps the app's cookie lineage alive
   > **independently of Chrome's jar**, the two diverge — and a `refresh-from-browser` against a stale or
   > signed-out Chrome **overwrites working credentials with dead ones**. The cron fires exactly that path
@@ -630,7 +730,7 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   was ~7 minutes old. Pre-existing, not introduced by B2, but B2's re-activation path hits it more often,
   so the field is a **less trustworthy staleness signal** than the pre-fix traces implied. (Finding **L2**.)
 
-  > **Status 2026-09-08: ✅ RESOLVED — by REMOVAL, not by correction (PR #79).**
+  > **Status 2026-09-08: RESOLVED — by REMOVAL, not by correction (PR #79).**
   >
   > **The field is gone.** `psidtsAgeSeconds` has been removed from `/api/gvbridge/status`, and the
   > `_psidtsRefreshedAt` state behind it has been deleted along with every one of its write sites. It had
@@ -646,7 +746,7 @@ assumption. This resolves the "UNVERIFIED request shape" caveat previously carri
   > A deprecation notice does not stop that; absence does.
   >
   > **What replaces it:** `psidtsMintedAtUtc` — the instant Google actually minted the credential, carried
-  > on the cookie set, persisted across restarts, and unfakeable by a reload. ⚠ Its honest failure mode is
+  > on the cookie set, persisted across restarts, and unfakeable by a reload. Its honest failure mode is
   > `null` = UNKNOWN, which is **not** healthy and must never render as fresh or as `0`. That is a real
   > limitation, but it is the *opposite* failure mode from L2's: the new field can decline to answer,
   > where the old one answered reassuringly and wrongly.
@@ -669,7 +769,7 @@ F1-F7, design, owner decisions), [`docs/archive/gv-auth/gv-auth-blackout-b2-plan
 
 ## UI says "Ringing" but the bell never rings — INVITE sent to a stale HT801 address (RESOLVED 2026-07-29)
 
-**Status:** ✅ Resolved by the config-binder fix (PR #67, `fix/ht801-invite-target`) and hardened by the
+**Status:** Resolved by the config-binder fix (PR #67, `fix/ht801-invite-target`) and hardened by the
 registrar-binding PR (`feat/ht801-registrar-binding`).
 **Symptom (was):** An inbound call showed **Ringing** in the Radio.Web UI for the full 60-second window
 while the physical rotary phone bell stayed silent. Nothing on screen, in the API, or in the logs said
@@ -712,7 +812,7 @@ so it now agrees with the three signals above. Two caveats keep it second-choice
 
 ## Outbound: bridge started at placement → errno-101 blip + early-audio clipping (RESOLVED 2026-06-13)
 
-**Status:** ✅ Resolved by the outbound InCall-ordering PR (`fix/outbound-incall-ordering`).
+**Status:** Resolved by the outbound InCall-ordering PR (`fix/outbound-incall-ordering`).
 **Symptom (was):** On an outbound call (rotary → cell), the HT801↔GV audio bridge started and the
 state flipped to `InCall` at call *placement* — roughly 6–10s before the far end actually answered.
 This streamed audio while the far end was still ringing (potential clipped first syllable) and produced
@@ -733,9 +833,9 @@ starts it at most once.
 `State changed to: InCall` now logs at answer time (not ~6–10s earlier at placement); the `errno-101`
 cold-send blip is gone (or, if present, a single benign blip). Inbound ring + answer unaffected.
 
-## GV BYE not terminating calls (2026-05-25)
+## GV BYE not terminating calls (2026-05-25, RESOLVED 2026-10-03)
 
-**Status:** ✅ RESOLVED 2026-10-03 (PR #95). Root cause: as the UAS on inbound calls we REVERSED the Record-Route set, so our BYE traversed GV's proxies in the wrong order (RFC 3261 §12.1.1: the UAS keeps Record-Route order). With the order fixed GV answers our BYE `200 OK` and the cell ends in 2-3 s (UAT). The DTLS-close workaround below is kept as belt-and-braces. Original status: Workaround in place (SRTP media teardown forces Google timeout)
+**Status:** RESOLVED 2026-10-03 (PR #95). Root cause: as the UAS on inbound calls we REVERSED the Record-Route set, so our BYE traversed GV's proxies in the wrong order (RFC 3261 §12.1.1: the UAS keeps Record-Route order). With the order fixed GV answers our BYE `200 OK` and the cell ends in 2-3 s (UAT). The DTLS-close workaround below is kept as belt-and-braces. Original status: Workaround in place (SRTP media teardown forces Google timeout)
 **Impact:** When hanging up the rotary phone, the cell phone call ends after ~5-10 seconds (Google media timeout) instead of immediately.
 **Root cause:** Our SIP BYE over WebSocket is structurally correct but Google's SIP proxy silently ignores it. Likely a dialog state mismatch (From/To tags, Contact URI, or CSeq) that requires proper SIP tracing to diagnose.
 **Workaround:** On hangup, `GvSipTransport.HangupAsync()` now closes the DTLS-SRTP `RTCPeerConnection` immediately (sending `close_notify`) before sending the SIP BYE. This stops all media flow, and Google's RTP timeout detection terminates the far-end call within 5-10 seconds.
@@ -744,12 +844,12 @@ cold-send blip is gone (or, if present, a single benign blip). Inbound ring + an
 
 ## Idle SIP WebSocket never reconnects → inbound calls stop ringing (RESOLVED 2026-06-13)
 
-**Status:** ✅ Resolved by the keep-alive / auto-reconnect / honest-status PR (`fix/gv-ws-keepalive-reconnect`).
+**Status:** Resolved by the keep-alive / auto-reconnect / honest-status PR (`fix/gv-ws-keepalive-reconnect`).
 **Symptom (was):** After the line sat idle for ~256s, Google closed the idle SIP-over-WebSocket signaling socket. The receive loop just `break`d with no event and no reconnect, so inbound `INVITE`s never arrived and the rotary phone never rang — yet `/api/gvbridge/status` still reported `sipRegistered:true` on the dead socket.
 **Root cause:** No keep-alive was sent (Google advertises `keep=240` in the REGISTER 200-OK Via per RFC 6223), the channel raised no `Closed` event, and `GvSipTransport._registered` was never reset on socket death.
 **Fix:**
 - **Keep-alive (primary fix):** parse the RFC 6223 `keep=` frequency from the REGISTER 200-OK first Via (default 120s) and send the RFC 5626 §3.5.1 double-CRLF (`\r\n\r\n`) ping every `max(15, keep/2)`s, plus a secondary protocol-level `ClientWebSocket.Options.KeepAliveInterval` (defense-in-depth). A failed ping is treated as a dropped link and triggers reconnect.
 - **Auto-reconnect:** the channel now raises a `Closed` event (with a `WasIntentional` flag); the transport runs a single-flight (`Interlocked`-guarded) reconnect loop with capped exponential backoff (1,2,4,8,16,30s) + ±20% jitter, retrying indefinitely until success or disposal, reusing the existing `RegisterAsync` path. The old channel is disposed and its handlers unsubscribed before a new one is created (fixes a latent handler/channel leak).
 - **401 auth-recovery:** a real post-Digest 401/403 (or a 401/403 from `sipregisterinfo/get`) now escalates to a browser-less `RotateCookies` refresh of the rotating `__Secure-1PSIDTS/3PSIDTS` (primary), falling back to the CDP `cookies/refresh-from-browser` flow. Plain network drops do NOT trigger cookie work. (RotateCookies request shape is best-effort / unconfirmed — see `docs/research/gv-protocol-notes.md` §3.2 and the `GvCookieRotator` TODO.)
-- **Honest status:** `IsRegistered` is now `registered AND socket-connected`; `/api/gvbridge/status` adds `wsConnected`, `lastConnectedAt`, and `psidtsAgeSeconds` (the original four field names are unchanged). ⚠ *Historical record: `psidtsAgeSeconds` was **removed** on 2026-09-08 — see finding **L2** above. `wsConnected` and `lastConnectedAt` are unaffected.*
+- **Honest status:** `IsRegistered` is now `registered AND socket-connected`; `/api/gvbridge/status` adds `wsConnected`, `lastConnectedAt`, and `psidtsAgeSeconds` (the original four field names are unchanged). *Historical record: `psidtsAgeSeconds` was **removed** on 2026-09-08 — see finding **L2** above. `wsConnected` and `lastConnectedAt` are unaffected.*
 **Next step:** Confirm the exact `RotateCookies` request shape for the voice.google.com origin via a packet capture and tighten `GvCookieRotator` (fast-follow).

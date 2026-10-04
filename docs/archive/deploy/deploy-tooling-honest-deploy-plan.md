@@ -1383,7 +1383,7 @@ just know it before the first post-merge deploy. Excluding that tree is still th
 ### F4 ⛔ SECURITY, pre-existing and out of scope — a plaintext credential in a public repo
 
 `src/RotaryPhoneController.Server/appsettings.Production.json:45` commits
-`"HT801AdminPassword": "Admin001"`, and `docs/KNOWN-ISSUES.md` states this repo is public. It predates
+`"HT801AdminPassword": "<redacted>"`, and `docs/KNOWN-ISSUES.md` states this repo is public. It predates
 this PR and this PR does not touch the file's contents — but it does change how that file is published,
 which is the cheapest moment to notice. **Rotating a live credential is the owner's call**, so nothing
 here does it. Route it to an env var or user-secret and rotate the device password.
