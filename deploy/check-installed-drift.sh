@@ -78,6 +78,8 @@ case "$GROUP" in
       "gv-bridge-ensure.sh|${HOME}/bin/gv-bridge-ensure.sh"
       "gv-bridge-restart.sh|${HOME}/bin/gv-bridge-restart.sh"
       "gv-keyring-unlock.py|${HOME}/bin/gv-keyring-unlock.py"
+      "gnome-extension/gv-bridge-behind@rotaryphone/metadata.json|${HOME}/.local/share/gnome-shell/extensions/gv-bridge-behind@rotaryphone/metadata.json"
+      "gnome-extension/gv-bridge-behind@rotaryphone/extension.js|${HOME}/.local/share/gnome-shell/extensions/gv-bridge-behind@rotaryphone/extension.js"
     ) ;;
   relogin)
     PAIRS=(

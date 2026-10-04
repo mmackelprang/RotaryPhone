@@ -1,0 +1,7 @@
+{
+  "uuid": "gv-bridge-behind@rotaryphone",
+  "name": "GV bridge behind kiosk",
+  "description": "Keeps the RotaryPhone GV bridge Chrome window below every other window when it (re)launches, so Radio Console's kiosk stays on top. Matches only the bridge's --user-data-dir profile.",
+  "shell-version": ["46"],
+  "version": 1
+}

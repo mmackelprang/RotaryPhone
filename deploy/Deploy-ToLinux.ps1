@@ -814,8 +814,11 @@ $systemdDir = Join-Path $deployScripts "systemd"
 $shellScripts = @(Get-ChildItem -Path $deployScripts -File -ErrorAction SilentlyContinue |
                   Where-Object { $_.Extension -eq ".sh" -or $_.Extension -eq ".py" } | Sort-Object Name)
 $unitFiles = @(if (Test-Path $systemdDir) { Get-ChildItem -Path $systemdDir -File })
+# GNOME Shell extensions, one directory per uuid (install-gv-bridge.sh installs them).
+$extRoot = Join-Path $deployScripts "gnome-extension"
+$extFiles = @(if (Test-Path $extRoot) { Get-ChildItem -Path $extRoot -File -Recurse })
 
-if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
+if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0 -or $extFiles.Count -gt 0) {
   Write-Host "  Copying deploy scripts..." -ForegroundColor Yellow
   ssh $SshTarget "mkdir -p ${TargetPath}/deploy/systemd"
   if ($LASTEXITCODE -ne 0) { throw "failed to create ${TargetPath}/deploy on ${SshTarget} (exit $LASTEXITCODE)" }
@@ -834,6 +837,14 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
     if ($LASTEXITCODE -ne 0) { throw "failed to copy systemd unit $($unit.Name) (exit $LASTEXITCODE)" }
   }
 
+  foreach ($ext in $extFiles) {
+    $extRel = "gnome-extension/$($ext.Directory.Name)"
+    ssh $SshTarget "mkdir -p ${TargetPath}/deploy/${extRel}"
+    if ($LASTEXITCODE -ne 0) { throw "failed to create ${TargetPath}/deploy/${extRel} (exit $LASTEXITCODE)" }
+    scp ($ext.FullName -replace '\\', '/') "${SshTarget}:${TargetPath}/deploy/${extRel}/"
+    if ($LASTEXITCODE -ne 0) { throw "failed to copy extension file $($ext.Name) (exit $LASTEXITCODE)" }
+  }
+
   # Explicit modes rather than chmod +x: NTFS carries no permission bits, so the
   # mode on arrival is whatever the umask made it. 755 keeps the scripts runnable
   # without making them group-writable.
@@ -848,6 +859,7 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   if (@($shellScripts | Where-Object { $_.Extension -eq ".sh" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.sh" }
   if (@($shellScripts | Where-Object { $_.Extension -eq ".py" }).Count -gt 0) { $chmodCmds += "chmod 755 ${TargetPath}/deploy/*.py" }
   if ($unitFiles.Count -gt 0)    { $chmodCmds += "chmod 644 ${TargetPath}/deploy/systemd/*" }
+  if ($extFiles.Count -gt 0)     { $chmodCmds += "chmod 644 ${TargetPath}/deploy/gnome-extension/*/*" }
   if ($chmodCmds.Count -gt 0) {
     ssh $SshTarget ("set -e; " + ($chmodCmds -join "; "))
     $chmodDeployExit = $LASTEXITCODE
@@ -867,8 +879,10 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0) {
   # paths this script uses; Git\bin and msys64\usr\bin are not on the persistent PATH. ssh.exe and
   # scp.exe are safe -- they live in C:\WINDOWS\System32\OpenSSH on the MACHINE path.
   $manifestPath = Join-Path ([System.IO.Path]::GetTempPath()) "rp-shipped-manifest.sha256"
-  $manifestLines = foreach ($f in ($shellScripts + $unitFiles)) {
-    $rel = if ($f.Directory.Name -eq "systemd") { "systemd/$($f.Name)" } else { $f.Name }
+  $manifestLines = foreach ($f in ($shellScripts + $unitFiles + $extFiles)) {
+    $rel = if ($f.Directory.Name -eq "systemd") { "systemd/$($f.Name)" }
+           elseif ($f.Directory.Parent.Name -eq "gnome-extension") { "gnome-extension/$($f.Directory.Name)/$($f.Name)" }
+           else { $f.Name }
     "$((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
   }
   [System.IO.File]::WriteAllText($manifestPath, (($manifestLines -join "`n") + "`n"),

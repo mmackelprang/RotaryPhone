@@ -93,6 +93,41 @@ for f in "${FILES[@]}"; do
     log "installed ${dest}"
 done
 
+# --- GNOME Shell extension: keep the bridge window below the kiosk ----------
+# Installed and enabled here; GNOME Shell on Wayland only LOADS a new or changed extension at
+# the next login, so the first install takes effect after a re-login or reboot.
+EXT_UUID="gv-bridge-behind@rotaryphone"
+EXT_SRC="${DEPLOY_DIR}/gnome-extension/${EXT_UUID}"
+EXT_DEST="${HOME}/.local/share/gnome-shell/extensions/${EXT_UUID}"
+if [ -d "$EXT_SRC" ]; then
+    mkdir -p "$EXT_DEST"
+    for f in metadata.json extension.js; do
+        if [ -f "${EXT_DEST}/${f}" ] && cmp -s "${EXT_SRC}/${f}" "${EXT_DEST}/${f}"; then
+            log "extension ${f} already current"
+        else
+            install -m 644 "${EXT_SRC}/${f}" "${EXT_DEST}/${f}.new" && mv -f "${EXT_DEST}/${f}.new" "${EXT_DEST}/${f}" \
+                || fail "could not install ${EXT_DEST}/${f}"
+            log "installed extension ${f} (takes effect at next login)"
+        fi
+    done
+    if command -v gsettings >/dev/null 2>&1; then
+        enabled="$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo '@as []')"
+        case "$enabled" in
+            *"'${EXT_UUID}'"*) log "extension already enabled" ;;
+            *)
+                if [ "$enabled" = "@as []" ] || [ "$enabled" = "[]" ]; then new="['${EXT_UUID}']"
+                else new="${enabled%]}, '${EXT_UUID}']"; fi
+                gsettings set org.gnome.shell enabled-extensions "$new" && log "extension enabled (takes effect at next login)" \
+                    || log "⚠ could not enable ${EXT_UUID} via gsettings -- enable it by hand"
+                ;;
+        esac
+    else
+        log "⚠ gsettings not found -- ${EXT_UUID} installed but not enabled"
+    fi
+else
+    log "⚠ ${EXT_SRC} not shipped -- extension not installed"
+fi
+
 # --- Post-install: the INSTALLED ensure script reports the shipped config ----
 if [ "$(bash "${BIN_DIR}/gv-bridge-ensure.sh" --print-config)" != "$(bash "${DEPLOY_DIR}/gv-bridge-ensure.sh" --print-config)" ]; then
     fail "installed ${BIN_DIR}/gv-bridge-ensure.sh does not report the shipped config. Backups: *.bak-${STAMP}"
