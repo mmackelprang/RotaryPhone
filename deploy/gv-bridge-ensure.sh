@@ -157,6 +157,18 @@ mkdir -p "$(dirname "${LOG}")" 2>/dev/null || true
 # or a kill -9, so clear them before every launch attempt.
 rm -f "${PROFILE}"/Singleton* 2>/dev/null || true
 
+# Auto-login never types a password, so the login keyring (which holds Chrome's cookie key) stays
+# locked and Chrome blocks on an unlock prompt. Unlock it from the TPM-bound credential
+# /etc/credstore.encrypted/radio-keyring.cred (systemd-creds, root-only to decrypt). Best effort:
+# any failure leaves the keyring as it was and Chrome prompts exactly as before.
+KEYRING_CRED="/etc/credstore.encrypted/radio-keyring.cred"
+KEYRING_UNLOCK="${KEYRING_UNLOCK:-/opt/rotary-phone/deploy/gv-keyring-unlock.py}"
+if [ -r "${KEYRING_UNLOCK}" ] && sudo -n test -f "${KEYRING_CRED}" 2>/dev/null; then
+  sudo -n systemd-creds decrypt --name=radio-keyring "${KEYRING_CRED}" - 2>>"${LOG}" \
+    | timeout 20 python3 "${KEYRING_UNLOCK}" >> "${LOG}" 2>&1 \
+    || echo "$(ts) ensure: keyring unlock failed (Chrome may prompt)" >> "${LOG}"
+fi
+
 # --collect reaps the transient unit once Chrome reparents itself away from it,
 # so repeated launches do not accumulate failed scopes.
 systemd-run --user --collect google-chrome "${CHROME_ARGS[@]}" >> "${LOG}" 2>&1
