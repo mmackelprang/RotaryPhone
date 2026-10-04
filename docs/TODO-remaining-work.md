@@ -9,7 +9,7 @@ SIP messages (INVITE, OPTIONS). REGISTER works fine. The device shows
 **Root cause:** Unknown — likely corrupted internal state from the crash.
 **Fix:** Factory reset the HT801 and reconfigure:
 - Static IP: 192.168.86.250
-- Admin password: Admin001
+- Admin password: (set on the HT801 and in the box's own appsettings.Production.json; never committed)
 - SIP Server: 192.168.86.50
 - SIP User ID: 1000
 

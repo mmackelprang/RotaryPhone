@@ -110,3 +110,6 @@ __pycache__/
 
 # Claude Code agent worktrees (machine-local, often tens of GB).
 .claude/worktrees/
+
+# Superpowers brainstorm-session output (HTML snapshots, pid files).
+.superpowers/

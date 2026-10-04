@@ -9,6 +9,8 @@
   — use `pgrep -f "user-data-dir=$HOME/.config/gv-bridge-chrome"` or `/api/gvbridge/status`; the
   exit-code question is open on our side. **This ADR closes it.**
 - **Baseline:** `main` @ `3c2c892`.
+- **Amended 2026-10-04:** §9. The serializing lock waits rather than adding a third exit-0 outcome, and the
+  script is now installed by every deploy.
 
 ---
 
@@ -206,3 +208,20 @@ that row was filed in the first place.
 2. **Should a persistent launch failure alarm somewhere?** Out of scope here (the answer is not this
    script's exit code), but "Chrome has been uninstalled/broken for an hour" currently reaches nobody.
    Candidate: fold bridge-process liveness into `/api/gvbridge/status`, which RadioConsole already polls.
+
+## 9. Amendment 2026-10-04: the lock waits; the script is installed by every deploy
+
+The repo's rewrite of the script added a `flock` that serializes it against the nightly restart. As first
+written, `flock -n 9 || exit 0` made "someone else holds the lock" a **third** outcome arriving as 0.
+Radio Console called that "a contract that has run out of vocabulary", and it blocked installing the
+rewrite at all (session-alarm spec §8, open decision 4).
+
+**Decision 4 (owner ruling, 2026-10-04):** on a held lock the script **waits** (`flock -w 60`) and then
+runs the normal liveness check. On a 60 s timeout it logs and carries on unlocked, the same as the no-`flock`
+path. The script's outcomes stay exactly as before: *already up* (0) and *launched* (0). The §4 decision is
+unchanged: the exit code is still not a health signal. One cost: an invocation can now block for up to
+60 s while a restart or another launch is in progress.
+
+With that settled, `deploy/install-gv-bridge.sh` installs the script into `~/bin` on every deploy. It
+refuses unless the new script's `--print-config` Chrome flags match the running bridge's. Announced in
+the boundary doc's 2026-10-04 Change Log rows.
