@@ -159,8 +159,8 @@ for pair in "${PAIRS[@]}"; do
         echo "⚠ [drift-check] ${GROUP}: ${installed} is NOT INSTALLED."
         echo "    shipped sha256 ${have_ship}   mtime $(stamp_of "$shipped")"
         if [ "$GROUP" = "bridge" ]; then
-            echo "    setup-gvbridge.sh installs this and THE DEPLOY DOES NOT RUN IT."
-            echo "    ACTION: bash ${SHIP_DIR}/setup-gvbridge.sh  (see plan §0.2 before you do)."
+            echo "    install-gv-bridge.sh installs this on every deploy; it refuses on a Chrome-flag mismatch."
+            echo "    ACTION: bash ${SHIP_DIR}/install-gv-bridge.sh  (review any flag diff; --skip-flag-check accepts it)."
         elif [ "$GROUP" = "relogin" ]; then
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-auto-relogin.sh"
         else
@@ -174,7 +174,7 @@ for pair in "${PAIRS[@]}"; do
         echo "    shipped   sha256 ${have_ship}   mtime $(stamp_of "$shipped")"
         echo "    The box is executing an older file than the one this deploy shipped."
         if [ "$GROUP" = "bridge" ]; then
-            echo "    ACTION: bash ${SHIP_DIR}/setup-gvbridge.sh  (see plan §0.2 before you do)."
+            echo "    ACTION: bash ${SHIP_DIR}/install-gv-bridge.sh  (review any flag diff; --skip-flag-check accepts it)."
         elif [ "$GROUP" = "relogin" ]; then
             echo "    ACTION: bash ${SHIP_DIR}/install-gv-auto-relogin.sh"
         else

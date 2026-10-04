@@ -56,10 +56,9 @@ $SshTarget = "${TargetUser}@${TargetHost}"
 # there is no reason to discover a bad file halfway through a deploy: aborting at that
 # point would leave the new binary on disk with the old service still running.
 #
-# Today setup-gvbridge.sh is shipped but never executed by the deploy, so
-# gv-bridge-ensure.sh sits on the box as an inert file and its contents do not matter.
-# The moment the deploy runs the installer (plan Task 10, not yet built) that file
-# becomes an executed one, and --password-store stops being inert. On a profile
+# Since 2026-10-04 the deploy runs install-gv-bridge.sh, which installs
+# gv-bridge-ensure.sh into ~/bin, so its contents are EXECUTED on the box, and a
+# --password-store flag in it would not be inert. On a profile
 # already holding v11 cookies it makes the keyring-derived key unobtainable and Chrome
 # DISCARDS them: measured live at 45 v11 -> 16 v10, destroying the Google Voice
 # session. ~/.config/gv-bridge-chrome is exactly that profile. The gate lands first,
@@ -952,9 +951,9 @@ if (-not $NoRestart) {
 # --- Post-deploy: install the alarm, and report the installed state of both groups ---
 #
 # The alarm's installer is narrow and safe to run every deploy; it does NOT touch
-# gv-bridge-ensure.sh. That matters: the shipped copy of gv-bridge-ensure.sh adds
-# `flock ... || exit 0`, a THIRD outcome arriving as exit 0 on a cross-repo contract that
-# already cannot express two. See docs/archive/gv-auth/gv-session-alarm.md §0.2.
+# gv-bridge-ensure.sh. The bridge scripts are installed further down by
+# install-gv-bridge.sh (decision 4 settled the lock's exit-code question; see ADR
+# docs/architecture/decisions/2026-09-08-gv-bridge-ensure-exit-code.md §9).
 #
 # ⚠ Every shell construct below is on the FAR side of ssh, interpreted by the box's own
 # bash. Nothing here invokes a local interpreter.

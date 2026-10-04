@@ -7,9 +7,12 @@
 ## Answers
 
 1. **Does decline send an HFP reject?** It calls the HFP hang-up path, but nothing reaches the cell.
-   These calls do not arrive over HFP. They arrive as Google Voice SIP INVITEs (GVApi mode), and the
-   Bluetooth adapter on `radio` is a mock (`Mock: Terminating call via Bluetooth HFP` in the journal).
-   No cell is connected over HFP on `hci1`.
+   These calls do not arrive over HFP. They arrive as Google Voice SIP INVITEs (GVApi mode), and
+   **no phone is connected over HFP on `hci1`**: RotaryPhone's Bluetooth stack (`bt_manager`) runs,
+   but the Pixel is paired on your `hci0`, so the cross-adapter guard refuses it on `hci1` (boundary
+   rule #8). The `Mock: Terminating call via Bluetooth HFP` journal line comes from the legacy
+   adapter interface, which is a mock on Linux by design; it does not mean Bluetooth is off.
+   *(Corrected 2026-10-04 before delivery: an earlier draft said the adapter itself was a mock.)*
 2. **Why the cell keeps ringing.** Google Voice rings the rotary phone (our SIP leg) and the linked
    cell at the same time, as separate legs. Decline rejects only our leg:
    - The original reply was `480 Temporarily Unavailable` (2026-10-04 10:27:39).
