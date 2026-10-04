@@ -501,7 +501,7 @@ public sealed class GvSipTransport : IAsyncDisposable
 
         // Pre-200 (Ringing) inbound call: the dialog was never confirmed, so a BYE is wrong — there
         // is no established dialog to terminate. This is a LOCAL pre-200 hangup (e.g. the 60s ring
-        // timeout). Decline the INVITE with a 480 instead (DeclineIncomingCallAsync owns removal).
+        // timeout). Decline the INVITE with a 603 Decline instead (DeclineIncomingCallAsync owns removal).
         if (session.Status == CallStatusType.Ringing)
         {
             await DeclineIncomingCallAsync(callId, ct).ConfigureAwait(false);
@@ -1064,7 +1064,7 @@ public sealed class GvSipTransport : IAsyncDisposable
 
     /// <summary>
     /// Decline a ringing inbound call (handset not lifted, or local hangup before answer): send
-    /// 480 Temporarily Unavailable echoing the INVITE's Via headers, mark the session Completed,
+    /// 603 Decline echoing the INVITE's Via headers, mark the session Completed,
     /// remove + dispose it, and fire Completed. Used for a pre-200 local hangup (e.g. 60s ring
     /// timeout) — never a BYE, since there is no confirmed dialog to terminate.
     /// </summary>
@@ -1079,12 +1079,15 @@ public sealed class GvSipTransport : IAsyncDisposable
         }
 
 #pragma warning disable CA1848, CA1873
-        _logger.LogInformation("Declining ringing inbound call {CallId} — sending 480 Temporarily Unavailable", callId);
+        _logger.LogInformation("Declining ringing inbound call {CallId} — sending 603 Decline", callId);
 #pragma warning restore CA1848, CA1873
 
-        // 480 to the INVITE transaction — echo the INVITE's Via stack, To (with our dialog tag),
+        // 603 to the INVITE transaction — echo the INVITE's Via stack, To (with our dialog tag),
         // From, Call-ID, and CSeq per RFC 3261 §8.2.6 so GV accepts it and clears the transaction.
-        var decline = "SIP/2.0 480 Temporarily Unavailable\r\n";
+        // 603, not 480: GV forks the call to the linked cell too, and a 4xx fails only our branch
+        // (the cell kept ringing until GV's no-answer timer, 2026-10-04). A 6xx is a global failure
+        // that a forking proxy propagates to every branch (RFC 3261 §16.7).
+        var decline = "SIP/2.0 603 Decline\r\n";
         foreach (var via in session.InviteVias)
             decline += $"Via: {via}\r\n";
         decline +=
@@ -2396,7 +2399,7 @@ internal sealed class SipCallSession : IDisposable
     /// <summary>Our SDP answer for this inbound call, kept to answer in-dialog refresh re-INVITEs.</summary>
     public string? LocalSdpAnswer { get; set; }
 
-    // The INVITE's Via headers + To/From/CSeq, captured so a deferred DECLINE (480) can echo them
+    // The INVITE's Via headers + To/From/CSeq, captured so a deferred DECLINE (603) can echo them
     // per RFC 3261 §8.2.6 (a response MUST copy the request's To, From, Call-ID, CSeq, and Via).
     public List<string> InviteVias { get; set; } = [];
     public string? InviteToHeader { get; set; }
