@@ -15,8 +15,9 @@ Key rules:
 
 ## Repo map
 
-- `src/`: .NET 10 solution `RotaryPhoneController.sln` (Server, Core, GVBridge, GVTrunk, four test
-  projects) and the React UI in `src/RotaryPhoneController.Client` (builds into the Server's `wwwroot`).
+- `RotaryPhoneController.sln` (repo root, .NET 10): its projects live in `src/` (Server, Core, GVBridge,
+  GVTrunk, four test projects), beside the React UI in `src/RotaryPhoneController.Client` (builds into
+  the Server's `wwwroot`).
 - `deploy/`: `Deploy-ToLinux.ps1`, box-side scripts (bridge Chrome, session alarm, auto-relogin, drift
   check), systemd units, the GNOME Shell extension, and shell test harnesses in `deploy/tests/`.
 - `scripts/`: Python helpers, including `bt_manager.py` for the Bluetooth path.
