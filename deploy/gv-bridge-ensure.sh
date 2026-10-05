@@ -132,23 +132,18 @@ if [ "${1:-}" = "--print-config" ]; then
   exit 0
 fi
 
-# ⛔ EVERY PATH IN THIS SCRIPT EXITS 0, AND THAT IS A CROSS-REPO CONTRACT PROBLEM.
+# ⛔ EVERY PATH IN THIS SCRIPT EXITS 0, AND THAT IS A CROSS-REPO CONTRACT.
 #
 # Radio Console's KIOSK-2 launcher invokes this script and READS ITS EXIT CODE
-# ("invoke-and-probe only", their INTEGRATIONS.md:746). It already cannot tell
-# "already up" from "just launched" — both are 0. The flock below adds a THIRD
-# outcome, "someone else holds the lock", which is also 0. In Radio Console's
-# phrase, that is "a contract that has run out of vocabulary."
+# ("invoke-and-probe only", their INTEGRATIONS.md:746). The two outcomes,
+# "already up" and "just launched", are both 0, and the exit code is not a
+# health signal (ADR docs/architecture/decisions/2026-09-08-gv-bridge-ensure-exit-code.md).
+# The lock below must not add a third outcome; see its comment and ADR §9.
 #
-# ⛔ Do not fix this unilaterally, and do not deploy a changed exit code before it
-# is ANNOUNCED in docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md's Change Log.
-# A launcher that reads a code we quietly redefine is a silent breakage in the
-# other service.
-#
-# ⚠ And per spec §8, fixing this is a PREREQUISITE for deploying this file at
-# all: the shipped copy has flock, the installed copy (Aug 18) does not, so any
-# install of this script is what makes the third state real on the box.
-# Tracked: docs/plans/gv-session-alarm.md Task 18; spec §8 and §11 decision 4.
+# ⛔ Do not change an exit code unilaterally, and do not deploy a changed one
+# before it is ANNOUNCED in docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md's
+# Change Log. A launcher that reads a code we quietly redefine is a silent
+# breakage in the other service.
 
 # Serialize against the other launcher. The watchdog fires every 2 minutes and
 # the nightly recycle kills-then-relaunches, so without this the recycle's

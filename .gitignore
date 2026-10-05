@@ -103,3 +103,13 @@ src/RotaryPhoneController.WebUI/wwwroot/*.styles.css
 # and must not be shared. Project-wide permissions belong in .claude/settings.json,
 # which IS tracked. Untracked on 2026-09-09; it had been committed by mistake.
 .claude/settings.local.json
+
+# Python bytecode from the deploy/ helper scripts and their tests.
+__pycache__/
+*.py[co]
+
+# Claude Code agent worktrees (machine-local, often tens of GB).
+.claude/worktrees/
+
+# Superpowers brainstorm-session output (HTML snapshots, pid files).
+.superpowers/
