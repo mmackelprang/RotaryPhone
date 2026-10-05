@@ -58,6 +58,7 @@ Google Voice call-path work: the browser-bridge PRD, the GV trunk, the move to t
 | File | Title | Date | Original path |
 |---|---|---|---|
 | [PRD-GVBrowserBridge.md](gv-call-path/PRD-GVBrowserBridge.md) | PRD: Google Voice Browser Bridge | added 2026-03-15 | `docs/PRD-GVBrowserBridge.md` |
+| [SETUP-AND-TESTING.md](gv-call-path/SETUP-AND-TESTING.md) | RotaryPhone GV Bridge — Setup & User Testing Guide (Chrome-extension era; current content merged into `docs/SETUP-GVBridge.md`) | added 2026-03-15 | `docs/SETUP-AND-TESTING.md` |
 | [TODO-caller-cancel-deferred-answer.md](gv-call-path/TODO-caller-cancel-deferred-answer.md) | TODO — Caller-cancel-keeps-ringing (inbound) — future fix via deferred answer | added 2026-06-13 | `docs/TODO-caller-cancel-deferred-answer.md` |
 | [TODO-remaining-work.md](gv-call-path/TODO-remaining-work.md) | Remaining Work — RotaryPhone | added 2026-03-14 | `docs/TODO-remaining-work.md` |
 | [remaining-work.md](gv-call-path/remaining-work.md) | GV API — Remaining Work | added 2026-03-28 | `docs/api-research/remaining-work.md` |

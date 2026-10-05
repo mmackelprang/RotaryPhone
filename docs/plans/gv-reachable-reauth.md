@@ -341,7 +341,9 @@ checked, is recorded. An unacknowledged request is recorded as such.
 - `SETUP-GVBridge.md`: "When the GV session signs out". Auto-relogin is tried first when it is installed. What
   the Chat thread says when a human is needed and why (`FALLBACK_MODE`). The measured paths.
   `gv-reauth-show.sh`. That a human sign-in does **not** re-arm the breaker.
-- `SETUP-AND-TESTING.md:145`: replace `wmctrl -a Chrome`, which is absent and blind to Wayland windows.
+- ~~`SETUP-AND-TESTING.md:145`: replace `wmctrl -a Chrome`, which is absent and blind to Wayland windows.~~
+  Moot: that guide was archived on 2026-10-04 (`docs/archive/gv-call-path/SETUP-AND-TESTING.md`) and its
+  current content merged into `SETUP-GVBridge.md`, which does not use `wmctrl`.
 - `KNOWN-ISSUES.md`: an entry for the flow and its limits.
 
 **Acceptance:** `grep -n wmctrl docs/` returns only explanatory lines. Every runbook path has a Task 11 "yes".

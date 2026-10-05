@@ -130,7 +130,7 @@ This automatically:
 - Creates a desktop shortcut that runs the ensure script
 
 Full detail, including the CDP checks that prove the bridge is usable, is in
-[SETUP-GVBridge.md](SETUP-GVBridge.md).
+[SETUP-GVBridge.md](../../SETUP-GVBridge.md).
 
 Note: `--window-position` is a **no-op under Wayland**, so the window is not off-screen —
 the compositor places it, and stacking order is what keeps it behind the kiosk.
