@@ -113,3 +113,6 @@ __pycache__/
 
 # Superpowers brainstorm-session output (HTML snapshots, pid files).
 .superpowers/
+
+# Playwright MCP page snapshots and logs (written to the working directory on each browser call).
+/.playwright-mcp/
