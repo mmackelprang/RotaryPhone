@@ -3,8 +3,8 @@
 - **Status:** Proposed (research spike — owner review pending)
 - **Date:** 2026-06-20
 - **Author:** Architect (research spike)
-- **Arc:** `docs/plans/gv-voicemail-sms-arc.md`
-- **Supersedes / relates to:** `docs/superpowers/specs/2026-03-27-gv-api-migration-design.md`,
+- **Arc:** `docs/archive/gv-messaging/gv-voicemail-sms-arc.md`
+- **Supersedes / relates to:** `docs/archive/gv-call-path/2026-03-27-gv-api-migration-design.md`,
   `docs/api-research/signaler-protocol.md`, `docs/research/gv-protocol-notes.md`
 
 > **Honesty constraint (read first).** This spike is **grounded synthesis + design**, not live

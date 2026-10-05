@@ -137,7 +137,7 @@ check "a 2 followed by a 1 still exits 2" "2" "$rc"
 check "…and BOTH are reported, not just the last" "2" \
       "$(grep -c '⚠ \[drift-check\]' "$WORK/out.txt")"
 
-echo "=== group relogin (docs/plans/gv-auto-relogin.md Task 15): the same matrix ==="
+echo "=== group relogin (docs/archive/gv-auth/gv-auto-relogin.md Task 15): the same matrix ==="
 RELOGIN_FILES=(gv-auto-relogin.sh gv-auto-relogin-breaker.sh gv-cdp.py systemd/gv-auto-relogin.service systemd/gv-auto-relogin.timer)
 dest_of() { case "$1" in systemd/*) echo "$HOME/.config/systemd/user/${1#systemd/}" ;; *) echo "$HOME/bin/$1" ;; esac; }
 build_relogin() { # build_relogin [--with-driver]

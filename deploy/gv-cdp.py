@@ -43,7 +43,7 @@ import websocket  # websocket-client
 
 
 DEFAULT_PORT = 9224
-# 15 s per navigation: the spike's budget (docs/spikes/2026-09-09-gv-signin-cdp-recording.md,
+# 15 s per navigation: the spike's budget (docs/archive/gv-auth/2026-09-09-gv-signin-cdp-recording.md,
 # "Timings" — 3-5x the worst observed navigation of ~3-5 s). Measured, not chosen here.
 DEFAULT_TIMEOUT_S = 15.0
 

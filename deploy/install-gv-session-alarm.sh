@@ -16,7 +16,7 @@
 # third. Fixing that exit code is cross-boundary, must be announced in the
 # boundary doc's Change Log first, and is NOT in this arc. So the alarm does not
 # travel on that script's install path.
-# See docs/superpowers/specs/2026-09-09-gv-session-alarm-design.md §7 and §8.
+# See docs/archive/gv-auth/2026-09-09-gv-session-alarm-design.md §7 and §8.
 #
 # It is also narrow on purpose: setup-gvbridge.sh re-applies the autostart
 # entry, the desktop shortcut and `enable --now` on the watchdog timer. None of

@@ -1,6 +1,6 @@
 [Unit]
 Description=GV session alarm — transport an existing signal to a human
-Documentation=file:///opt/rotary-phone/docs/plans/gv-session-alarm.md
+Documentation=file:///opt/rotary-phone/docs/archive/gv-auth/gv-session-alarm.md
 
 [Service]
 Type=oneshot

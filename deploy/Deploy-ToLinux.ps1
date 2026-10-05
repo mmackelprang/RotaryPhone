@@ -473,7 +473,7 @@ if ($rsyncAvailable) {
   # auto-relogin then trips its breaker with "credential file missing" on a box that is
   # otherwise healthy. The file is populated by the owner, on the box, by hand
   # (docs/SETUP-GVBridge.md); nothing in this repo creates it.
-  # See docs/plans/gv-auto-relogin.md §0.2, and deploy/tests/repro-tar-clobber.sh for
+  # See docs/archive/gv-auth/gv-auto-relogin.md §0.2, and deploy/tests/repro-tar-clobber.sh for
   # the test that proves both exclusions, including the negative control.
   #
   # ⚠ The comment has to live up HERE: a comment line between backtick-continued
@@ -484,7 +484,7 @@ if ($rsyncAvailable) {
   # BY --delete, and the exclusions below are the entire defence. Known unprotected,
   # found 2026-09-09, re-listed against the box and the local publish tree 2026-09-25,
   # and NOT fixed here because it is out of the auto-relogin arc's scope
-  # (docs/plans/gv-auto-relogin.md §0.2, Q7):
+  # (docs/archive/gv-auth/gv-auto-relogin.md §0.2, Q7):
   #   /opt/rotary-phone/refresh-gv-cookies.sh   <- the load-bearing */20 cookie cron
   #   /opt/rotary-phone/mute-gv-browser.py
   #   /opt/rotary-phone/scripts/
@@ -526,7 +526,7 @@ if (-not $synced) {
   #     reported CHMOD's status -- 0 -- while tar had exited 2. The $LASTEXITCODE check below was
   #     real but structurally blind, and the deploy restarted the service on a half-extracted tree
   #     while printing success. Measured 2026-09-09; the old comment claiming this was already
-  #     handled was wrong. See docs/plans/deploy-tooling-honest-deploy-plan.md Defect 4.
+  #     handled was wrong. See docs/archive/deploy/deploy-tooling-honest-deploy-plan.md Defect 4.
   #   * An exit code says what a program CLAIMED. The sha256 check after the sync asks the box what
   #     it actually has, which is the only statement here that does not depend on a status being
   #     reported honestly.
@@ -618,7 +618,7 @@ if (-not $synced) {
     # OVERWRITE (the rsync branch's --exclude defends it against a DELETION; see the
     # comment there). The publish output never contains it, so today this is belt and
     # braces -- it exists so that a stray copy in the publish tree can never be shipped
-    # over the owner's file, or off the workstation. docs/plans/gv-auto-relogin.md §0.2.
+    # over the owner's file, or off the workstation. docs/archive/gv-auth/gv-auto-relogin.md §0.2.
     # UNANCHORED on purpose (no ./), matching the rsync exclusion, which also covers a
     # copy at any depth; an anchored one would still ship a nested stray copy.
     "find . -mindepth 1 -path ./.playwright -prune -o \( -type f -o -type l \) -print0 |" +
@@ -805,7 +805,7 @@ if (Test-Path $extensionDir) {
 $deployScripts = Join-Path $RepoRoot "deploy"
 $systemdDir = Join-Path $deployScripts "systemd"
 # ⚠ *.sh AND *.py, still with no -Recurse (deploy/tools/ and deploy/tests/ never ship).
-# The .py half exists for auto-relogin (docs/plans/gv-auto-relogin.md §7.4): the actuator
+# The .py half exists for auto-relogin (docs/archive/gv-auth/gv-auto-relogin.md §7.4): the actuator
 # needs deploy/gv-cdp.py on the box, and the owner-written sign-in driver
 # deploy/gv-relogin-signin.py ships the same way once it exists. Before this, a .py
 # placed in deploy/ was silently NOT shipped -- the exact trap Task 11's draft fell into
@@ -870,7 +870,7 @@ if ($shellScripts.Count -gt 0 -or $unitFiles.Count -gt 0 -or $extFiles.Count -gt
   # check-installed-drift.sh needs the REPO end of the chain. Comparing only shipped-vs-installed
   # is a check that runs, passes, and answers a different question: it truthfully reports "the two
   # copies match" and gets read as "the box has the current file". On a transfer that silently did
-  # nothing, two stale copies match. See docs/plans/gv-session-alarm.md §0.9.
+  # nothing, two stale copies match. See docs/archive/gv-auth/gv-session-alarm.md §0.9.
   #
   # ⚠ PowerShell-native by requirement, not by taste. Get-FileHash and WriteAllText, then scp as a
   # native command -- NO local bash/sh/wsl. `bash` on this machine's persistent PATH resolves to
@@ -998,7 +998,7 @@ if ($bridgeInstallExit -ne 0) { Write-Host "  the GV bridge installer FAILED or 
 if ($bridgeDriftExit -ne 0) { Write-Host "  (bridge tooling is not in sync -- see above. Not fatal.)" -ForegroundColor Yellow }
 
 # --- GV auto-relogin: install (timer DISABLED, breaker never armed) and report ---
-# docs/plans/gv-auto-relogin.md Task 15. Safe on every deploy: the installer never enables
+# docs/archive/gv-auth/gv-auto-relogin.md Task 15. Safe on every deploy: the installer never enables
 # the timer and never arms the breaker, and without the owner's sign-in driver the actuator
 # does nothing at all. ⚠ NON-FATAL, like the bridge group: auto-relogin is an optional
 # layer, and a problem in it must be LOUD without aborting a deploy that is otherwise fine.
@@ -1022,7 +1022,7 @@ if ($Logs) {
   # and nothing runs after this.
   #
   # ⛔ But do NOT read this comment as an endorsement of `-f` on this box.
-  # docs/plans/deploy-tooling-honest-deploy-plan.md is explicit: "Bounded reads only on
+  # docs/archive/deploy/deploy-tooling-honest-deploy-plan.md is explicit: "Bounded reads only on
   # this box -- never journalctl -f or tail -f. It is an N100 shared with Radio Console
   # and journald churn correlates with audible audio distortion there." This call
   # predates that policy and survives only because -Logs is opt-in and the operator is

@@ -9,7 +9,7 @@ using Xunit;
 namespace RotaryPhoneController.GVBridge.Tests.Adapters;
 
 /// <summary>
-/// Regression tests for docs/plans/gv-auth-first-refresh-anchor-and-cookie-lineage.md — the four
+/// Regression tests for docs/archive/gv-auth/gv-auth-first-refresh-anchor-and-cookie-lineage.md — the four
 /// defects behind the 83-minute guest-facing outage of 2026-09-08.
 ///
 /// Reuses the reflection scaffolding on <see cref="GVApiAdapterRecoveryTests"/> (CreateAdapter /

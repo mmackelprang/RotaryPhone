@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lane L harness for deploy/gv-cdp.py (docs/plans/gv-auto-relogin.md Tasks 3 and 11).
+# Lane L harness for deploy/gv-cdp.py (docs/archive/gv-auth/gv-auto-relogin.md Tasks 3 and 11).
 #
 # Drives a THROWAWAY local Chrome — its own temp profile, its own port, headless —
 # never the box's bridge browser and never Google. The tool under test is a

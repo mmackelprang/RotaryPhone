@@ -17,7 +17,7 @@ namespace RotaryPhoneController.Tests;
 /// promise.
 ///
 /// <para>
-/// docs/handoffs/radioconsole-bell-failure-reply.md §5 tells Radio Console that acking an
+/// docs/archive/radio-console/radioconsole-bell-failure-reply.md §5 tells Radio Console that acking an
 /// already-acknowledged failure, or a phone with no failure at all, both return
 /// <c>200 {"acknowledged": true}</c>, and invites them in those words to
 /// <b>"retry freely on a flaky network"</b>. The code did not do that — it returned

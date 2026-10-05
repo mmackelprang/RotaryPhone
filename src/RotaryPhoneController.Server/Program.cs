@@ -434,7 +434,7 @@ app.MapGVBridge();
 //
 // Why this exists: a bare MapFallbackToFile served index.html — HTTP 200, text/html — to every
 // unmatched /api/* request. A success code covering a failure. It cost a day of cross-repo
-// debugging in Sep 2026 (docs/prompts/2026-09-09-radioconsole-ui11-was-never-ours.md), because a
+// debugging in Sep 2026 (docs/archive/radio-console/2026-09-09-radioconsole-ui11-was-never-ours.md), because a
 // JSON caller probing a wrong path got 200 back and concluded the route existed.
 //
 // The body is the point. An empty 404 is what the caller could not act on; { error = ... } matches

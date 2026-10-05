@@ -2,7 +2,7 @@
 # =============================================================================
 # Install ONLY GV auto-relogin: the actuator, its breaker, the CDP helper, the owner's
 # sign-in driver (if shipped), and two systemd user units. Run from the deploy, and safe
-# to run by hand. docs/plans/gv-auto-relogin.md Task 15.
+# to run by hand. docs/archive/gv-auth/gv-auto-relogin.md Task 15.
 #
 #   bash /opt/rotary-phone/deploy/install-gv-auto-relogin.sh
 #   bash /opt/rotary-phone/deploy/install-gv-auto-relogin.sh --enable

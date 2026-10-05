@@ -2,9 +2,9 @@
 
 **Date:** 2026-09-25 (revised the same day after owner decisions)
 **Status:** proposed; O1 and O2 decided by the owner, other decisions open (§9). Nothing is implemented.
-**Designs:** Phase 2 of `2026-09-09-gv-session-alarm-design.md` §10 ("remote re-auth, scoped, not designed"),
+**Designs:** Phase 2 of `docs/archive/gv-auth/2026-09-09-gv-session-alarm-design.md` §10 ("remote re-auth, scoped, not designed"),
 as the **human fallback** for auto-relogin.
-**Works beside:** `2026-09-09-gv-auto-relogin-design.md` and PR #88 (`feat/gv-auto-relogin`), resumed 2026-09-25
+**Works beside:** `docs/archive/gv-auth/2026-09-09-gv-auto-relogin-design.md` and PR #88 (`feat/gv-auto-relogin`), resumed 2026-09-25
 under an **owner-written sign-in driver** (`docs/gv-relogin-driver-contract.md`, being written on #88).
 **Builds on:** PR #90 (merged, `54d77ca`): `BrowserRefreshOutcome.SignedOut` and the alarm condition
 `browser_signed_out`.
@@ -97,7 +97,7 @@ Every row was read over `ssh radio` today. Nothing was changed.
 
 ## 4. Evidence this design uses
 
-**From the attended spike** (`docs/spikes/2026-09-09-gv-signin-cdp-recording.md`, on #88):
+**From the attended spike** (`docs/archive/gv-auth/2026-09-09-gv-signin-cdp-recording.md`, on #88):
 
 | Fact | Used by |
 |---|---|

@@ -5,7 +5,7 @@
 - **Author:** Architect
 - **Request being answered:** RadioConsole `KIOSK-2` binds a `VOICE` amber row to this script's exit code
   (their `docs/queue/CROSS-REPO-HANDOFFS.md` item 8).
-- **Interim guidance already delivered:** `docs/handoffs/radioconsole-gv-voicemail-blackout-404-reply.md`
+- **Interim guidance already delivered:** `docs/archive/radio-console/radioconsole-gv-voicemail-blackout-404-reply.md`
   — use `pgrep -f "user-data-dir=$HOME/.config/gv-bridge-chrome"` or `/api/gvbridge/status`; the
   exit-code question is open on our side. **This ADR closes it.**
 - **Baseline:** `main` @ `3c2c892`.
@@ -195,7 +195,7 @@ that row was filed in the first place.
 
 - Boundary doc `docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md`, 2026-09-08 row — the open question this
   closes; amend per §6.
-- `docs/handoffs/radioconsole-gv-voicemail-blackout-404-reply.md` — where the interim guidance was
+- `docs/archive/radio-console/radioconsole-gv-voicemail-blackout-404-reply.md` — where the interim guidance was
   delivered.
 - Boundary doc 2026-08-01 rows — why a `VOICE` row must bind to `degraded`/`authBlackout` rather than
   `available`, and the measured 920 ms blackout that makes a naively-bound boolean useless.

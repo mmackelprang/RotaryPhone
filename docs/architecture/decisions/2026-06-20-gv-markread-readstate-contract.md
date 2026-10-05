@@ -3,10 +3,10 @@
 - **Status:** Accepted (contract ratified — **implementation HELD by owner**)
 - **Date:** 2026-06-20
 - **Author:** Architect (contract ratification)
-- **Arc:** `docs/plans/gv-voicemail-sms-arc.md`
+- **Arc:** `docs/archive/gv-messaging/gv-voicemail-sms-arc.md`
 - **Addendum to / extends:** `docs/architecture/decisions/2026-06-20-gv-voicemail-sms-radioconsole.md`
   (the parent ADR — §3.4 anticipated `api2thread/updateread`; §11 is the live-verification checklist).
-- **Request being answered:** `docs/prompts/radioconsole-gv-markread-readstate-request.md` (RadioConsole side).
+- **Request being answered:** `docs/archive/radio-console/radioconsole-gv-markread-readstate-request.md` (RadioConsole side).
 - **Reply produced:** `docs/handoffs/radioconsole-gv-markread-reply.md`.
 
 > **Honesty constraint (inherited from the parent ADR).** This ratifies the **gvbridge contract
@@ -346,7 +346,7 @@ cycle has a frozen target. The build is **HELD by the owner.**
   §6.3 (`GvMessagePushBridge` push pattern the event extends), §6.5 (the auth gate that auto-covers
   these routes), §11 (the live-verification checklist, now +1 step).
 - Reply to RadioConsole: `docs/handoffs/radioconsole-gv-markread-reply.md`.
-- Request being answered: `docs/prompts/radioconsole-gv-markread-readstate-request.md`.
+- Request being answered: `docs/archive/radio-console/radioconsole-gv-markread-readstate-request.md`.
 - Boundary doc Integration Points: `docs/prompts/RADIO-CONSOLE-BT-AUDIO-BOUNDARY.md` (updated — the two
   routes + `ReadStateChanged` event + a Change Log entry).
 

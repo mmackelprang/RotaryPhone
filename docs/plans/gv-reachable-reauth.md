@@ -2,7 +2,7 @@
 
 **Spec:** [`../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md`](../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md).
 Read it first. §5.1 (precedence: who acts when) is the heart of this plan.
-**Works beside:** [`gv-auto-relogin.md`](gv-auto-relogin.md) / PR #88, the primary path, resumed 2026-09-25 under an
+**Works beside:** [`gv-auto-relogin.md`](../archive/gv-auth/gv-auto-relogin.md) / PR #88, the primary path, resumed 2026-09-25 under an
 owner-written sign-in driver. **Builds on:** PR #90 (merged, `54d77ca`): `SignedOut` / `browser_signed_out`.
 **Date:** 2026-09-25 (revised the same day after owner decisions O1, O2 and O6). **Status:** planned, not started.
 
@@ -341,7 +341,9 @@ checked, is recorded. An unacknowledged request is recorded as such.
 - `SETUP-GVBridge.md`: "When the GV session signs out". Auto-relogin is tried first when it is installed. What
   the Chat thread says when a human is needed and why (`FALLBACK_MODE`). The measured paths.
   `gv-reauth-show.sh`. That a human sign-in does **not** re-arm the breaker.
-- `SETUP-AND-TESTING.md:145`: replace `wmctrl -a Chrome`, which is absent and blind to Wayland windows.
+- ~~`SETUP-AND-TESTING.md:145`: replace `wmctrl -a Chrome`, which is absent and blind to Wayland windows.~~
+  Moot: that guide was archived on 2026-10-04 (`docs/archive/gv-call-path/SETUP-AND-TESTING.md`) and its
+  current content merged into `SETUP-GVBridge.md`, which does not use `wmctrl`.
 - `KNOWN-ISSUES.md`: an entry for the flow and its limits.
 
 **Acceptance:** `grep -n wmctrl docs/` returns only explanatory lines. Every runbook path has a Task 11 "yes".

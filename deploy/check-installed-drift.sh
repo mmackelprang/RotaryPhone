@@ -21,7 +21,7 @@
 # "the box has the current file" — and on a deploy whose transfer silently did
 # nothing, two stale copies MATCH. The repo end of the chain is therefore
 # computed on the deploying machine and carried here in a manifest.
-# See docs/plans/gv-session-alarm.md §0.9 and §0.10.
+# See docs/archive/gv-auth/gv-session-alarm.md §0.9 and §0.10.
 #
 # ⚠ ABSENCE IS NOT SUCCESS. Every "cannot read" path exits 2 and says so. A
 # check that goes quiet when its subject is missing is the defect this repo

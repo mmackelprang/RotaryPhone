@@ -2,7 +2,7 @@
 
 > **Resumed 2026-09-25 under an owner-written sign-in driver.** See PR #88 and `docs/gv-relogin-driver-contract.md`
 > (being written on #88). The human fallback when auto-relogin cannot recover is
-> [`2026-09-25-gv-reachable-reauth-design.md`](2026-09-25-gv-reachable-reauth-design.md).
+> [`2026-09-25-gv-reachable-reauth-design.md`](../../superpowers/specs/2026-09-25-gv-reachable-reauth-design.md).
 
 **Date:** 2026-09-09 (evening)
 **Status:** shape approved by owner; not started

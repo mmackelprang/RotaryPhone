@@ -84,7 +84,7 @@ public class AlarmCopyDriftTests
     /// it tells a human to run.
     /// </summary>
     /// <remarks>
-    /// ⚠ DELIBERATELY NOT THE PLAN'S LIST. docs/plans/gv-auto-relogin.md Task 14 proposed guarding
+    /// ⚠ DELIBERATELY NOT THE PLAN'S LIST. docs/archive/gv-auth/gv-auto-relogin.md Task 14 proposed guarding
     /// four sentences from the actuator's reason texts. The alarm reproduces none of them statically
     /// (it quotes whatever the file says), so that guard would have pinned sentences to a file with
     /// nothing on the other side of the quotation — and three of the four live in actuator code that

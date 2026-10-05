@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The circuit breaker, tested adversarially. No box, no network, no credential.
-# docs/plans/gv-auto-relogin.md Task 6. Lane L: run on Linux (WSL is fine).
+# docs/archive/gv-auth/gv-auto-relogin.md Task 6. Lane L: run on Linux (WSL is fine).
 #
 # ⛔ EVERY CASE BELOW IS WRITTEN SO THAT THE UNSAFE BEHAVIOUR IS WHAT FAILS IT.
 # "TRIPPED is recorded" is a field. "A SECOND ATTEMPT IS REFUSED" is the property.

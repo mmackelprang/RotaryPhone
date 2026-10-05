@@ -12,7 +12,7 @@
 # ---------------------------------------------------------------------------
 # ⚠ CORRECTION 2026-09-09, measured while building this script.
 #
-# The plan (docs/plans/deploy-tooling-honest-deploy-plan.md, Task 1) proposed a
+# The plan (docs/archive/deploy/deploy-tooling-honest-deploy-plan.md, Task 1) proposed a
 # single case B whose fixture was a read-only parent directory holding a stale
 # backup, commented as "cp -f fails and is swallowed; `[ -f ]` then sees the
 # STALE file". Its assertions pass. Its explanation does not:
@@ -259,7 +259,7 @@ echo "D4: empty_dir_members=$d_empty  (expected 0 -- documented limitation, not 
 check "D4" $? "(empty directories are dropped; see the comment in Deploy-ToLinux.ps1)"
 echo ""
 
-echo "=== Case E/F: gv-account.conf survives BOTH deploy branches (docs/plans/gv-auto-relogin.md Task 8) ==="
+echo "=== Case E/F: gv-account.conf survives BOTH deploy branches (docs/archive/gv-auth/gv-auto-relogin.md Task 8) ==="
 # ⛔ Two branches, two different verbs, two different exclusions:
 #   tar   -> the exclusion prevents an OVERWRITE (the member is never in the stream)
 #   rsync -> the exclusion prevents a DELETION  (--delete removes what the source lacks)
