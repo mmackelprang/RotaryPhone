@@ -843,9 +843,12 @@ def main():
             adapter.Set("org.bluez.Adapter1", "Alias", dbus.String(args.alias, variant_level=1))
             adapter.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True, variant_level=1))
             adapter.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(0, variant_level=1))
-            adapter.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(True, variant_level=1))
+            # Off explicitly, not just left unset: BlueZ keeps Discoverable across a service
+            # restart, so omitting this leaves an adapter that was on still on until reboot.
+            # To be found by a phone, ask for it: PUT /api/bluetooth/adapter (set_adapter).
+            adapter.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(False, variant_level=1))
             adapter.Set("org.bluez.Adapter1", "Pairable", dbus.Boolean(True, variant_level=1))
-            log(f"Configured adapter {adapter_path}: alias={args.alias}, powered=on, discoverable=on")
+            log(f"Configured adapter {adapter_path}: alias={args.alias}, powered=on, discoverable=off")
         except dbus.exceptions.DBusException as e:
             log(f"Warning: could not configure adapter {adapter_path}: {e}")
 
