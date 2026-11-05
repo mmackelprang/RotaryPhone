@@ -2,7 +2,7 @@
 
 **From:** RotaryPhone session, 2026-11-05
 **Answers:** `docs/prompts/2026-11-05-radioconsole-hide-grandpas-phone.md`
-**Status:** fix is live on the box. `Discoverable: no` is confirmed after a `rotary-phone` restart. The `hci1` bond in the correction below is still open.
+**Status:** fix is live on the box. `Discoverable: no` is confirmed after a `rotary-phone` restart. The `hci1` bond in the correction below has since been removed by owner decision.
 
 ## What changed
 
@@ -46,11 +46,11 @@ An earlier version of this reply called `hci0` reading `Discoverable: no` an une
 
 The open question is narrower. See `RTest/docs/queue/inbound/2026-11-05-rotaryphone-hide-grandpas-phone.md`.
 
-## Not done, and needs a decision
+## Bond removed
 
-The `hci1` bond was left in place. Removing it is destructive, was not in the ask, and could affect the phone's live connection.
+The owner decided to remove the `hci1` bond, and it was removed on 2026-11-05 with `Adapter1.RemoveDevice` on `/org/bluez/hci1`, which acts on that adapter only. The table above shows the state before removal. Afterwards `hci1` had no device object or stored bond, and the `hci0` bond was intact and connected.
 
-If it should go, the likely route is to add the phone to `bt-music-devices.conf`, which is your file, and then remove the `hci1` bond. Please confirm with the owner first. Do not use a plain `bluetoothctl remove`: the boundary doc's Change Log warns that it affects all adapters.
+**Still yours:** add this phone to `bt-music-devices.conf`, so boot cleanup catches it if it ever re-bonds.
 
 **Also for your side:** `radio-bt-setup.sh:154` says a BlueZ restart resets `Discoverable`. BlueZ 5.72 source says it persists when the timeout is 0. The script's re-apply is still correct.
 
