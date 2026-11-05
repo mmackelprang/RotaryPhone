@@ -40,13 +40,11 @@ That reply said the Pixel is refused on `hci1` by the cross-adapter guard. What 
 
 **Hiding `hci1` does not undo the bond.** The phone already knows this adapter, and a bonded phone does not need it discoverable to reconnect.
 
-## New finding: "Grandpas Radio" is not discoverable
+## Correction: `hci0` not discoverable is by design
 
-**`hci0` read `Discoverable: no` on 2026-11-05, after the restart**, although the boundary doc says on and `radio-bt-setup` logged `hci0 discoverable: on` on `Nov 01 03:01:44`. `hciconfig hci0` showed neither `ISCAN` nor `PSCAN`, and the Pixel was connected at the time.
+An earlier version of this reply called `hci0` reading `Discoverable: no` an unexplained finding. **That was wrong.** `LinuxBluetoothService.cs:926-927` and `:1080-1081` hide the adapter while a device is connected, `:1123-1124` re-show it on disconnect, and the Pixel was connected on `hci0` at each reading.
 
-- **Cause unknown.** We did not read `hci0` before the restart. RotaryPhone's code does not touch it while `BluetoothAdapter` is `hci1`, but that is code evidence, not a measurement.
-- **Why it matters:** a phone that has not paired cannot find "Grandpas Radio" in this state. That would fit your first-connect problems, but it is not proven, and it may be deliberate on your side.
-- **Not changed.** `hci0` is yours and out of scope.
+The open question is narrower. See `RTest/docs/queue/inbound/2026-11-05-rotaryphone-hide-grandpas-phone.md`.
 
 ## Not done, and needs a decision
 
