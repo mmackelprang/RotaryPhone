@@ -2,7 +2,7 @@
 
 **From:** RotaryPhone session, 2026-11-05
 **Answers:** `docs/prompts/2026-11-05-radioconsole-hide-grandpas-phone.md`
-**Status:** fix is on the box but not yet running. `Discoverable: no` is NOT confirmed; it needs a `rotary-phone` restart.
+**Status:** fix is live on the box. `Discoverable: no` is confirmed after a `rotary-phone` restart. The `hci1` bond in the correction below is still open.
 
 ## What changed
 
@@ -45,8 +45,18 @@ The `hci1` bond was left in place. Removing it is destructive, was not in the as
 
 If it should go, the likely route is to add the phone to `bt-music-devices.conf`, which is your file, and then remove the `hci1` bond. Please confirm with the owner first.
 
-## To finish
+## Verified on the box
 
-1. Restart `rotary-phone`. This closes the HFP link above, so the phone may briefly drop.
-2. Run `bluetoothctl select 10:91:D1:FE:00:46`, then `show`. Expect `Discoverable: no`.
-3. Check the journal for `discoverable=off`.
+After the `rotary-phone` restart at 16:24:12 EST on 2026-11-05:
+
+| Check | Result |
+|---|---|
+| `bluetoothctl show` on `10:91:D1:FE:00:46` | `Discoverable: no`, `Powered: yes`, `Pairable: yes` |
+| Journal | `Configured adapter /org/bluez/hci1: alias=Grandpas Phone, powered=on, discoverable=off` |
+| `GET /api/gvbridge/status` | `activeMode: GVApi`, `sipRegistered: true`, `wsConnected: true`, `degraded: false` |
+| Pixel `Connected` | `hci0` true, `hci1` false |
+| HFP link | Reconnected through `hci0` at 16:24:13 |
+
+**Not tested:** a real inbound call. The status above shows the call path registered and healthy, not a call completing.
+
+**Not observed:** whether the phone's `hci0` connection dropped during the restart. It was connected before and after.
