@@ -33,6 +33,16 @@ public class GVBridgeConfig
     // Chrome DevTools Protocol (CDP) for automated cookie extraction
     public int ChromeCdpPort { get; set; } = 9224;
 
+    // In-process retries after Google REJECTS cookies pulled from the bridge Chrome by
+    // refresh-from-browser (browserRefreshOutcome = Stale). Comma-separated minutes, each measured
+    // from the previous attempt; the default lands its last try at +17 min, before the box cron's
+    // next */20 fire. Empty DISABLES the retries (kill switch, no redeploy needed).
+    // A STRING, not int[]: the configuration binder APPENDS bound array elements to an initialised
+    // default, so an int[] default of {2,5,10} overridden with [1] would bind as {2,5,10,1}.
+    // Why it exists: five Stale incidents 2026-10-16..2026-11-26 each healed at the next cron fire
+    // with no sign-in — a short-lived rejection, typically just after the box reboots.
+    public string StaleBrowserRetryDelaysMinutes { get; set; } = "2,5,10";
+
     // Browser-less rotating-cookie (PSIDTS) refresh via accounts.google.com/RotateCookies.
     // PRIMARY 401-recovery on the headless box; falls back to CDP refresh-from-browser.
     // Enabled by default but best-effort — see GvCookieRotator TODO (request shape unconfirmed).

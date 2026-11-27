@@ -250,8 +250,19 @@ esac
 
 # NotAttempted is only worth waking someone for if it PERSISTS — a single tick
 # during startup is normal. Three consecutive polls is 15 minutes.
+#
+# browser_stale is HELD too, and the hold is measured, not chosen. Five Stale incidents
+# (2026-10-16, 11-13, 11-15, 11-18, 11-26) each healed at the next 20-minute cron fire
+# with NO sign-in, and each one still posted "re-login needed". The 11-26 one was Stale
+# for 4 polls (one cron gap at the observed ~5.5-min spacing). The service now also
+# retries in-process at +2/+7/+17 min (StaleBrowserRetryScheduler), so a Stale that
+# survives 6 polls (~30 min) has outlived those retries AND a cron fire — that is the
+# one worth a human. The phone keeps working throughout a Stale; only a re-login is late.
+STALE_MIN_POLLS="${GV_ALARM_STALE_MIN_POLLS:-6}"
+case "$STALE_MIN_POLLS" in ''|*[!0-9]*|0) STALE_MIN_POLLS=6 ;; esac
 MIN_POLLS_TO_POST=1
 [ "$condition" = "not_attempted" ] && MIN_POLLS_TO_POST=3
+[ "$condition" = "browser_stale" ] && MIN_POLLS_TO_POST="$STALE_MIN_POLLS"
 
 if [ "$condition" = "$PENDING_CONDITION" ]; then
     PENDING_POLLS=$((PENDING_POLLS + 1))
