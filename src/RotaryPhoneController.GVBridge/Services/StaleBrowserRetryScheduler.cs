@@ -24,7 +24,9 @@ namespace RotaryPhoneController.GVBridge.Services;
 /// becomes SignedOut) after the chain, and the alarm escalates it exactly as before.
 /// </para>
 /// <para>
-/// Bounded on every axis: one chain at a time (a second rejection while one runs is a no-op), a fixed
+/// Bounded on every axis: one chain at a time (a second rejection while one runs is a no-op), ONE chain
+/// per Stale episode (after a chain exhausts, the next starts only once a browser set has been adopted
+/// since — so a real sign-out costs one chain, then the cron's one probe per 20 min as before), a fixed
 /// short list of delays, and the chain STOPS as soon as the outcome is no longer Stale for any reason —
 /// the cron healed it, Chrome went away, Google is throttling us — so it never competes with another
 /// path. Each attempt costs one CDP read and one live probe, the same as one cron fire.
@@ -52,6 +54,16 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly CancellationTokenSource _shutdown = new();
     private int _running;
+    private volatile bool _disposed;
+
+    // ONE CHAIN PER STALE EPISODE (pre-merge review M1). Without this, a session that is really dead
+    // starts a fresh chain on every cron rejection — four live probes per 20 minutes for the whole
+    // outage instead of one, and each probe briefly publishes the dead candidate into the live adapter
+    // (TryValidateCandidateAsync). A chain that EXHAUSTS records the browser-validation stamp it saw;
+    // a new chain is allowed only once that stamp has moved, i.e. a browser set has been adopted since,
+    // which is what ends an episode. Written only by the chain, before it releases _running.
+    private bool _exhausted;
+    private DateTime? _exhaustedAtValidation;
 
     /// <summary>Test seam: the chain most recently started, so a test can await its end.</summary>
     internal Task? CurrentChain { get; private set; }
@@ -103,6 +115,9 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
 
     public bool ScheduleAfterRejection()
     {
+        // A request racing shutdown must not 500 the cron on a disposed token source (review L3).
+        if (_disposed) return false;
+
         var delays = ParseDelays(_config.StaleBrowserRetryDelaysMinutes);
         if (delays.Count == 0)
         {
@@ -117,6 +132,16 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
             _logger.LogDebug("GVApi: stale-browser retry chain already running; not starting another");
             return false;
         }
+
+        if (_exhausted && _adapter.BrowserSessionValidatedAt == _exhaustedAtValidation)
+        {
+            Volatile.Write(ref _running, 0);
+            _logger.LogDebug(
+                "GVApi: stale-browser retries already exhausted for this Stale episode (no browser set "
+                + "adopted since); the box cron is the only retry until one is");
+            return false;
+        }
+        _exhausted = false;
 
         _logger.LogInformation(
             "GVApi: refresh-from-browser was rejected; retrying in-process after {Delays} min",
@@ -140,6 +165,9 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
                 if (await AttemptAsync(i + 1, delays.Count, elapsedMin, ct) == Next.Stop)
                     return;
             }
+
+            _exhaustedAtValidation = _adapter.BrowserSessionValidatedAt;
+            _exhausted = true;
 
             // Deliberately WARN, not ERROR: the service is still running on its own credential, the cron
             // keeps trying every 20 minutes, and the alarm owns escalation. Log what was tested.
@@ -201,6 +229,21 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
         }
 
         _adapter.NoteBrowserExtractionSucceeded();
+
+        // HOT PATH ONLY (review L1). With no live cookie set — a teardown/re-activation by another
+        // adopter, or a mode switch, landed during the extraction — SetCookiesAsync takes the COLD path,
+        // which writes an unprobed set to disk and calls SwitchModeAsync. That is the wrong thing for a
+        // background retry to do; whoever is re-activating owns that. Narrow, but it closes the window
+        // this caller adds. A shutdown mid-extraction stops here too, rather than letting a cancelled
+        // probe read as "REJECTED by Google" in the log the alarm quotes (review L3).
+        if (_adapter.CurrentCookieSet == null || ct.IsCancellationRequested)
+        {
+            _logger.LogInformation(
+                "GVApi: stale-browser retry {Attempt}/{Of} skipped — the adapter is not holding a live set "
+                + "(re-activating or switching mode) or the service is stopping", attempt, of);
+            return Next.Stop;
+        }
+
         var outcome = await _cookieManager.SetCookiesAsync(extraction.Cookies!, ct);
 
         switch (outcome)
@@ -230,6 +273,8 @@ public sealed class StaleBrowserRetryScheduler : IStaleBrowserRetryScheduler, ID
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _shutdown.Cancel();
         _shutdown.Dispose();
     }

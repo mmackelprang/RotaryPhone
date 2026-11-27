@@ -666,13 +666,20 @@ on its own credential.
 
 So the system heals it before asking for a human:
 
-1. The service retries `refresh-from-browser` itself at +2, +7 and +17 minutes
-   (`GVBridge:StaleBrowserRetryDelaysMinutes`), stopping as soon as the outcome is anything but
-   `Stale`. The journal says `stale browser session HEALED on in-process retry N/3` when it works.
+1. When a `refresh-from-browser` POST (the cron's, or a manual one) is rejected, the service retries it
+   itself at +2, +7 and +17 minutes (`GVBridge:StaleBrowserRetryDelaysMinutes`), stopping as soon as
+   the outcome is anything but `Stale`. One chain per Stale episode: once a chain has given up, the next
+   starts only after a browser set has been adopted again. A Stale recorded by the recovery ladder
+   (rung 3) is not retried in-process; the cron covers it. The journal says
+   `stale browser session HEALED on in-process retry N/3` when it works.
 2. The box cron (`*/20`) keeps retrying as before.
 3. The session alarm holds `browser_stale` for 6 consecutive polls (about 30 minutes;
    `GV_ALARM_STALE_MIN_POLLS` overrides it). A Stale that heals inside that window posts nothing.
    `browser_signed_out` and the other conditions are not held.
+
+⚠ The hold is in the alarm only. `gv-auto-relogin.sh` (timer disabled) still acts on the first Stale poll;
+add the same hold there before enabling it, or it will drive a sign-in for a session that would have
+healed on its own.
 
 If the alarm does post `browser_stale`, the session outlived both the retries and a cron fire: follow
 [When the Google session is signed out](#when-the-google-session-is-signed-out).

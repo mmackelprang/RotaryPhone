@@ -75,6 +75,8 @@ public class StaleBrowserRetrySchedulerTests
         var adapter = new GVApiAdapter(config, NullLogger<GVApiAdapter>.Instance, NullLoggerFactory.Instance);
         GVApiAdapterRecoveryTests.SetField(adapter, "_lastBrowserRefreshOutcome",
             GVApiAdapter.BrowserRefreshOutcome.Stale);
+        // A live, activated adapter: the scheduler only ever retries on the hot path.
+        AdoptBrowserSetAt(adapter, new DateTime(2026, 11, 26, 1, 0, 0, DateTimeKind.Utc));
 
         var cookieManager = new Mock<IGvCookieManager>();
         cookieManager.Setup(m => m.SetCookiesAsync(It.IsAny<GvCookieSet>(), It.IsAny<CancellationToken>()))
@@ -94,6 +96,11 @@ public class StaleBrowserRetrySchedulerTests
 
         return new Rig(scheduler, adapter, cookieManager, extractor, waits);
     }
+
+    /// <summary>What a successful browser adoption leaves behind: a live set stamped with its validation time.</summary>
+    private static void AdoptBrowserSetAt(GVApiAdapter adapter, DateTime validatedAtUtc)
+        => GVApiAdapterRecoveryTests.SetField(adapter, "_cookieSet",
+            Extracted.WithBrowserSessionValidatedAt(validatedAtUtc));
 
     private static void VerifyAdoptions(Rig rig, int times)
         => rig.CookieManager.Verify(
@@ -188,6 +195,67 @@ public class StaleBrowserRetrySchedulerTests
         await rig.ChainEnded();
 
         Assert.Equal(0, rig.Extractor.Calls);
+    }
+
+    [Fact]
+    public async Task OneChainPerStaleEpisode_ARealSignOutDoesNotRestartItEveryCronFire()
+    {
+        // Review M1: a dead session is rejected by every cron fire. Without the episode bound each one
+        // started a new chain — 4 probes per 20 min for the whole outage instead of 1.
+        var rig = Build(new Queue<SetCookiesOutcome>([SetCookiesOutcome.RejectedByGoogle]));
+
+        Assert.True(rig.Scheduler.ScheduleAfterRejection());
+        await rig.ChainEnded();
+        VerifyAdoptions(rig, 3);
+
+        // The next cron fire is rejected too: same episode, no new chain, no extra probes.
+        Assert.False(rig.Scheduler.ScheduleAfterRejection());
+        VerifyAdoptions(rig, 3);
+
+        // A browser set is adopted (the owner re-logged in); a later rejection is a NEW episode.
+        AdoptBrowserSetAt(rig.Adapter, new DateTime(2026, 11, 27, 9, 0, 0, DateTimeKind.Utc));
+        Assert.True(rig.Scheduler.ScheduleAfterRejection());
+        await rig.ChainEnded();
+        VerifyAdoptions(rig, 6);
+    }
+
+    [Fact]
+    public async Task NeverTakesTheColdPath_WhenTheAdapterHoldsNoLiveSet()
+    {
+        // Review L1: with no live set, SetCookiesAsync seeds disk unprobed and switches mode. A
+        // background retry must leave that to whoever is re-activating.
+        var rig = Build(new Queue<SetCookiesOutcome>([SetCookiesOutcome.Adopted]));
+        GVApiAdapterRecoveryTests.SetField(rig.Adapter, "_cookieSet", null);
+
+        Assert.True(rig.Scheduler.ScheduleAfterRejection());
+        await rig.ChainEnded();
+
+        Assert.Equal(1, rig.Extractor.Calls);
+        VerifyAdoptions(rig, 0);
+    }
+
+    [Fact]
+    public void AfterDispose_ARejectionStartsNothing_AndDoesNotThrow()
+    {
+        var rig = Build(new Queue<SetCookiesOutcome>([SetCookiesOutcome.Adopted]));
+        rig.Scheduler.Dispose();
+
+        Assert.False(rig.Scheduler.ScheduleAfterRejection());
+        rig.Scheduler.Dispose();
+    }
+
+    [Fact]
+    public void IsRegistered_SoTheControllerActuallyGetsOne()
+    {
+        // The controller's parameter is optional and null-tolerant, so a lost registration would turn
+        // the retries off with every other test still green.
+        var services = new Microsoft.Extensions.DependencyInjection.ServiceCollection();
+        RotaryPhoneController.GVBridge.Extensions.GVBridgeServiceExtensions.AddGVBridge(
+            services, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
+
+        var d = Assert.Single(services, s => s.ServiceType == typeof(IStaleBrowserRetryScheduler));
+        Assert.Equal(typeof(StaleBrowserRetryScheduler), d.ImplementationType);
+        Assert.Equal(Microsoft.Extensions.DependencyInjection.ServiceLifetime.Singleton, d.Lifetime);
     }
 
     [Theory]
