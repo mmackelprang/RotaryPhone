@@ -36,6 +36,10 @@ EOF
 GW_LOG="$WORK/gw.jsonl"
 export GV_ALARM_STATUS_URL=http://127.0.0.1:8098/api/gvbridge/status
 export GV_ALARM_STATE_FILE="$HOME/.local/state/gv-session-alarm.state"
+# Every case below except "Stale hold" was written when one Stale poll posted. Pin that, so
+# those cases keep testing what they were written to test (threading, copy, dedupe, relogin)
+# rather than the hold; the "Stale hold" section unsets it and tests the shipped default.
+export GV_ALARM_STALE_MIN_POLLS=1
 
 # A port nothing listens on. This is how "the service is down" is produced: a
 # REAL connection refusal, so the alarm takes the same curl-exit-status branch
@@ -980,6 +984,38 @@ serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
 check "relogin-data: a duplicated BREAKER_STATE is unreadable, not a guess" "yes:0" \
       "$(grep -q 'auto-relogin state=unreadable' "$WORK/err.txt" && echo yes || echo no):$(relogin_msgs | count)"
 rm -f "$GV_RELOGIN_STATE_FILE"
+
+echo "=== Stale hold — a Stale that heals within one cron gap posts NOTHING ==="
+# The shipped default (6 polls). Measured: 2026-11-26 was Stale for 4 polls and healed at
+# the next cron fire with no sign-in, yet posted a thread root, an ALERT and a RESOLVED.
+unset GV_ALARM_STALE_MIN_POLLS
+reset
+for _ in 1 2 3 4 5; do serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null; done
+check "hold: Stale x5 -> nothing sent" "0" "$(received | wc -l)"
+check "hold: …and the journal says it was held, not missed" "yes" \
+      "$(grep -q 'condition=browser_stale seen 5/6 consecutive polls; not posting yet' "$WORK/err.txt" && echo yes || echo no)"
+serve '{"browserRefreshOutcome":"Succeeded"}'; run >/dev/null
+check "hold: …then Succeeded -> still nothing sent (no RESOLVED for an alert never raised)" "0" \
+      "$(received | wc -l)"
+reset
+for _ in 1 2 3 4 5 6; do serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null; done
+check "hold: Stale x6 -> thread root + alert" "2" "$(delivered | wc -l)"
+check "hold: …the alert is browser_stale at alert severity" "alert" "$(sev_of browser_stale)"
+reset
+for _ in 1 2 3 4 5; do serve '{"browserRefreshOutcome":"Stale"}'; run >/dev/null; done
+serve '{"browserRefreshOutcome":"SignedOut","browserSessionStale":false}'; run >/dev/null
+check "hold: the hold is Stale-only — SignedOut after held Stale posts at once" "1" \
+      "$(delivered | jq -c 'select(.dedupe_key=="rotaryphone-gv-session-browser_signed_out")' | wc -l)"
+reset
+serve '{"browserRefreshOutcome":"Stale"}'
+for _ in 1 2 3 4 5; do GV_ALARM_STALE_MIN_POLLS=junk run >/dev/null; done
+check "hold: an unusable GV_ALARM_STALE_MIN_POLLS still holds (falls back to 6)…" "0" \
+      "$(received | wc -l)"
+GV_ALARM_STALE_MIN_POLLS=junk run >/dev/null
+check "hold: …and posts on the 6th, never 'never'" "2" \
+      "$(delivered | wc -l)"
+export GV_ALARM_STALE_MIN_POLLS=1
+reset
 
 echo "=== Housekeeping ==="
 check "no .new debris anywhere under HOME" "0" \

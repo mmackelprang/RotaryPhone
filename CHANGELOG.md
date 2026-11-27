@@ -11,6 +11,14 @@ extension bridge, a real Bluetooth HFP voice path) are described in [docs/archiv
 
 ## [Unreleased]
 
+### Changed
+
+- A `Stale` Google Voice browser session (Google refusing the cookies pulled from the box's Chrome)
+  now heals without a false alarm. The service retries `refresh-from-browser` itself at +2, +7 and
+  +17 minutes (`GVBridge:StaleBrowserRetryDelaysMinutes`), and the session alarm holds `browser_stale`
+  for 6 polls (about 30 minutes). Five such incidents between 2026-10-16 and 2026-11-26 each posted
+  "re-login needed" and each healed at the next cron fire with no sign-in.
+
 ## [1.0.0] - 2026-10-04
 
 ### Added

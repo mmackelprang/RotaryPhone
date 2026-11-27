@@ -507,6 +507,7 @@ the values operators most often need are:
 | `GVBridge:GvPhoneNumber` | — | Set it in the box's production file |
 | `GVBridge:CookieRefreshIntervalMinutes` | `8` | In-process credential refresh. `0` disables it |
 | `GVBridge:ChromeCdpPort` | `9224` | Must match the bridge's `--remote-debugging-port` |
+| `GVBridge:StaleBrowserRetryDelaysMinutes` | `2,5,10` | After Google rejects the bridge Chrome's cookies, retry `refresh-from-browser` in-process after these gaps (minutes, comma-separated). Empty disables it. See [When the alarm says Stale](#when-the-alarm-says-stale) |
 | `GVBridge:EnableSmsSend`, `EnableMarkRead` | `false` | Feature gates for writes to Google |
 | `GVBridge:InterServiceAuthKey` | empty | When set, `/api/gvbridge/*` requires the `X-RotaryPhone-Auth` header |
 | `RotaryPhone:Phones[].HT801IpAddress` | — | The only HT801 address key. See [HT801-ADDRESS.md](HT801-ADDRESS.md) |
@@ -533,7 +534,7 @@ There is no `GVBridge:HT801Ip` key; it was removed.
 | `~/.config/gv-bridge-chrome/` | Chrome profile holding the authenticated session |
 | `~/.config/gv-bridge-chrome.lock` | Launch lock shared by ensure and restart |
 | `~/.local/state/gv-bridge-restart.log` | Launch, restart and keyring-unlock log |
-| `/opt/rotary-phone/refresh-gv-cookies.sh` | Box-side cron (`*/20`) that calls `refresh-from-browser`. Not in this repo. Keep it: it is the only mechanism observed revalidating a stale browser session unattended |
+| `/opt/rotary-phone/refresh-gv-cookies.sh` | Box-side cron (`*/20`) that calls `refresh-from-browser`. Not in this repo. Keep it: it is the backstop that revalidates a stale browser session unattended; the in-process retries (`StaleBrowserRetryDelaysMinutes`) only shorten the wait for it |
 | `/opt/rotary-phone/ChromeExtension/` | Superseded extension source. Passed to Chrome but not loaded |
 | `~/bin/gv-session-alarm.sh` | Session alarm (`install-gv-session-alarm.sh`; timer off until `--enable`) |
 | `/opt/rotary-phone/gv-account.conf` | Auto-relogin credential, mode 600, owner-populated |
@@ -655,6 +656,33 @@ signed out.
 Recovery: sign in again in the bridge window, confirm the URL stays on `voice.google.com`, then
 `POST /api/gvbridge/cookies/refresh-from-browser`. Verify `sipRegistered:true` and
 `/api/gvbridge/sms/threads` → 200.
+
+### When the alarm says Stale
+
+`browserRefreshOutcome: Stale` means Chrome handed over cookies and Google refused them. It is usually
+**not** a sign-out. Five incidents between 2026-10-16 and 2026-11-26 each cleared at the next cron fire
+with no sign-in, typically just after the box or Chrome restarted. The phone keeps working throughout,
+on its own credential.
+
+So the system heals it before asking for a human:
+
+1. When a `refresh-from-browser` POST (the cron's, or a manual one) is rejected, the service retries it
+   itself at +2, +7 and +17 minutes (`GVBridge:StaleBrowserRetryDelaysMinutes`), stopping as soon as
+   the outcome is anything but `Stale`. One chain per Stale episode: once a chain has given up, the next
+   starts only after a browser set has been adopted again. A Stale recorded by the recovery ladder
+   (rung 3) is not retried in-process; the cron covers it. The journal says
+   `stale browser session HEALED on in-process retry N/3` when it works.
+2. The box cron (`*/20`) keeps retrying as before.
+3. The session alarm holds `browser_stale` for 6 consecutive polls (about 30 minutes;
+   `GV_ALARM_STALE_MIN_POLLS` overrides it). A Stale that heals inside that window posts nothing.
+   `browser_signed_out` and the other conditions are not held.
+
+⚠ The hold is in the alarm only. `gv-auto-relogin.sh` (timer disabled) still acts on the first Stale poll;
+add the same hold there before enabling it, or it will drive a sign-in for a session that would have
+healed on its own.
+
+If the alarm does post `browser_stale`, the session outlived both the retries and a cron fire: follow
+[When the Google session is signed out](#when-the-google-session-is-signed-out).
 
 ### Chrome shows a keyring prompt behind the kiosk
 

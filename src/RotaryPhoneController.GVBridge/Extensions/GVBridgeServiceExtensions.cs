@@ -28,6 +28,7 @@ public static class GVBridgeServiceExtensions
             sp => sp.GetRequiredService<GVApiAdapter>());
         services.AddSingleton<IGvCookieManager, GvCookieManager>();
         services.AddSingleton<ICdpCookieExtractor, CdpCookieExtractor>();
+        services.AddSingleton<IStaleBrowserRetryScheduler, StaleBrowserRetryScheduler>();
 
         // Read-side voicemail clients ride the adapter's authenticated HttpClient (PR1 seam) so they
         // inherit cookie rotation + the recovery ladder. CRITICAL (ADR §1.3 activation-order): the

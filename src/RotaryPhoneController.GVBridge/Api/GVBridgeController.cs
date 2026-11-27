@@ -19,6 +19,7 @@ public class GVBridgeController : ControllerBase
     private readonly GVBridgeConfig _config;
     private readonly ICdpCookieExtractor _cdpExtractor;
     private readonly ILogger<GVBridgeController> _logger;
+    private readonly IStaleBrowserRetryScheduler? _staleRetry;
 
     public GVBridgeController(
         ICallAdapterRegistry registry,
@@ -26,7 +27,8 @@ public class GVBridgeController : ControllerBase
         IGvCookieManager cookieManager,
         IOptions<GVBridgeConfig> config,
         ICdpCookieExtractor cdpExtractor,
-        ILogger<GVBridgeController> logger)
+        ILogger<GVBridgeController> logger,
+        IStaleBrowserRetryScheduler? staleRetry = null)
     {
         _registry = registry;
         _adapter = adapter;
@@ -34,6 +36,7 @@ public class GVBridgeController : ControllerBase
         _config = config.Value;
         _cdpExtractor = cdpExtractor;
         _logger = logger;
+        _staleRetry = staleRetry;
     }
 
     [HttpGet("status")]
@@ -213,6 +216,12 @@ public class GVBridgeController : ControllerBase
         switch (outcome)
         {
             case SetCookiesOutcome.RejectedByGoogle:
+                // Every observed rejection of the bridge Chrome (2026-10-16..11-26) healed on the next
+                // cron fire with no sign-in, so ask again sooner, in-process. Only for the bridge
+                // Chrome's Voice tab: a probe of another port or tab says nothing about that session.
+                if (isBridgeChrome)
+                    _staleRetry?.ScheduleAfterRejection();
+
                 return StatusCode(502, new
                 {
                     error = "Cookies were extracted from Chrome and Google refused them on a live probe "
